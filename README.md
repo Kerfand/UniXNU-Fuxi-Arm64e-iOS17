@@ -33,7 +33,6 @@
 ## 已知问题
 
 - 状态栏仍显示红色 `rdar` 条（`ios17/statusbar/FuxiStatusBar.c` 已上机，但尚未生效，待排查）。
-- 屏幕出现竖向花条，怀疑与 DSI 亮度命令有关，待排查。
 - `offline-legacy-logical-width/height`（逻辑分辨率缩放）代码保留但未启用。
 - mobileassetd 仍有崩溃。
 
