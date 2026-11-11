@@ -1,0 +1,1 @@
+../../device/scripts/check-xnu-panic-screen.py

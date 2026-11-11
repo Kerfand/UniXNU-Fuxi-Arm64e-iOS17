@@ -1,0 +1,2 @@
+433316d68a6fd3cf43aabe6d76cdf55540f2467b fuxi: arm64e xnu-10063 kernel for the iOS 17.7 21H16 kernelcache
+https://github.com/SadNutWall/UniXNU.git

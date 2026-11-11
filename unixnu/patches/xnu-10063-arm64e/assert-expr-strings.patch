@@ -1,0 +1,51 @@
+diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
+--- a/osfmk/kern/assert.h
++++ b/osfmk/kern/assert.h
+@@ -94,9 +94,9 @@
+ #if     MACH_ASSERT
+ 
+ #define assert(ex)  \
+-	(__builtin_expect(!!((ex)), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, # ex))
++	(__builtin_expect(!!((ex)), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, "" /* assert-expr-strings.patch */))
+ #define assertf(ex, fmt, args...) \
+-	(__builtin_expect(!!((ex)), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, # ex, ##args))
++	(__builtin_expect(!!((ex)), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, "" /* assert-expr-strings.patch */, ##args))
+ 
+ /*
+  * Each of the following three macros takes three arguments instead of one for
+@@ -145,9 +145,9 @@
+ #elif APPLE_KEXT_ASSERTIONS && !XNU_KERNEL_PRIVATE      /* MACH_ASSERT */
+ 
+ #define assert(ex)  \
+-	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, # ex))
++	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, "" /* assert-expr-strings.patch */))
+ #define assertf(ex, fmt, args...) \
+-	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, # ex, ##args))
++	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, "" /* assert-expr-strings.patch */, ##args))
+ #define __assert_only
+ 
+ #else                           /* APPLE_KEXT_ASSERTIONS && !XNU_KERNEL_PRIVATE */
+diff --git a/bsd/sys/mcache.h b/bsd/sys/mcache.h
+--- a/bsd/sys/mcache.h
++++ b/bsd/sys/mcache.h
+@@ -52,7 +52,7 @@
+  * Unlike VERIFY(), ASSERT() is evaluated only in DEBUG/DEVELOPMENT build.
+  */
+ #define VERIFY(EX)      \
+-	((void)(__probable((EX)) || assfail(#EX, __FILE__, __LINE__)))
++	((void)(__probable((EX)) || assfail("" /* assert-expr-strings.patch */, __FILE__, __LINE__)))
+ #if (DEBUG || DEVELOPMENT)
+ #define ASSERT(EX)      VERIFY(EX)
+ #else
+diff --git a/bsd/skywalk/core/skywalk_common.h b/bsd/skywalk/core/skywalk_common.h
+--- a/bsd/skywalk/core/skywalk_common.h
++++ b/bsd/skywalk/core/skywalk_common.h
+@@ -60,7 +60,7 @@
+ 
+ #define VERIFY(EX) do {                                                 \
+ 	if (__improbable(!(EX))) {                                      \
+-	        SK_ABORT("assertion failed: " #EX);                     \
++	        SK_ABORT("assertion failed: " "" /* assert-expr-strings.patch */);                     \
+ 	/* NOTREACHED */                                        \
+ 	        __builtin_unreachable();                                \
+ 	}                                                               \

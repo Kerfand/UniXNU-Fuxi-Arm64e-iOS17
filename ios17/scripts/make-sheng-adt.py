@@ -1,0 +1,1 @@
+../../device/scripts/make-sheng-adt.py

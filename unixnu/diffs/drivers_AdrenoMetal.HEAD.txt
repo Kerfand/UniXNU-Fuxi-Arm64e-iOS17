@@ -1,0 +1,2 @@
+a0f0287be80a5d8aef5c6b97a6cab62129e152bd feat(plugin): set the GPU log switch from log-gpu=1
+https://github.com/UniXNU/AdrenoMetal.git

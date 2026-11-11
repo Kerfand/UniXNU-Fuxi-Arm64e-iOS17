@@ -1,0 +1,26 @@
+diff --git a/osfmk/arm/machine_routines_apple.c b/osfmk/arm/machine_routines_apple.c
+--- a/osfmk/arm/machine_routines_apple.c
++++ b/osfmk/arm/machine_routines_apple.c
+@@ -172,12 +172,22 @@
+ /**
+  * Returns the default JOP key.
+  */
++#if !HAS_PARAVIRTUALIZED_PAC && !defined(HAS_NATIVE_PAC)
++#error native-jop-key.patch: HAS_NATIVE_PAC is not visible in machine_routines_apple.c
++#endif
+ uint64_t
+ ml_default_jop_pid(void)
+ {
+ #if HAS_PARAVIRTUALIZED_PAC
+ 	vmapple_pac_get_default_keys();
+ 	return vmapple_default_jop_pid;
++#elif HAS_NATIVE_PAC
++	/*
++	 * native-jop-key.patch: one key set is shared by EL0/EL1 and jop_pid is never programmed into the CPU,
++	 * so this is only a token. It must be nonzero: the shared region slide signs auth pointers only when
++	 * the region key is nonzero, and the platform region uses this value as its key.
++	 */
++	return 0x554e49584e55ULL; /* "UNIXNU" */
+ #else
+ 	return 0;
+ #endif /* HAS_PARAVIRTUALIZED_PAC */

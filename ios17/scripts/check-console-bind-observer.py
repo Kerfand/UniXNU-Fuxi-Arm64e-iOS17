@@ -1,0 +1,1 @@
+../../device/scripts/check-console-bind-observer.py

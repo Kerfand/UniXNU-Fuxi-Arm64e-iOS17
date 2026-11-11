@@ -1,0 +1,232 @@
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -2694,6 +2694,180 @@
+ 	return internal_io_service_match_property_table(service, matching, matchingCnt, matches);
+ }
+ 
++/* iokit-user-probe.patch: observe what user processes look up / open / call before the first frame. */
++extern "C" void proc_selfname(char * buf, int size);
++static int unixnu_iokit_probe_mode = -1;
++static uint32_t unixnu_iokit_probe_lines;
++
++static bool
++unixnu_iokit_probe_begin(char * name, int size)
++{
++	if (unixnu_iokit_probe_mode < 0) {
++		uint32_t v = 0;
++		unixnu_iokit_probe_mode = PE_parse_boot_argn("unixnu-iokit-probe", &v, sizeof(v)) ? (int)v : 0;
++	}
++	if (unixnu_iokit_probe_mode <= 0 || unixnu_iokit_probe_lines >= 1200) {
++		return false;
++	}
++	name[0] = 0;
++	proc_selfname(name, size);
++	return true;
++}
++
++static bool
++unixnu_iokit_probe_watched(const char * name)
++{
++	return !strcmp(name, "backboardd") || !strcmp(name, "SpringBoard");
++}
++
++static bool
++unixnu_iokit_probe_keyword(const char * s)
++{
++	static const char * const keys[] = { "Accel", "GPU", "AGX", "Framebuffer", "Display", "Metal", "Adreno", "Surface", "IOMFB" };
++	size_t len = strlen(s);
++	for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
++		if (strnstr(s, keys[i], len)) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static void
++unixnu_iokit_probe_value(char * buf, size_t size, OSObject * v, int depth)
++{
++	OSString *     str;
++	OSNumber *     num;
++	OSDictionary * dict;
++	OSArray *      array;
++	char           tmp[24];
++
++	if (!v) {
++		strlcat(buf, "null", size);
++	} else if ((str = OSDynamicCast(OSString, v))) {
++		strlcat(buf, str->getCStringNoCopy(), size);
++	} else if ((num = OSDynamicCast(OSNumber, v))) {
++		snprintf(tmp, sizeof(tmp), "%#llx", num->unsigned64BitValue());
++		strlcat(buf, tmp, size);
++	} else if (v == kOSBooleanTrue) {
++		strlcat(buf, "true", size);
++	} else if (v == kOSBooleanFalse) {
++		strlcat(buf, "false", size);
++	} else if ((dict = OSDynamicCast(OSDictionary, v)) && depth < 3) {
++		strlcat(buf, "{", size);
++		__block bool first = true;
++		dict->iterateObjects(^bool (const OSSymbol * key, OSObject * obj) {
++			if (!first) {
++			        strlcat(buf, " ", size);
++			}
++			first = false;
++			strlcat(buf, key->getCStringNoCopy(), size);
++			strlcat(buf, "=", size);
++			unixnu_iokit_probe_value(buf, size, obj, depth + 1);
++			return false;
++		});
++		strlcat(buf, "}", size);
++	} else if ((array = OSDynamicCast(OSArray, v)) && depth < 3) {
++		strlcat(buf, "[", size);
++		for (unsigned i = 0; i < array->getCount(); i++) {
++			if (i) {
++				strlcat(buf, ",", size);
++			}
++			unixnu_iokit_probe_value(buf, size, array->getObject(i), depth + 1);
++		}
++		strlcat(buf, "]", size);
++	} else {
++		strlcat(buf, "<", size);
++		strlcat(buf, v->getMetaClass()->getClassName(), size);
++		strlcat(buf, ">", size);
++	}
++}
++
++static void
++unixnu_iokit_probe_match(const char * what, OSDictionary * dict)
++{
++	char name[32];
++	char buf[384];
++
++	if (!dict || !unixnu_iokit_probe_begin(name, sizeof(name))) {
++		return;
++	}
++	buf[0] = 0;
++	unixnu_iokit_probe_value(buf, sizeof(buf), dict, 0);
++	if (!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(buf)) {
++		return;
++	}
++	IOService * now = IOService::copyMatchingService(dict);
++	unixnu_iokit_probe_lines++;
++	printf("unixnu iokit: %s[%d] %s %s -> %s\n", name, proc_selfpid(), what, buf,
++	    now ? now->getMetaClass()->getClassName() : "none");
++	OSSafeReleaseNULL(now);
++}
++
++static void
++unixnu_iokit_probe_open(IOService * service, uint32_t type, IOReturn res, IOUserClient * client)
++{
++	char name[32];
++
++	if (!unixnu_iokit_probe_begin(name, sizeof(name))) {
++		return;
++	}
++	const char * cls = service->getMetaClass()->getClassName();
++	if (!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) {
++		return;
++	}
++	unixnu_iokit_probe_lines++;
++	printf("unixnu iokit: %s[%d] open %s type %u -> %#x %s\n", name, proc_selfpid(), cls, type, res,
++	    (res == kIOReturnSuccess && client) ? client->getMetaClass()->getClassName() : "-");
++}
++
++static struct {
++	const OSMetaClass * meta;
++	uint32_t            selector;
++	uint32_t            count;
++	IOReturn            ret;
++} unixnu_iokit_probe_calls[160];
++
++static void
++unixnu_iokit_probe_method(const char * kind, IOUserClient * client, uint32_t selector, IOReturn ret,
++    uint32_t scalars, uint32_t structSize)
++{
++	char name[32];
++
++	if (!unixnu_iokit_probe_begin(name, sizeof(name))) {
++		return;
++	}
++	const OSMetaClass * meta = client->getMetaClass();
++	const char * cls = meta->getClassName();
++	if (!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) {
++		return;
++	}
++	unsigned i;
++	for (i = 0; i < sizeof(unixnu_iokit_probe_calls) / sizeof(unixnu_iokit_probe_calls[0]); i++) {
++		if (!unixnu_iokit_probe_calls[i].meta) {
++			unixnu_iokit_probe_calls[i].meta = meta;
++			unixnu_iokit_probe_calls[i].selector = selector;
++			unixnu_iokit_probe_calls[i].ret = ret;
++			break;
++		}
++		if (unixnu_iokit_probe_calls[i].meta == meta && unixnu_iokit_probe_calls[i].selector == selector) {
++			break;
++		}
++	}
++	uint32_t n = 0;
++	if (i < sizeof(unixnu_iokit_probe_calls) / sizeof(unixnu_iokit_probe_calls[0])) {
++		n = ++unixnu_iokit_probe_calls[i].count;
++		bool changed = unixnu_iokit_probe_calls[i].ret != ret;
++		unixnu_iokit_probe_calls[i].ret = ret;
++		if (n > 3 && !changed && (n & (n - 1)) != 0) {
++			return;
++		}
++	}
++	unixnu_iokit_probe_lines++;
++	printf("unixnu iokit: %s[%d] %s %s sel %u -> %#x (in %u scalars %u bytes) #%u\n", name, proc_selfpid(), kind, cls,
++	    selector, ret, scalars, structSize, n);
++}
++
+ static kern_return_t
+ internal_io_service_get_matching_services(
+ 	mach_port_t main_port,
+@@ -2715,6 +2889,7 @@
+ 	if ((dict = OSDynamicCast( OSDictionary, obj))) {
+ 		IOTaskRegistryCompatibilityMatching(current_task(), dict);
+ 		*existing = IOUserIterator::withIterator(IOService::getMatchingServices( dict ));
++		unixnu_iokit_probe_match("services", dict);
+ 		kr = kIOReturnSuccess;
+ 	} else {
+ 		kr = kIOReturnBadArgument;
+@@ -2798,6 +2973,7 @@
+ 	if ((dict = OSDynamicCast( OSDictionary, obj))) {
+ 		IOTaskRegistryCompatibilityMatching(current_task(), dict);
+ 		*service = IOService::copyMatchingService( dict );
++		unixnu_iokit_probe_match("service", dict);
+ 		kr = *service ? kIOReturnSuccess : kIOReturnNotFound;
+ 	} else {
+ 		kr = kIOReturnBadArgument;
+@@ -2929,6 +3105,7 @@
+ 
+ 		notify = IOService::addMatchingNotification( sym, dict,
+ 		    &userNotify->_handler, userNotify );
++		unixnu_iokit_probe_match(notification_type, dict);
+ 		if (notify) {
+ 			*notification = userNotify;
+ 			userNotify->setNotification( notify );
+@@ -4427,6 +4604,7 @@
+ #endif
+ 		res = service->newUserClient( owningTask, (void *) owningTask,
+ 		    connect_type, propertiesDict, &client );
++		unixnu_iokit_probe_open(service, connect_type, res, client);
+ 
+ 		if (propertiesDict) {
+ 			propertiesDict->release();
+@@ -5113,6 +5291,7 @@
+ 	if (kIOReturnSuccess == ret) {
+ 		ret = client->callExternalMethod( selector, &args );
+ 	}
++	unixnu_iokit_probe_method("method", client, selector, ret, scalar_inputCnt, inband_inputCnt);
+ 
+ 	*scalar_outputCnt = args.scalarOutputCount;
+ 	*inband_outputCnt = args.structureOutputSize;
+@@ -5227,6 +5406,7 @@
+ 	if (kIOReturnSuccess == ret) {
+ 		ret = client->callExternalMethod( selector, &args );
+ 	}
++	unixnu_iokit_probe_method("async", client, selector, ret, scalar_inputCnt, inband_inputCnt);
+ 
+ 	*scalar_outputCnt = args.scalarOutputCount;
+ 	*inband_outputCnt = args.structureOutputSize;

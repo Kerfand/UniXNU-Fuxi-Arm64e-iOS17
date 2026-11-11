@@ -1,0 +1,719 @@
+From ddb7afa0046668b3d44efe0cc5c986f1c442644d Mon Sep 17 00:00:00 2001
+From: Kerfand <Kerfand@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 14:39:38 +0800
+Subject: [PATCH] Fileset support for the iPhone15,2 iOS 17.7 (21H16) arm64e
+ kernelcache
+
+- fileset_layout: UNIXNU_FILESET_KERNEL_FIRST places the native kernel's
+  __TEXT_EXEC at the root of the collection's __TEXT_EXEC, as xnu-10063
+  requires (segPLKTEXTEXECB = segLASTB + segSizeLAST); refuses to overlap
+  retained kext code.
+- fileset_segmented: the corecrypto __fips_hmacs seal is optional (21H16 has
+  none); the collection header's cpusubtype follows com.apple.kernel, which
+  the DarwinBoot loader checks.
+- fixtures/fileset-21H16-symbols.json: 51 reviewed functions and 39 reviewed
+  data identities for 21H16, each pinned by original digest and recorded
+  evidence (probe boots, PAC discriminator signatures, vtable slot audit,
+  co-references, vdesc_name). Includes 18 corrections of reference-order and
+  pure-leaf pairings found by the vtable PAC audit.
+
+With these, the arm64e kernel boots to the root-device wait on fuxi.
+---
+ fileset_layout.py                   |  38 +-
+ fileset_segmented.py                |   9 +
+ fixtures/fileset-21H16-symbols.json | 601 ++++++++++++++++++++++++++++
+ 3 files changed, 636 insertions(+), 12 deletions(-)
+ create mode 100644 fixtures/fileset-21H16-symbols.json
+
+diff --git a/fileset_layout.py b/fileset_layout.py
+index 28b899d..84aaae8 100644
+--- a/fileset_layout.py
++++ b/fileset_layout.py
+@@ -4,6 +4,7 @@ The v2 record grammar is documented by Apple's dyld mach_o/SplitSeg.cpp.
+ Section zero denotes the Mach-O header; other ordinals follow load-command order.
+ """
+ from collections import Counter
++import os
+ import struct
+ 
+ PAGE = 0x4000
+@@ -95,18 +96,31 @@ class Layout:
+         # All native code follows selected kext code; XNU derives the kext-code
+         # range from the start of native __TEXT_EXEC.
+         code = self.roots['__TEXT_EXEC']
+-        end_kept = max([code['va']] + [end for begin, end in self.occupied
+-                                      if code['va'] <= begin < code['va'] + code['size']])
+-        self.reserve('__TEXT_EXEC', align(end_kept))
+-        self.reserve('__KLD', align(self.end('__TEXT_EXEC')))
+-        self.reserve('__LAST', self.end('__KLD'))
+-        code_end = self.end('__KLD')
+-        # The old kernel boot segment and prelink XML are replaceable, provided
+-        # no retained kext uses them. Move XML into its own mapping below.
+-        if code_end > self.roots['__DATA']['va']:
+-            raise ValueError('Native code would collide with collection data')
+-        self.roots.pop('__TEXT_BOOT_EXEC', None)
+-        code['size'] = code['filesize'] = code_end - code['va']
++        if os.environ.get('UNIXNU_FILESET_KERNEL_FIRST') == '1':
++            # xnu-10063 (iOS 17) takes the kext code as everything in the collection __TEXT_EXEC after the
++            # kernel's __LAST (arm_vm_init: segPLKTEXTEXECB = segLASTB + segSizeLAST), Apple's own order.
++            # Native code goes where the original kernel code was, ahead of every retained kext.
++            self.reserve('__TEXT_EXEC', code['va'])
++            self.reserve('__KLD', align(self.end('__TEXT_EXEC')))
++            self.reserve('__LAST', self.end('__KLD'))
++            kept = [begin for begin, end in self.occupied if code['va'] <= begin < code['va'] + code['size']]
++            if kept and self.end('__KLD') > min(kept):
++                raise ValueError(f'Native code ({self.end("__KLD") - code["va"]:#x} bytes) does not fit ahead of the '
++                                 f'retained kext code ({min(kept) - code["va"]:#x} bytes)')
++            self.roots.pop('__TEXT_BOOT_EXEC', None)
++        else:
++            end_kept = max([code['va']] + [end for begin, end in self.occupied
++                                          if code['va'] <= begin < code['va'] + code['size']])
++            self.reserve('__TEXT_EXEC', align(end_kept))
++            self.reserve('__KLD', align(self.end('__TEXT_EXEC')))
++            self.reserve('__LAST', self.end('__KLD'))
++            code_end = self.end('__KLD')
++            # The old kernel boot segment and prelink XML are replaceable, provided
++            # no retained kext uses them. Move XML into its own mapping below.
++            if code_end > self.roots['__DATA']['va']:
++                raise ValueError('Native code would collide with collection data')
++            self.roots.pop('__TEXT_BOOT_EXEC', None)
++            code['size'] = code['filesize'] = code_end - code['va']
+         self.reserve('__DATA', self.roots['__DATA']['va'])
+         link = self.roots['__LINKEDIT']
+         for name in ('__LINKINFO', '__LINKEDIT'):
+diff --git a/fileset_segmented.py b/fileset_segmented.py
+index 994b116..8a46190 100644
+--- a/fileset_segmented.py
++++ b/fileset_segmented.py
+@@ -288,6 +288,11 @@ class SegmentedEmit(Emit):
+         # corecrypto authenticates the relocated __text bytes in a fileset.
+         code = next(s for s in self.native.sections if s['segment'] == '__TEXT_EXEC' and s['name'] == '__text')
+         seals = [s for s in self.native.sections if s['name'] == '__fips_hmacs']
++        if not seals:
++            # A kernel that leaves corecrypto to the prelinked com.apple.kec.corecrypto (crypto bootstrap
++            # "prelinked") carries no in-kernel FIPS field; there is nothing of the kernel's to seal.
++            self.report['corecrypto_hmac_sha256'] = None
++            return
+         if len(seals) != 1 or seals[0]['size'] != 32:
+             raise ValueError('Expected one 32-byte corecrypto HMAC field')
+         code_at = self.layout.translate(code['va']) - self.cache.base
+@@ -374,5 +379,9 @@ class SegmentedEmit(Emit):
+             raise ValueError('Root commands exceed header mapping')
+         self.data[32:limit] = payload + bytes(limit-32-len(payload))
+         struct.pack_into('<II', self.data, 16, len(rebuilt), len(payload))
++        # The collection's CPU subtype names the kernel it carries: DarwinBoot loads a fileset only when the
++        # root header and com.apple.kernel agree (an original 21H16 collection says plain arm64, 0x2, around
++        # an arm64e kernel).
++        struct.pack_into('<I', self.data, 8, struct.unpack_from('<I', self.native.data, 8)[0])
+         self.report['native_base'] = hex(self.layout.placements['__TEXT'])
+         self.report['native_fileoff'] = hex(self.fileoff)
+diff --git a/fixtures/fileset-21H16-symbols.json b/fixtures/fileset-21H16-symbols.json
+new file mode 100644
+index 0000000..fb92ef8
+--- /dev/null
++++ b/fixtures/fileset-21H16-symbols.json
+@@ -0,0 +1,601 @@
++{
++  "inputs": {
++    "kernelcache_sha256": "9bd1028796b0baa12922ab44fda1805b11595981338288c7881c669238d352e5",
++    "entry": "com.apple.kernel"
++  },
++  "functions": [
++    {
++      "original": "0xfffffff00845c0ec",
++      "original_size": 36,
++      "original_sha256": "8f59cad2d4bf6768ba28d0bd0a316bfc6791a75d53bfe0cd484d26d3067c5364",
++      "native_symbol": "_PE_parse_boot_argn",
++      "evidence": "Moves (name, ptr, size) to x1..x3, loads PE_state and adds the CommandLine offset (inlined PE_boot_args), sets w4=0 and tail-calls PE_parse_boot_argn_internal. Native calls PE_boot_args and tails to the same internal routine. corecrypto passes \"fips_mode\" in x0 (fuxi probe boot 2026-11-05, call #1). Source: pexpert/gen/bootargs.c."
++    },
++    {
++      "original": "0xfffffff007eca33c",
++      "original_size": 48,
++      "original_sha256": "8953acd2716ca242aa083d67c62c3e8652287148ac39108f4ec7480d9451e991",
++      "native_symbol": "_mach_absolute_time",
++      "evidence": "Reads TPIDR_EL1 -> thread machine timebase offset (+336, +80), reads CNTVCTSS_EL0 (S3_3_C14_C0_6) and retries until the offset is stable, returns counter + offset. Native mach_absolute_time tail-calls ml_get_timebase. Sits after timebase_callback in rtclock. corecrypto self-test called it 43 times in the probe boot. Source: osfmk/arm64/machine_routines_asm.s / rtclock.c."
++    },
++    {
++      "original": "0xfffffff007eca44c",
++      "original_size": 24,
++      "original_sha256": "2cde7c11ab9910c1719a26d0ab9e450406b7fb858fe19dd05175c57d68f10e87",
++      "native_symbol": "_clock_timebase_info",
++      "evidence": "Stores the 8-byte timebase constant (numer/denom) through x0 and returns; identical shape to native clock_timebase_info (adrp/add/ldr [#8]/str [x0]/ret). Adjacent to timebase_callback. Source: osfmk/arm/rtclock.c."
++    },
++    {
++      "original": "0xfffffff007d84f74",
++      "original_size": 28,
++      "original_sha256": "967cb292ad5c70836cf6fbc56b85e45ddd55fe75320000797e0dc5e9b00c1c99",
++      "native_symbol": "_panic_active",
++      "evidence": "Returns (debugger_current_op - 3) < 2, i.e. DBOP_PANIC or DBOP_DEBUGGER (debug.h enum 3/4). Native panic_active compiles to the same ldr/sub #3/cmp #2/cset sequence; the original adds BTI c. The global lies between init_coalition and debugger_panic_options in __DATA,__common, as in the native layout, and is read by handle_debugger_trap and IODTNVRAM. Source: osfmk/kern/debug.c panic_active()."
++    },
++    {
++      "original": "0xfffffff00834afbc",
++      "original_size": 76,
++      "original_sha256": "3c2eb768738ef4560a7eec59375e378fea8cd24de1eacd74f6a53b9cded6917e",
++      "native_symbol": "_IOMallocData",
++      "evidence": "Calls kalloc_ext on the KHEAP_DATA view with the size from x0 and Z_WAITOK-family flags, then atomically adds the size to the IOKit allocation counter on success. Lies between IOMallocPageableZero and IOFreeData (both paired). corecrypto calls it in alloc pairs with sizes 0x518/0xe20/0x4a0/0xa0 in the probe boot. Native IOMallocData forwards to IOMalloc_internal(KHEAP_DATA). Source: iokit/Kernel/IOLib.cpp."
++    },
++    {
++      "original": "0xfffffff008334c40",
++      "original_size": 52,
++      "original_sha256": "07fd7bba69f5cd3f3394ba856db2573d361cd8df6117cdfb13a087517ef8119c",
++      "native_symbol": "_register_crypto_functions",
++      "evidence": "BTI c, then: if the global crypto function pointer is set return -1; else store x0 there, set the registered flag byte to 1 and return 0. Native register_crypto_functions is the same adrp/ldr/cbz/mov -1/ret/str/strb sequence. Lies between zlibVersion and SHA256_Init (libkern/crypto). corecrypto passes its function table in __DATA_CONST (fuxi probe boot 2026-11-05 18:52, call #1). Source: libkern/crypto/register_crypto.c."
++    },
++    {
++      "original": "0xfffffff007ea17ec",
++      "original_size": 556,
++      "original_sha256": "6cd73a0c3321f914505724a93caab380af32cc0765bd71ec4ccd9b75ca07dc9e",
++      "native_symbol": "_register_and_init_prng",
++      "evidence": "Calls entropy_init, stores x0 (prng ctx) in a global, then copies the cckprng_funcs table from x1 field by field, authenticating each pointer with its source address discriminator and re-signing it for the global copy (autia/pacia). Native register_and_init_prng does the same after its DEVELOPMENT master-cpu/prng_ready assertions. Lies between read_frandom and random_bool_gen_bits/entropy_provide. In the probe boot the stub left ctx+0xa80 unset and corecrypto's next blraa through it failed PAC. Source: osfmk/prng/prng_random.c."
++    },
++    {
++      "original": "0xfffffff007d9a2fc",
++      "original_size": 112,
++      "original_sha256": "2c5487f8eabf7495e4aedc73bcbf8345122c576de5e8d317749134c78a0c5159",
++      "native_symbol": "_lck_mtx_alloc_init",
++      "evidence": "Allocates the lck_mtx_t kalloc_type view, writes type byte 0x22 with the group id from x0+4, zeroes the data word and takes a group reference (inlined lck_mtx_init). Lies between lck_attr_alloc_init and lck_mtx_destroy (both paired). corecrypto calls it as lock = f(lck_grp_alloc_init(name, NULL), NULL); in the probe boot (2026-11-05 18:58) the stub returned NULL and native lck_mtx_lock faulted at +8. Source: osfmk/kern/lock_mtx.c lck_mtx_alloc_init."
++    },
++    {
++      "original": "0xfffffff007d9b004",
++      "original_size": 36,
++      "original_sha256": "5a9ac266fc40e623afaf81e85237e0f5cd313743acb1f05826505f5b3f2c995b",
++      "native_symbol": "_lck_mtx_try_lock",
++      "evidence": "BTI c, reads the current thread's ctid from TPIDR_EL1 (+0x438 in this kernel), CASA it into the mutex owner word at x0+8 expecting 0, returns 1 on success. Native lck_mtx_try_lock is the same fast path (ctid at thread+0x510 in the native layout). Lies between IOLockLock and IOLockUnlock (both paired). corecrypto reached it twice in the probe boot (2026-11-05 19:04, x1 4/1). Source: osfmk/kern/lock_mtx.c lck_mtx_try_lock."
++    },
++    {
++      "original": "0xfffffff0081ede3c",
++      "original_size": 228,
++      "original_sha256": "3c71871a3a7fecaf505ed587fd66dcde3c4ac083965ec4519b61c66284325c69",
++      "native_symbol": "_code_signing_configuration",
++      "evidence": "Computes the code-signing config flags once (acquire/release init byte), stores the monitor type (2) and the flag word in globals, then writes them through x0 and x1 when non-NULL. Lies between code_signing_deallocate and disable_code_signing_feature (both paired). AppleImage4 calls it with (&type, NULL) in the probe boot (2026-11-05 19:20). Source: bsd/kern/kern_codesigning.c code_signing_configuration."
++    },
++    {
++      "original": "0xfffffff007e8f094",
++      "original_size": 44,
++      "original_sha256": "bf8a5f52011522218d0b9b6ec6efe3677f247dc75549fb35a04895ac37720421",
++      "native_symbol": "_strprefix",
++      "evidence": "BTI c, then the strprefix loop: load s2 byte, return 1 at its NUL, compare with the next s1 byte, return 0 on mismatch. Native strprefix is the same ldrb/cbz/ldrb/cmp/b.eq sequence. Lies between strcmp and strchr. AppleImage4 calls it with its bundle id and \"com.apple.security.\". Source: libkern/string.c strprefix."
++    },
++    {
++      "original": "0xfffffff008352efc",
++      "original_size": 792,
++      "original_sha256": "62b0e27031ed6254a6fb901fa60aa2a3b8a0a43eb0692fe38ecc5046416e662e",
++      "native_symbol": "__ZN15IORegistryEntry8fromPathEPKcPK15IORegistryPlanePcPiPS_",
++      "evidence": "Lies between IORegistryEntry::childFromPath and IORegistryEntry::getPathComponent (both paired); stack-protected path walk with a residual buffer. AppleImage4 calls it with \"/chosen\" and the device-tree plane; when the stub returned NULL it panicked \"failed to get chosen node\" (probe boot 2026-11-05 19:20). Source: iokit/Kernel/IORegistryEntry.cpp IORegistryEntry::fromPath."
++    },
++    {
++      "original": "0xfffffff007d95880",
++      "original_size": 144,
++      "original_sha256": "d523dd9683ca8bc37f4225514ce858ae99fe0deedcff9d608c40040b9a5730a3",
++      "native_symbol": "_kalloc_type_impl_external",
++      "evidence": "Reads the kalloc_type_view zone (x0+0), checks the per-cpu zone state through TPIDR_EL1, and calls zalloc_ext with (flags & 7) | Z_ flag bits, else falls back through the view at +48. Lies between kalloc_data_require and kalloc_type_var_impl (both paired). AppleImage4 passed its __DATA_CONST view and Z_ZERO; the NULL from the probe stub was then written through (probe boot 2026-11-05 19:26). Source: osfmk/kern/kalloc.c kalloc_type_impl_external."
++    },
++    {
++      "original": "0xfffffff007d9a36c",
++      "original_size": 84,
++      "original_sha256": "bae5b1c369a27ca43b15d40494b940a247b1271637ca91eda27fce5814bed237",
++      "native_symbol": "_lck_mtx_init",
++      "evidence": "Writes lock type 0x22 with the group id from x1+4 into x0, zeroes the data word and takes a group reference: the body inlined in lck_mtx_alloc_init (reviewed) without the allocation. Lies between lck_mtx_alloc_init and lck_mtx_destroy. 72 stubbed sites (ApplePMGR, apfs, sandbox). Source: osfmk/kern/lock_mtx.c lck_mtx_init."
++    },
++    {
++      "original": "0xfffffff007d9a3c0",
++      "original_size": 52,
++      "original_sha256": "a7fdd72c921561d31567fa19bd06b4663f4f9fd7db3a01191c4c7f6c1e9abd94",
++      "native_symbol": "_lck_mtx_free",
++      "evidence": "Calls lck_mtx_destroy (paired) on x0 and tail-frees x0 into the lck_mtx zone view. Lies between lck_mtx_alloc_init and lck_mtx_destroy. Source: osfmk/kern/lock_mtx.c lck_mtx_free."
++    },
++    {
++      "original": "0xfffffff007d9baa0",
++      "original_size": 128,
++      "original_sha256": "00ac7c1a9988b0ce31d387216c7bcded90ed6f99c43c9d294c380ecfed6b85ff",
++      "native_symbol": "_lck_rw_init",
++      "evidence": "Selects the default lck_attr when x2 is NULL, derives the RW flags from it, stores the RW lock words into x0 and takes a group reference on x1. Lies between lck_mtx_yield and lck_rw_free. 70 stubbed sites (AMFI, apfs, sandbox). Source: osfmk/kern/lock_rw.c lck_rw_init."
++    },
++    {
++      "original": "0xfffffff007d9ba00",
++      "original_size": 160,
++      "original_sha256": "08adf7f45507dc1099cd1c900902eadde034db89041f47aaf838ef8282504f87",
++      "native_symbol": "_lck_rw_alloc_init",
++      "evidence": "kalloc_type_impl_internal on the lck_rw zone view, then the same RW initialisation as lck_rw_init (default attr, flags, group reference). Lies just before lck_rw_init. Source: osfmk/kern/lock_rw.c lck_rw_alloc_init."
++    },
++    {
++      "original": "0xfffffff007d9c37c",
++      "original_size": 172,
++      "original_sha256": "2c0070e9d0e58faf3799be7da0d2b980fa6d9674b2d953fae4bcf1d91ca8265b",
++      "native_symbol": "_lck_rw_lock_exclusive",
++      "evidence": "Single-argument RW exclusive fast path: checks can_sleep, panics \"Taking non-sleepable RW lock with preemption enabled\" at lock_rw.c:1161, which in this source is inside lck_rw_lock_exclusive_internal_inline (used by lck_rw_lock_exclusive), disables preemption and takes the lock with ldxr. Lies after lck_rw_destroy and before lck_rw_lock_exclusive_b (both paired). 495 stubbed sites. Source: osfmk/kern/lock_rw.c lck_rw_lock_exclusive."
++    },
++    {
++      "original": "0xfffffff007d9c640",
++      "original_size": 560,
++      "original_sha256": "b3a86b0f5a1fc9cc3ea61742eab6f8d2f85b1d1a1484f702b2dd4c36cc9a155d",
++      "native_symbol": "_lck_rw_lock_shared_to_exclusive",
++      "evidence": "Upgrade loop on the RW word at x0+8: when want_upgrade (bit 18) is already set it drops the shared count and takes the failure path, otherwise sets bit 18 and drops one shared count with casa, waiting with wfe while the interlock (bit 16) is held. Lies between lck_rw_lock_exclusive_b and lck_rw_lock_exclusive_to_shared; in source order lck_rw_lock_shared_to_exclusive is the exported upgrade function there. 26 stubbed sites (apfs, sandbox). Source: osfmk/kern/lock_rw.c lck_rw_lock_shared_to_exclusive."
++    },
++    {
++      "original": "0xfffffff0082db840",
++      "original_size": 104,
++      "original_sha256": "a3b0a551838d6f70d9bcfde02e741b3deff50a95f1251779de243a060c791b09",
++      "native_symbol": "__ZN15OSMetaClassBase12safeMetaCastEPKS_PK11OSMetaClass",
++      "evidence": "If x0 is non-NULL calls its getMetaClass (vtable +56, discriminator 0xfffc) and walks superClassLink (+0x10) until it equals x1, returning x0 or NULL. Lies between OSMetaClass::OSMetaClass and OSMetaClassBase::metaCast(const char*) (both paired). AppleImage4 calls it as OSDynamicCast(OSData, prop) (probe boot 2026-11-05 19:36). Source: libkern/c++/OSMetaClass.cpp OSMetaClassBase::safeMetaCast."
++    },
++    {
++      "original": "0xfffffff00834a820",
++      "original_size": 28,
++      "original_sha256": "d1e9b49b497b0316c5c84b63aade1518c58d1414178688cf3df5a40e3dd2eb88",
++      "native_symbol": "_IOMallocTypeImpl",
++      "evidence": "BTI c; ldr w8,[x0,#0x28] (kt_view->kt_flags); tst #0x10 selects the zalloc flags (4 or 0x8004) and tail-calls the reviewed kalloc_type_impl_external with the same view. Lies between IOMallocContiguous and IOIteratePageableMaps (both paired, iokit/Kernel/IOLib.cpp). IOStorageFamily passed its __DATA_CONST kalloc_type view and wrote through the NULL the probe stub returned (probe boot 2026-11-05 19:48). Source: iokit/Kernel/IOLib.cpp IOMallocTypeImpl."
++    },
++    {
++      "original": "0xfffffff007da12f4",
++      "original_size": 12,
++      "original_sha256": "17dc437d04cd05567b4192384647acca0e76523077066d422f2c6e3b74d88667",
++      "native_symbol": "_lck_mtx_gate_close",
++      "evidence": "BTI c; mov x0,x1; b <static gate fn>: an lck_mtx_gate_* wrapper that drops the lock argument. It is the wrapper directly before the one that branches to the turnstile_prepare/waitq_wakeup64_all routine (gate_open), and lck_mtx_gate_close directly precedes lck_mtx_gate_open in osfmk/kern/locks.c; the third following wrapper takes three arguments (handoff). Its static target calls gate_already_owned_panic (gate_close/gate_try_close). AppleImage4 ignores the return value (void, not try_close's kern_return_t) (probe boot 2026-11-05 19:48, call #9). Source: osfmk/kern/locks.c lck_mtx_gate_close."
++    },
++    {
++      "original": "0xfffffff0082dc240",
++      "original_size": 592,
++      "original_sha256": "185c9194dead4d575488ca2249269786eefddb6c31e126a12343ce4fb652e328",
++      "native_symbol": "__ZN11OSMetaClassD2Ev",
++      "evidence": "PAC discriminator signature (movk lsl#48 sequence and vtable slots) identical to the native function: writes the OSMetaClass vtable into *this, takes sAllClassesLock and removes the class from sAllClassesDict (slot +264), releases with the same discriminators. 569 stubbed sites (kext MetaClass destructors). Source: libkern/c++/OSMetaClass.cpp ~OSMetaClass."
++    },
++    {
++      "original": "0xfffffff0082dcc58",
++      "original_size": 32,
++      "original_sha256": "e70e74087d15950f6d653a8c12e0f94d6e1f52df3029a5c79731e3d28426d67d",
++      "native_symbol": "__ZNK11OSMetaClass19instanceConstructedEv",
++      "evidence": "Atomic increment (LDADD) of instanceCount at +0x24; on zero-to-one follows superClassLink at +0x10 and repeats. Native instanceConstructed does the same on the same offsets through an atomic helper with a frame, so the bodies are not byte-identical (same difference as recorded in the 23F84 fixture: native OSIncrementAtomic, original LDADD). 520 stubbed sites (OSObject constructors in kexts). Source: libkern/c++/OSMetaClass.cpp instanceConstructed."
++    },
++    {
++      "original": "0xfffffff008315c78",
++      "original_size": 196,
++      "original_sha256": "42b3a1d9e8d5044a27551d03e98b0c82403f590db8a00508e781036b9dab74f4",
++      "native_symbol": "__ZN8OSNumber10withNumberEyj",
++      "evidence": "PAC discriminator signature (movk lsl#48 sequence and vtable slots) identical to the native function: allocates through OSNumber::gMetaClass, calls init(unsigned long long, unsigned int) at slot +120 (discriminator 0xe9cb; the const char* variant uses +128/0x4622), releases on failure. 222 stubbed sites. Source: libkern/c++/OSNumber.cpp withNumber."
++    },
++    {
++      "original": "0xfffffff0082e8444",
++      "original_size": 180,
++      "original_sha256": "e842b21db1c3c047f8ba3881e63ebd0ddf0a57014a761ea274ddd4172b57a2c0",
++      "native_symbol": "__ZN12OSDictionary12withCapacityEj",
++      "evidence": "PAC discriminator signature (movk lsl#48 sequence and vtable slots) identical to the native function: allocates through OSDictionary::gMetaClass, initWithCapacity at +208 with discriminator 0x9c02 (OSArray uses 0xa292), releases on failure. sandbox calls it with capacity 8 (probe boot 2026-11-05 20:55). Source: libkern/c++/OSDictionary.cpp withCapacity."
++    },
++    {
++      "original": "0xfffffff0082e102c",
++      "original_size": 180,
++      "original_sha256": "94218f0837913637ba230f32781adeda1d17ed1ce172f518b2e5539bc73143f5",
++      "native_symbol": "__ZN7OSArray12withCapacityEj",
++      "evidence": "PAC discriminator signature (movk lsl#48 sequence and vtable slots) identical to the native function: allocates through OSArray::gMetaClass, initWithCapacity at +208 with discriminator 0xa292, releases on failure. 93 stubbed sites. Source: libkern/c++/OSArray.cpp withCapacity."
++    },
++    {
++      "original": "0xfffffff00831be3c",
++      "original_size": 180,
++      "original_sha256": "e99b21ac62ebdcdebfa6807d55bbacb54b385ddc372146521ac0ecf2b18d5509",
++      "native_symbol": "__ZN5OSSet12withCapacityEj",
++      "evidence": "PAC discriminator signature (movk lsl#48 sequence and vtable slots) identical to the native function: allocates through OSSet::gMetaClass, initWithCapacity at +208 with discriminator 0x1ded, releases on failure. 26 stubbed sites. Source: libkern/c++/OSSet.cpp withCapacity."
++    },
++    {
++      "original": "0xfffffff007e8f0c0",
++      "original_size": 76,
++      "original_sha256": "3bf579e8543201fd4837d4f7fe92d8469ee88daa31e30ba5195c1c428205cd2b",
++      "native_symbol": "_strcasecmp",
++      "evidence": "Lowercases both bytes (sub #65, cmp #26, add #32) and returns the first difference, looping to the NUL. Native strcasecmp does the same with post-indexed ldrb and orr #0x20, so the bodies differ only in encoding. Lies between strprefix (reviewed) and strncasecmp (paired). sandbox calls it on entitlement names (probe boot 2026-11-05 20:55). Source: libkern/string.c strcasecmp."
++    },
++    {
++      "original": "0xfffffff0081c0640",
++      "original_size": 156,
++      "original_sha256": "2c37221d5ca82a8deafd8999ede25618411e0fcf7bdc160ea27483a26b8cf1f3",
++      "native_symbol": "_proc_set_syscall_filter_index",
++      "evidence": "Sandbox BL at 0xfffffff009e974ec, observed with which=2 and ascending index. Original checks KOBJ=2 else EINVAL, probes 1031 MIG entries of stride 24, stores index at +4 and returns 0 or ENOENT; matches kern_proc.c proc_set_syscall_filter_index and inline ipc_kobject_set_kobjidx. Next entry BTI at +156."
++    },
++    {
++      "original": "0xfffffff0083b9df0",
++      "original_size": 16,
++      "original_sha256": "1c7bfb61170ddfbb91b4b3bc8b19e5c6c9e78af19b8fdfd4c630e7f88a389e91",
++      "native_symbol": "__ZN18IOMemoryDescriptor5doMapEP7_vm_mapPyjyy",
++      "evidence": "Slot 35 of the original __ZTV21IOSubMemoryDescriptor holds this function with IA/address-diversity discriminator 0x31e1; the native __ZTV21IOSubMemoryDescriptor slot 35 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN18IOMemoryDescriptor5doMapEP7_vm_mapPyjyy. Corrects the pure-leaf pairing to _IONDRVLibrariesInitialize found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083bcd48",
++      "original_size": 12,
++      "original_sha256": "08df8e2fe088d7a74ac9e012b00241d6c8ef878f542655db02cea557c6b3e7de",
++      "native_symbol": "__ZN18IOMemoryDescriptor15initWithOptionsEPvjjP4taskjP8IOMapper",
++      "evidence": "Slot 15 of the original __ZTV21IOSubMemoryDescriptor holds this function with IA/address-diversity discriminator 0xfe46; the native __ZTV21IOSubMemoryDescriptor slot 15 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN18IOMemoryDescriptor15initWithOptionsEPvjjP4taskjP8IOMapper. Corrects the pure-leaf pairing to _hw_spin_always_return found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083d232c",
++      "original_size": 8,
++      "original_sha256": "d33fdb74881bcff46b1cf4fc3e20479b1882e0e683789e80e6d650554066a1aa",
++      "native_symbol": "__ZN5IOCPU17enableCPUTimeBaseEb",
++      "evidence": "Slot 177 of the original __ZTV5IOCPU holds this function with IA/address-diversity discriminator 0x3a04; the native __ZTV5IOCPU slot 177 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN5IOCPU17enableCPUTimeBaseEb. Corrects the pure-leaf pairing to _memory_backing_aware_buffer_stage_reset found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083d23a8",
++      "original_size": 8,
++      "original_sha256": "d33fdb74881bcff46b1cf4fc3e20479b1882e0e683789e80e6d650554066a1aa",
++      "native_symbol": "__ZN5IOCPU6detachEP9IOService",
++      "evidence": "Slot 109 of the original __ZTV5IOCPU holds this function with IA/address-diversity discriminator 0x7318; the native __ZTV5IOCPU slot 109 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN5IOCPU6detachEP9IOService. Corrects the reference-order pairing to __ZN5IOCPU11setCPUStateEj found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083d23b0",
++      "original_size": 12,
++      "original_sha256": "08df8e2fe088d7a74ac9e012b00241d6c8ef878f542655db02cea557c6b3e7de",
++      "native_symbol": "__ZN5IOCPU5startEP9IOService",
++      "evidence": "Slot 86 of the original __ZTV5IOCPU holds this function with IA/address-diversity discriminator 0x3c68; the native __ZTV5IOCPU slot 86 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN5IOCPU5startEP9IOService. Corrects the reference-order pairing to __ZN5IOCPU9signalCPUEPS_ found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083d2610",
++      "original_size": 16,
++      "original_sha256": "3035ffd3a60ac2dee7432503085224c3a7d47345f8b58a343fa0da2f466236e0",
++      "native_symbol": "__ZNK5IOCPU12getMetaClassEv",
++      "evidence": "Slot 7 of the original __ZTV5IOCPU holds this function with IA/address-diversity discriminator 0xfffc; the native __ZTV5IOCPU slot 7 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZNK5IOCPU12getMetaClassEv. Corrects the reference-order pairing to __ZN5IOCPU11getCPUStateEv found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083d2620",
++      "original_size": 8,
++      "original_sha256": "414f2c1aa1271361d89bc08e75e94814cdb384cca7a126ac69cd1ea829a1b051",
++      "native_symbol": "__ZN5IOCPUD0Ev",
++      "evidence": "Slot 1 of the original __ZTV5IOCPU holds this function with IA/address-diversity discriminator 0x56b7; the native __ZTV5IOCPU slot 1 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN5IOCPUD0Ev. Corrects the reference-order pairing to __ZN5IOCPU11getCPUGroupEv found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eaff8",
++      "original_size": 12,
++      "original_sha256": "4a420b54660fd00d957814befb0602f8eef9859e1d8f0b87d32b3cdd1f612a4b",
++      "native_symbol": "__ZN12IOUserClient23getExternalTrapForIndexEj",
++      "evidence": "Slot 184 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0xea23; the native __ZTV12IOUserClient slot 184 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient23getExternalTrapForIndexEj. Corrects the pure-leaf pairing to _convert_port_to_map_inspect found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb0bc",
++      "original_size": 12,
++      "original_sha256": "4a420b54660fd00d957814befb0602f8eef9859e1d8f0b87d32b3cdd1f612a4b",
++      "native_symbol": "__ZN12IOUserClient30getExternalAsyncMethodForIndexEj",
++      "evidence": "Slot 181 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0xb50c; the native __ZTV12IOUserClient slot 181 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient30getExternalAsyncMethodForIndexEj. Corrects the pure-leaf pairing to _recount_usage_cycles found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb0c8",
++      "original_size": 12,
++      "original_sha256": "4a420b54660fd00d957814befb0602f8eef9859e1d8f0b87d32b3cdd1f612a4b",
++      "native_symbol": "__ZN12IOUserClient25getExternalMethodForIndexEj",
++      "evidence": "Slot 180 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0x3565; the native __ZTV12IOUserClient slot 180 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient25getExternalMethodForIndexEj. Corrects the pure-leaf pairing to _recount_usage_instructions found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb140",
++      "original_size": 16,
++      "original_sha256": "1c7bfb61170ddfbb91b4b3bc8b19e5c6c9e78af19b8fdfd4c630e7f88a389e91",
++      "native_symbol": "__ZN12IOUserClient19clientMemoryForTypeEjPjPP18IOMemoryDescriptor",
++      "evidence": "Slot 178 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0x02d4; the native __ZTV12IOUserClient slot 178 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient19clientMemoryForTypeEjPjPP18IOMemoryDescriptor. Corrects the pure-leaf pairing to __ZN15IOUserResources13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb150",
++      "original_size": 16,
++      "original_sha256": "1c7bfb61170ddfbb91b4b3bc8b19e5c6c9e78af19b8fdfd4c630e7f88a389e91",
++      "native_symbol": "__ZN12IOUserClient13connectClientEPS_",
++      "evidence": "Slot 177 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0xc1ba; the native __ZTV12IOUserClient slot 177 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient13connectClientEPS_. Corrects the pure-leaf pairing to __ZN9IOService24requireMaxInterruptDelayEj found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb160",
++      "original_size": 16,
++      "original_sha256": "1c7bfb61170ddfbb91b4b3bc8b19e5c6c9e78af19b8fdfd4c630e7f88a389e91",
++      "native_symbol": "__ZN12IOUserClient24getNotificationSemaphoreEjPP9semaphore",
++      "evidence": "Slot 176 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0xfd2b; the native __ZTV12IOUserClient slot 176 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient24getNotificationSemaphoreEjPP9semaphore. Corrects the pure-leaf pairing to __ZN18IOMemoryDescriptor5doMapEP7_vm_mapPyjyy found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb170",
++      "original_size": 16,
++      "original_sha256": "1c7bfb61170ddfbb91b4b3bc8b19e5c6c9e78af19b8fdfd4c630e7f88a389e91",
++      "native_symbol": "__ZN12IOUserClient24registerNotificationPortEP8ipc_portjj",
++      "evidence": "Slot 175 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0xbcef; the native __ZTV12IOUserClient slot 175 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient24registerNotificationPortEP8ipc_portjj. Corrects the pure-leaf pairing to __ZN12IOUserClient11clientCloseEv found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb180",
++      "original_size": 12,
++      "original_sha256": "4a420b54660fd00d957814befb0602f8eef9859e1d8f0b87d32b3cdd1f612a4b",
++      "native_symbol": "__ZN12IOUserClient10getServiceEv",
++      "evidence": "Slot 174 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0x3e51; the native __ZTV12IOUserClient slot 174 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient10getServiceEv. Corrects the pure-leaf pairing to _recount_current_thread_energy_nj found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb1e8",
++      "original_size": 16,
++      "original_sha256": "1c7bfb61170ddfbb91b4b3bc8b19e5c6c9e78af19b8fdfd4c630e7f88a389e91",
++      "native_symbol": "__ZN12IOUserClient11clientCloseEv",
++      "evidence": "Slot 172 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0x18b8; the native __ZTV12IOUserClient slot 172 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient11clientCloseEv. Corrects the pure-leaf pairing to __ZN12IOUserClient24registerNotificationPortEP8ipc_portjj found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083eb1f8",
++      "original_size": 388,
++      "original_sha256": "02e9f818a815de44e4c4889abfea6ff233cb9d619c82840b13bf5a06976d3c07",
++      "native_symbol": "__ZN12IOUserClient12initWithTaskEP4taskPvj",
++      "evidence": "Slot 171 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0x5cf5; the native __ZTV12IOUserClient slot 171 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient12initWithTaskEP4taskPvj. Corrects the reference-order pairing to __ZN12IOUserClient4initEv found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff0083ed99c",
++      "original_size": 388,
++      "original_sha256": "8fd027407e2ad0bc311995c0aa1eddd93b9703cd6bc92023e1b4be00add289d1",
++      "native_symbol": "__ZN12IOUserClient4initEv",
++      "evidence": "Slot 13 of the original __ZTV12IOUserClient holds this function with IA/address-diversity discriminator 0x4a6a; the native __ZTV12IOUserClient slot 13 has the same key, address diversity and discriminator (derived from the method mangled name) and points to __ZN12IOUserClient4initEv. Corrects the reference-order pairing to __ZN12IOUserClient4initEP12OSDictionary found by the vtable PAC audit (2026-11-06)."
++    },
++    {
++      "original": "0xfffffff008379a7c",
++      "original_size": 16,
++      "original_sha256": "68d64e917228e135aa35c3d9c4bed6856114a2c60a99ff2260f5dea0d1ca19e0",
++      "native_symbol": "__ZN9IOService11getPlatformEv",
++      "evidence": "BTI c; ldr x0, [gIOPlatform]; ret. The global is the one the paired IOService::setPlatform stores first (gIOPlatform = platform, store to 0xfffffff00a35c5c8); getServiceRoot/getResourceService read other globals. Native getPlatform is the same adrp/ldr/ret. AMFI calls it with no arguments, signs the result and later authenticates it (DA PAC failure on the 0 the probe returned, probe boot 2026-11-06 06:48). Source: iokit/Kernel/IOService.cpp:1552."
++    },
++    {
++      "original": "0xfffffff008379a9c",
++      "original_size": 16,
++      "original_sha256": "c843c9e9d822ec5c332385c84ff550f58d26d001a895b00fa655b990aff083fa",
++      "native_symbol": "__ZN9IOService18getResourceServiceEv",
++      "evidence": "BTI c; ldr x0, [gIOResources]; ret. The global (0xfffffff00a35c540) is the object the paired IOService::setPlatform loads and calls attachToParent on (gIOResources->attachToParent). Native getResourceService is the same adrp/ldr/ret. Directly precedes setPlatform, as in source. Source: iokit/Kernel/IOService.cpp:1564."
++    },
++    {
++      "original": "0xfffffff008379a8c",
++      "original_size": 16,
++      "original_sha256": "4ad0d46adb132153b700d446e628ecabe13cfa232975cb053c8193fd40824965",
++      "native_symbol": "__ZN9IOService15getPMRootDomainEv",
++      "evidence": "BTI c; ldr x0, [global 0xfffffff00a35c5d0]; ret, between the reviewed getPlatform (reads gIOPlatform) and getResourceService (reads gIOResources); IOService.cpp defines exactly getPlatform, getPMRootDomain, getResourceService in that order (lines 1552-1567). Native getPMRootDomain is the same adrp/ldr/ret. Stubbed for AppleARMPlatform and ApplePMGR. Source: iokit/Kernel/IOService.cpp getPMRootDomain."
++    }
++  ],
++  "data": [
++    {
++      "original": "0xfffffff00a32a1a0",
++      "native_symbol": "__ZN12OSCollection10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as OSCollection::gMetaClass: x0 = this address, x1 = \"OSCollection\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32a788",
++      "native_symbol": "__ZN8OSAction10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as OSAction::gMetaClass: x0 = this address, x1 = \"OSAction\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32b030",
++      "native_symbol": "__ZN6IOPMGR10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IOPMGR::gMetaClass: x0 = this address, x1 = \"IOPMGR\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32b1f0",
++      "native_symbol": "__ZN9IOCommand10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IOCommand::gMetaClass: x0 = this address, x1 = \"IOCommand\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32b3b8",
++      "native_symbol": "__ZN21IOSubMemoryDescriptor10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IOSubMemoryDescriptor::gMetaClass: x0 = this address, x1 = \"IOSubMemoryDescriptor\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32b498",
++      "native_symbol": "__ZN18IODTPlatformExpert10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IODTPlatformExpert::gMetaClass: x0 = this address, x1 = \"IODTPlatformExpert\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32b550",
++      "native_symbol": "__ZN12IOPlatformIO10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IOPlatformIO::gMetaClass: x0 = this address, x1 = \"IOPlatformIO\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32b578",
++      "native_symbol": "__ZN5IOCPU10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IOCPU::gMetaClass: x0 = this address, x1 = \"IOCPU\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32c178",
++      "native_symbol": "__ZN17IOSharedDataQueue10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IOSharedDataQueue::gMetaClass: x0 = this address, x1 = \"IOSharedDataQueue\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32c7e8",
++      "native_symbol": "__ZN17IONVRAMController10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as IONVRAMController::gMetaClass: x0 = this address, x1 = \"IONVRAMController\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32c908",
++      "native_symbol": "__ZN8OSObject10gMetaClassE",
++      "addend": 0,
++      "evidence": "The kernel static initializer constructs this object as OSObject::gMetaClass: x0 = this address, x1 = \"OSObject\", then a call to the paired OSMetaClass::OSMetaClass(const char*, const OSMetaClass*, unsigned int). Zero-filled __DATA, so code matching cannot pair it. Retained kexts pass it as a superclass or OSDynamicCast target. Source: libkern/c++/OSMetaClass.h OSDefineMetaClass."
++    },
++    {
++      "original": "0xfffffff00a32c9a8",
++      "native_symbol": "__ZN9IOService10gMetaClassE",
++      "addend": 0,
++      "evidence": "Passed as the superclass next to the class names IOPlatformExpert, IOCPU, IOMapper, IOInterruptController, IODMAController and IOPMPowerSource, all direct IOService subclasses in iokit/IOKit headers; used by OSKext::addClass and io_service_open_extended (OSDynamicCast IOService). Zero-filled __DATA."
++    },
++    {
++      "original": "0xfffffff00a32c468",
++      "native_symbol": "__ZN12IOUserClient10gMetaClassE",
++      "addend": 0,
++      "evidence": "Passed as the superclass next to the class names IOUserClient2022 and IOUserUserClient, both direct IOUserClient subclasses (iokit/IOKit/IOUserClient.h, IOUserServer.cpp); used by IOService::newUserClient and IOUserClient2022::externalMethod. Zero-filled __DATA."
++    },
++    {
++      "original": "0xfffffff0078ebea8",
++      "native_symbol": "__ZN9IOCommand9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32b1f0; its target is the reviewed IOCommand::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"IOCommand\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const IOCommand::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0078f0f80",
++      "native_symbol": "__ZN5IOCPU9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32b578; its target is the reviewed IOCPU::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"IOCPU\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const IOCPU::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0078f8930",
++      "native_symbol": "__ZN8OSAction9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32a788; its target is the reviewed OSAction::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"OSAction\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const OSAction::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0078f89e8",
++      "native_symbol": "__ZN12IOUserClient9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32c468; its target is the reviewed IOUserClient::gMetaClass (named by its direct subclasses). Retained kexts reach it through their GOT (const OSMetaClass *const IOUserClient::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079272d8",
++      "native_symbol": "__ZN9IOService9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32c9a8; its target is the reviewed IOService::gMetaClass (named by its direct subclasses). Retained kexts reach it through their GOT (const OSMetaClass *const IOService::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0078ec580",
++      "native_symbol": "__ZN18IOTimerEventSource9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32b1a0; its target is the reviewed IOTimerEventSource::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"IOTimerEventSource\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const IOTimerEventSource::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0078ecc70",
++      "native_symbol": "__ZN8IOMapper9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32b240; its target is the reviewed IOMapper::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"IOMapper\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const IOMapper::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0078f5d38",
++      "native_symbol": "__ZN15IORegistryEntry9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32aa50; its target is the reviewed IORegistryEntry::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"IORegistryEntry\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const IORegistryEntry::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff007922c68",
++      "native_symbol": "__ZN9IODTNVRAM9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32b5f0; its target is the reviewed IODTNVRAM::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"IODTNVRAM\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const IODTNVRAM::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079260a0",
++      "native_symbol": "__ZN14IOPMrootDomain9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32c980; its target is the reviewed IOPMrootDomain::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"IOPMrootDomain\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const IOPMrootDomain::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079272c0",
++      "native_symbol": "__ZN9OSBoolean9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a329f08; its target is the reviewed OSBoolean::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"OSBoolean\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const OSBoolean::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff007927300",
++      "native_symbol": "__ZN8OSSymbol9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32a1c8; its target is the reviewed OSSymbol::gMetaClass, named by its own MetaClass constructor (x0=&g, x1=\"OSSymbol\", paired OSMetaClass ctor). Retained kexts reach it through their GOT (const OSMetaClass *const OSSymbol::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079272b8",
++      "native_symbol": "__ZN12OSDictionary9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a329f80; its target gMetaClass 0xfffffff00a329f80 lines up with native OSDictionary::metaClass/gMetaClass references in paired functions with equal reference sequences (8 metaClass + 3 gMetaClass). Retained kexts reach it through their GOT (const OSMetaClass *const OSDictionary::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079272c8",
++      "native_symbol": "__ZN8OSNumber9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32a0d8; its target gMetaClass 0xfffffff00a32a0d8 lines up with native OSNumber::metaClass/gMetaClass references in paired functions with equal reference sequences (2 metaClass + 2 gMetaClass). Retained kexts reach it through their GOT (const OSMetaClass *const OSNumber::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079272e0",
++      "native_symbol": "__ZN8OSString9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32a1f0; its target gMetaClass 0xfffffff00a32a1f0 lines up with native OSString::metaClass/gMetaClass references in paired functions with equal reference sequences (11 metaClass + 2 gMetaClass). Retained kexts reach it through their GOT (const OSMetaClass *const OSString::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079272f0",
++      "native_symbol": "__ZN6OSData9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a329f58; its target gMetaClass 0xfffffff00a329f58 lines up with native OSData::metaClass/gMetaClass references in paired functions with equal reference sequences (8 metaClass + 2 gMetaClass; AppleImage4 OSDynamicCast(OSData) in the 2026-11-05 19:36 probe boot read -1 through it). Retained kexts reach it through their GOT (const OSMetaClass *const OSData::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079272f8",
++      "native_symbol": "__ZN7OSArray9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a329ee0; its target gMetaClass 0xfffffff00a329ee0 lines up with native OSArray::metaClass/gMetaClass references in paired functions with equal reference sequences (6 metaClass + 2 gMetaClass). Retained kexts reach it through their GOT (const OSMetaClass *const OSArray::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0078f5d40",
++      "native_symbol": "__ZN11IOMemoryMap9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32b330; its target gMetaClass 0xfffffff00a32b330 lines up with native IOMemoryMap::metaClass/gMetaClass references in paired functions with equal reference sequences (1 gMetaClass, and \"IOMemoryMap\" is the only class name loaded next to it). Retained kexts reach it through their GOT (const OSMetaClass *const IOMemoryMap::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff0079274e8",
++      "native_symbol": "__ZN24IOBufferMemoryDescriptor9metaClassE",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot holding a chained pointer to 0xfffffff00a32c7c0; its target gMetaClass 0xfffffff00a32c7c0 lines up with native IOBufferMemoryDescriptor::metaClass/gMetaClass references in paired functions with equal reference sequences (1 gMetaClass, and only IOBufferMemoryDescriptor/IOSKMemoryBuffer(subclass) names are loaded next to it). Retained kexts reach it through their GOT (const OSMetaClass *const IOBufferMemoryDescriptor::metaClass) for OSDynamicCast/metaCast. Source: libkern/c++/OSMetaClass.h OSDefineMetaClassWithInit."
++    },
++    {
++      "original": "0xfffffff007925648",
++      "native_symbol": "_kernel_map",
++      "addend": 0,
++      "evidence": "Kernel __DATA_CONST slot (SECURITY_READ_ONLY_LATE vm_map_t kernel_map). In 19 paired functions with equal data-reference sequences the native reference at the same position is _kernel_map (runner-up _PAGE_SHIFT_CONST: 5). sandbox loads it through its GOT and passes it to vm_map_page_mask; unmapped, it read the native vtable now at the old address and faulted at +0x34 (probe boot 2026-11-05 20:46). Source: osfmk/vm/vm_kern.c kernel_map."
++    },
++    {
++      "original": "0xfffffff00a2ba3c0",
++      "native_symbol": "_NDR_record",
++      "addend": 0,
++      "evidence": "In 8 paired functions with equal data-reference sequences the native reference at the same position is _NDR_record (runner-up ___stack_chk_guard: 1); referenced by AMFI and sandbox MIG code. Source: osfmk/mach/ndr.c NDR_record."
++    },
++    {
++      "original": "0xfffffff007926d60",
++      "native_symbol": "__ZTV9IOService",
++      "addend": 0,
++      "evidence": "Original kernel vtable (offset-to-top 0, RTTI 0, then authenticated slots). Every slot has the same IA key, address diversity and discriminator as the native __ZTV9IOService slot at the same index, and the paired slot functions agree after the vtable PAC audit corrections. Retained IOService/OSObject subclasses reach it through their GOT for super:: calls; AppleImage4 IOService::init through it failed PAC while unmapped (probe boot 2026-11-05 21:58)."
++    },
++    {
++      "original": "0xfffffff007927618",
++      "native_symbol": "__ZTV8OSObject",
++      "addend": 0,
++      "evidence": "Original kernel vtable (offset-to-top 0, RTTI 0, then authenticated slots). Every slot has the same IA key, address diversity and discriminator as the native __ZTV8OSObject slot at the same index, and the paired slot functions agree after the vtable PAC audit corrections. Retained IOService/OSObject subclasses reach it through their GOT for super:: calls; AppleImage4 IOService::init through it failed PAC while unmapped (probe boot 2026-11-05 21:58)."
++    },
++    {
++      "original": "0xfffffff0078f0f90",
++      "native_symbol": "__ZTV5IOCPU",
++      "addend": 0,
++      "evidence": "Original kernel vtable (offset-to-top 0, RTTI 0, then authenticated slots). Every slot has the same IA key, address diversity and discriminator as the native __ZTV5IOCPU slot at the same index, and the paired slot functions agree after the vtable PAC audit corrections. Retained IOService/OSObject subclasses reach it through their GOT for super:: calls; AppleImage4 IOService::init through it failed PAC while unmapped (probe boot 2026-11-05 21:58)."
++    },
++    {
++      "original": "0xfffffff0078ee0e8",
++      "native_symbol": "__ZTV18IOMemoryDescriptor",
++      "addend": 0,
++      "evidence": "Original kernel vtable (offset-to-top 0, RTTI 0, then authenticated slots). Every slot has the same IA key, address diversity and discriminator as the native __ZTV18IOMemoryDescriptor slot at the same index, and the paired slot functions agree after the vtable PAC audit corrections. Retained IOService/OSObject subclasses reach it through their GOT for super:: calls; AppleImage4 IOService::init through it failed PAC while unmapped (probe boot 2026-11-05 21:58)."
++    },
++    {
++      "original": "0xfffffff00a2bc940",
++      "native_symbol": "_vnop_searchfs_desc",
++      "addend": 0,
++      "evidence": "struct vnodeop_desc in original kernel __DATA: its vdesc_name pointer (at +8) points to the string \"vnop_searchfs\". apfs references it from its vnodeopv_entry_desc table; the other 55 descriptors apfs uses are already paired to their native _vnop_*_desc by name. Unbound, vfs_fsadd read a nameless operation and panicked \"operation not listed in vfs_op_descs\" (probe boot 2026-11-06 14:25). As the README notes, vnode descriptors must resolve to the native descriptors VFS initializes. Source: bsd/vfs/vnode_if.c vnop_searchfs_desc."
++    }
++  ]
++}
+-- 
+2.53.0
+

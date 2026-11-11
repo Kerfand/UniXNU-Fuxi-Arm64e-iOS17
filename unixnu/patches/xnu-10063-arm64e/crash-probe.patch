@@ -1,0 +1,75 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1960,6 +1960,71 @@
+ 	if (p->p_crash_behavior != 0 || p == initproc) {
+ 		proc_handle_critical_exit(p, rv);
+ 	}
++	{
++		/* crash-probe.patch (log only): why daemons die, for the first 40 crashing processes. */
++		extern int unixnu_thread_user_state(thread_t, uint64_t *);
++		extern int fill_procregioninfo(task_t, uint64_t, struct proc_regioninfo_internal *, uintptr_t *, uint32_t *);
++		static uint32_t unixnu_crash_seen;
++		bool reason = PROC_HAS_EXITREASON(p) && p->p_exit_reason->osr_namespace != 0;
++		if ((hassigprop(WTERMSIG(rv), SA_CORE) || (proc_getcsflags(p) & CS_KILLED) || reason) &&
++		    __atomic_fetch_add(&unixnu_crash_seen, 1, __ATOMIC_RELAXED) < 40) {
++			uint64_t st[9] = {0};
++			printf("unixnu crash: pid %d %s signal %d status %d reason ns %u code %#llx csflags %#x\n", proc_getpid(p),
++			    p->p_comm, WTERMSIG(rv), WEXITSTATUS(rv), reason ? p->p_exit_reason->osr_namespace : 0,
++			    reason ? p->p_exit_reason->osr_code : 0, proc_getcsflags(p));
++			if (unixnu_thread_user_state(self, st)) {
++				printf("unixnu crash:   pc %#llx lr %#llx sp %#llx far %#llx esr %#llx x0 %#llx x16 %#llx x17 %#llx\n",
++				    st[0], st[1], st[2], st[3], st[4], st[6], st[7], st[8]);
++				{
++					/* Shared cache slide (dyld_all_image_infos +0x98) and the instruction words around pc. */
++					extern mach_vm_address_t task_get_all_image_info_addr(task_t);
++					mach_vm_address_t infos = task ? task_get_all_image_info_addr(task) : 0;
++					uint64_t slide = 0, base = 0;
++					uint32_t insn[4] = {0, 0, 0, 0};
++					if (infos) {
++						(void)copyin((user_addr_t)infos + 0x98, &slide, sizeof(slide));
++						(void)copyin((user_addr_t)infos + 0xb0, &base, sizeof(base));
++					}
++					(void)copyin((user_addr_t)(st[0] - 8), insn, sizeof(insn));
++					printf("unixnu crash:   cache slide %#llx base %#llx insn[pc-8..] %08x %08x %08x %08x\n", slide, base,
++					    insn[0], insn[1], insn[2], insn[3]);
++					extern void unixnu_print_crash_info(uint64_t);
++					unixnu_print_crash_info(infos);
++				}
++				{
++					/* x19..x28 and six words at x19 / x25 - 8 (the object a runtime routine was handed). */
++					extern int unixnu_thread_user_regs(thread_t, uint64_t *);
++					uint64_t r[29] = {0}, m[6] = {0}, n[6] = {0};
++					if (unixnu_thread_user_regs(self, r)) {
++						printf("unixnu crash:   x19 %#llx x20 %#llx x21 %#llx x22 %#llx x23 %#llx\n", r[19], r[20], r[21], r[22], r[23]);
++						printf("unixnu crash:   x24 %#llx x25 %#llx x26 %#llx x27 %#llx x28 %#llx\n", r[24], r[25], r[26], r[27], r[28]);
++						(void)copyin((user_addr_t)r[19], m, sizeof(m));
++						(void)copyin((user_addr_t)(r[25] - 8), n, sizeof(n));
++						printf("unixnu crash:   [x19] %#llx %#llx %#llx %#llx %#llx %#llx\n", m[0], m[1], m[2], m[3], m[4], m[5]);
++						printf("unixnu crash:   [x25-8] %#llx %#llx %#llx %#llx %#llx %#llx\n", n[0], n[1], n[2], n[3], n[4], n[5]);
++					}
++				}
++				for (int i = 0; i < 2; i++) {
++					struct proc_regioninfo region = {0};
++					uintptr_t vnodeaddr = 0;
++					uint32_t vnodeid = 0;
++					char path[MAXPATHLEN];
++					int length = sizeof(path);
++					path[0] = 0;
++					if (!task || !fill_procregioninfo(task, st[i], (struct proc_regioninfo_internal *)&region, &vnodeaddr,
++					    &vnodeid)) {
++						continue;
++					}
++					if (vnodeaddr && vnode_getwithvid((vnode_t)vnodeaddr, vnodeid) == 0) {
++						vn_getpath((vnode_t)vnodeaddr, path, &length);
++						vnode_put((vnode_t)vnodeaddr);
++					}
++					printf("unixnu crash:   %s in [%#llx +%#llx] off %#llx %s\n", i ? "lr" : "pc", region.pri_address,
++					    region.pri_size, region.pri_offset, path[0] ? path : "(anonymous)");
++				}
++			}
++		}
++	}
+ 
+ 	if (task) {
+ 		corpse_source = vm_map_is_corpse_source(get_task_map(task));

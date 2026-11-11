@@ -1,0 +1,1 @@
+../../device/scripts/build-metal-runtime-diagnostic.py

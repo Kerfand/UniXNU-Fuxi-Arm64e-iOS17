@@ -1,0 +1,1 @@
+../../device/scripts/package-sheng-boot-v4.py

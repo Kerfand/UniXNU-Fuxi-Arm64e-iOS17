@@ -1,0 +1,445 @@
+From 433316d68a6fd3cf43aabe6d76cdf55540f2467b Mon Sep 17 00:00:00 2001
+From: Kerfand <Kerfand@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 14:39:38 +0800
+Subject: [PATCH] fuxi: arm64e xnu-10063 kernel for the iOS 17.7 21H16
+ kernelcache
+
+Checkpoint 1 of the iPhone15,2 iOS 17.7 move: an arm64e xnu-10063 kernel
+prelinked with the original 21H16 fileset kexts boots on fuxi to the
+root-device wait (fastboot boot only).
+
+- patches/xnu-10063-arm64e: native PAC keys, threaded starts, upstream clang
+  __ptrauth form, the fileset unmapped-call stub with the unixnu-unmapped
+  probe (logs site, x0-x3, x16), keeping a split 2 MB block's mapping on the
+  4K-page kernel, signing the early security initializer before the call,
+  and the IIG StateNotificationItemCreate handler without a member function
+  pointer cast.
+- scripts: kernel and cc_kext slices follow UNIXNU_XNU_ARCH; arm64e adds the
+  function pointer type discrimination Apple clang uses for -mkernel.
+- kits/XnuPrelink: 21H16 fileset support and reviewed identities.
+- .gitignore: the out-ios17 output root.
+---
+ .gitignore                                    |   3 +
+ kits/XnuPrelink                               |   2 +-
+ .../arm64e-threaded-starts.patch              |  22 +++
+ .../early-security-init-sign.patch            |  29 ++++
+ .../fileset-unmapped-call.patch               |  51 +++++++
+ .../iig-state-notification-handler.patch      |  12 ++
+ .../xnu-10063-arm64e/native-pac-keys.patch    | 134 ++++++++++++++++++
+ .../split-block-keeps-mapping.patch           |  23 +++
+ .../upstream-clang-auth-null.patch            |  19 +++
+ scripts/linux/prepare-xnu.py                  |   5 +-
+ scripts/unixnu/kernel.py                      |  12 +-
+ 11 files changed, 307 insertions(+), 5 deletions(-)
+ create mode 100644 patches/xnu-10063-arm64e/arm64e-threaded-starts.patch
+ create mode 100644 patches/xnu-10063-arm64e/early-security-init-sign.patch
+ create mode 100644 patches/xnu-10063-arm64e/fileset-unmapped-call.patch
+ create mode 100644 patches/xnu-10063-arm64e/iig-state-notification-handler.patch
+ create mode 100644 patches/xnu-10063-arm64e/native-pac-keys.patch
+ create mode 100644 patches/xnu-10063-arm64e/split-block-keeps-mapping.patch
+ create mode 100644 patches/xnu-10063-arm64e/upstream-clang-auth-null.patch
+
+diff --git a/.gitignore b/.gitignore
+index 59fc3d9..97f4d51 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -50,3 +50,6 @@ __pycache__/
+ .env
+ local.toml
+ unixnu.local.toml
++
++# iOS 17 bring-up output root (UNIXNU_OUT); products never belong in Git
++/out-ios17/
+diff --git a/kits/XnuPrelink b/kits/XnuPrelink
+index b1888c1..ddb7afa 160000
+--- a/kits/XnuPrelink
++++ b/kits/XnuPrelink
+@@ -1 +1 @@
+-Subproject commit b1888c12456c46a2226d63c794465dfcee08d465
++Subproject commit ddb7afa0046668b3d44efe0cc5c986f1c442644d
+diff --git a/patches/xnu-10063-arm64e/arm64e-threaded-starts.patch b/patches/xnu-10063-arm64e/arm64e-threaded-starts.patch
+new file mode 100644
+index 0000000..0585842
+--- /dev/null
++++ b/patches/xnu-10063-arm64e/arm64e-threaded-starts.patch
+@@ -0,0 +1,22 @@
++diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
++--- a/makedefs/MakeInc.def
+++++ b/makedefs/MakeInc.def
++@@ -860,9 +860,18 @@
++ # arm64e specific linker flags that should be used only when linking the kernel
++ # (and not the static kernel cache / kcgen)
++ #
+++ifeq ($(XNU_KERNEL_CHAINED_FIXUPS),1)
++ LDFLAGS_KERNEL_ONLY_SUBARCH_arm64e = \
++ 	-Wl,-add_split_seg_info \
++ 	-Wl,-kernel
+++else
+++# A standalone arm64e MH_EXECUTE boots without a kernel collection builder:
+++# arm_init rebases and signs __TEXT,__thread_starts, which the classic ld64 emits; the fileset
+++# prelink moves the segments by their split-segment relocations.
+++LDFLAGS_KERNEL_ONLY_SUBARCH_arm64e = \
+++	-Wl,-add_split_seg_info \
+++	-Wl,-threaded_starts_section
+++endif
++
++ LDFLAGS_KERNEL_ONLY_SUBARCH_x86_64 = \
++ 	-Wl,-add_split_seg_info \
+diff --git a/patches/xnu-10063-arm64e/early-security-init-sign.patch b/patches/xnu-10063-arm64e/early-security-init-sign.patch
+new file mode 100644
+index 0000000..91e6c88
+--- /dev/null
++++ b/patches/xnu-10063-arm64e/early-security-init-sign.patch
+@@ -0,0 +1,29 @@
++diff --git a/libkern/c++/OSKext.cpp b/libkern/c++/OSKext.cpp
++index 411850b..7a57054 100644
++--- a/libkern/c++/OSKext.cpp
+++++ b/libkern/c++/OSKext.cpp
++@@ -39,6 +39,7 @@ extern "C" {
++ #include <vm/vm_map.h>
++ #include <kextd/kextd_mach.h>
++ #include <libkern/kernel_mach_header.h>
+++#include <ptrauth.h>
++ #include <libkern/kext_panic_report.h>
++ #include <libkern/kext_request_keys.h>
++ #include <libkern/mkext.h>
++@@ -8483,7 +8484,15 @@ OSKext::start(bool startDependenciesFlag)
++ 			if (!executable) {
++ 				panic("NativePrelink: early security initializer outside module code");
++ 			}
++-			((void (*)(void))target)();
+++			/*
+++			 * target is an address computed from the prelink property, not a signed function pointer. On arm64e
+++			 * this call compiles to blraaz (IA key, zero discriminator), so sign it the same way first; the type
+++			 * discriminator macro differs here (0x4a27), which would fail authentication. No-op without ptrauth.
+++			 */
+++			typedef void (*early_security_init_t)(void);
+++			early_security_init_t early_security_init = (early_security_init_t)ptrauth_sign_unauthenticated(
+++				(void *)target, ptrauth_key_function_pointer, 0);
+++			early_security_init();
++ 	#else
++ 			panic("NativePrelink: early security initializer requires MAC framework");
++ 	#endif
+diff --git a/patches/xnu-10063-arm64e/fileset-unmapped-call.patch b/patches/xnu-10063-arm64e/fileset-unmapped-call.patch
+new file mode 100644
+index 0000000..f039419
+--- /dev/null
++++ b/patches/xnu-10063-arm64e/fileset-unmapped-call.patch
+@@ -0,0 +1,51 @@
++diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
++index dac0091..0750ea1 100644
++--- a/osfmk/kern/debug.c
+++++ b/osfmk/kern/debug.c
++@@ -2273,3 +2273,46 @@ set_awl_scratch_exists_flag_and_subscribe_for_pm(void)
++ 	}
++ }
++ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, set_awl_scratch_exists_flag_and_subscribe_for_pm);
+++
+++/*
+++ * Target of original kext calls into kernel functions this kernel does not have (fileset emission
+++ * redirects them here). The return address is the call site in the original component.
+++ *
+++ * The entry is assembly so the probe also sees x16: an original component that reaches this stub through a
+++ * tail call from an indirect call (blraa/braa x16) leaves the intermediate function's address there.
+++ *
+++ * Probe: boot-arg unixnu-unmapped=1 logs each call (site, x0..x3, x16) and returns 0 to the caller, so one
+++ * boot lists the unmapped calls startup actually reaches. The 64th call, or any call without the
+++ * boot-arg, panics with the same message. Returning 0 is not a substitute implementation.
+++ */
+++__asm__(
+++	"	.text\n"
+++	"	.globl	_unixnu_fileset_unmapped\n"
+++	"	.p2align	2\n"
+++	"_unixnu_fileset_unmapped:\n"
+++	"	bti	c\n"
+++	"	mov	x4, x16\n"
+++	"	b	_unixnu_fileset_unmapped_report\n");
+++
+++static uint32_t unixnu_fileset_unmapped_hits;
+++static int unixnu_fileset_unmapped_mode = -1;
+++
+++__attribute__((noinline, used))
+++uint64_t
+++unixnu_fileset_unmapped_report(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t x16)
+++{
+++	void *site = __builtin_ptrauth_strip(__builtin_return_address(0), 0);
+++	uint32_t hit = os_atomic_inc(&unixnu_fileset_unmapped_hits, relaxed);
+++
+++	if (unixnu_fileset_unmapped_mode < 0) {
+++		uint32_t mode = 0;
+++		unixnu_fileset_unmapped_mode = PE_parse_boot_argn("unixnu-unmapped", &mode, sizeof(mode)) ? (int)mode : 0;
+++	}
+++	if (unixnu_fileset_unmapped_mode > 0 && hit < 64) {
+++		printf("fileset: unmapped call #%u from %p (x0 0x%llx x1 0x%llx x2 0x%llx x3 0x%llx x16 0x%llx); returning 0\n",
+++		    hit, site, arg0, arg1, arg2, arg3, (uint64_t)__builtin_ptrauth_strip((void *)x16, 0));
+++		return 0;
+++	}
+++	panic("fileset: original component called an unmapped kernel function from %p (x0 0x%llx x1 0x%llx x16 0x%llx) hit %u",
+++	    site, arg0, arg1, (uint64_t)__builtin_ptrauth_strip((void *)x16, 0), hit);
+++}
+diff --git a/patches/xnu-10063-arm64e/iig-state-notification-handler.patch b/patches/xnu-10063-arm64e/iig-state-notification-handler.patch
+new file mode 100644
+index 0000000..81a925f
+--- /dev/null
++++ b/patches/xnu-10063-arm64e/iig-state-notification-handler.patch
+@@ -0,0 +1,12 @@
++--- a/iokit/DriverKit/Makefile
+++++ b/iokit/DriverKit/Makefile
++@@ -60,6 +60,9 @@
++ 	%.h : %.iig
++ 	@$(LOG_IIG) "$@"
++ 	$(_v)$(IIG) --def $< --header $@ --impl $(patsubst %.h,%.iig.cpp,$@) --framework-name DriverKit ${OTHER_IIG_FLAGS} -- ${OTHER_IIG_CFLAGS} $(_vstdout)
+++ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),arm64e)
+++	@if [ "$(notdir $@)" = IOService.h ]; then python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); a=sys.argv[2]; assert s.count(a)==1; p.write_text(s.replace(a,sys.argv[3]))' "$(patsubst %.h,%.iig.cpp,$@)" 'SimpleMemberFunctionCast(IOService::StateNotificationItemCreate_Handler, *self, &IOService::StateNotificationItemCreate_Impl)' '[](OSMetaClassBase *object, OSString *name, OSDictionary *schema) -> kern_return_t { return static_cast<IOService *>(object)->StateNotificationItemCreate_Impl(name, schema); }'; fi
+++endif
++ 
++ $(GENERATED_IMPL) : $(GENERATED_HEADERS)
++ 
+diff --git a/patches/xnu-10063-arm64e/native-pac-keys.patch b/patches/xnu-10063-arm64e/native-pac-keys.patch
+new file mode 100644
+index 0000000..3cad32d
+--- /dev/null
++++ b/patches/xnu-10063-arm64e/native-pac-keys.patch
+@@ -0,0 +1,134 @@
++diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
++index 575d018..8b8cb11 100644
++--- a/osfmk/arm64/machine_routines_asm.s
+++++ b/osfmk/arm64/machine_routines_asm.s
++@@ -93,6 +93,11 @@ Lcre_start_\@:
++ 	.align 2
++ 	.globl EXT(ml_enable_user_jop_key)
++ LEXT(ml_enable_user_jop_key)
+++#if HAS_NATIVE_PAC
+++	/* The kernel and every process share one key set; nothing to switch. */
+++	mov		x0, #0
+++	ret
+++#endif /* HAS_NATIVE_PAC */
++ #if HAS_PARAVIRTUALIZED_PAC
++ 	mov 	x2, x0
++ 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
++@@ -109,6 +114,9 @@ LEXT(ml_enable_user_jop_key)
++ 	.align 2
++ 	.globl EXT(ml_disable_user_jop_key)
++ LEXT(ml_disable_user_jop_key)
+++#if HAS_NATIVE_PAC
+++	ret
+++#endif /* HAS_NATIVE_PAC */
++ #if HAS_PARAVIRTUALIZED_PAC
++ 	mov 	x2, x1
++ 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
++diff --git a/osfmk/arm64/pac_asm.h b/osfmk/arm64/pac_asm.h
++index a52a447..24ec6cc 100644
++--- a/osfmk/arm64/pac_asm.h
+++++ b/osfmk/arm64/pac_asm.h
++@@ -43,6 +43,11 @@
++ 
++ #if defined(HAS_APPLE_PAC)
++ 
+++#if HAS_NATIVE_PAC
+++/* IA, IB, DA, DB and GA keys, two words each */
+++#define NATIVE_PAC_KEY_WORDS	10
+++#endif /* HAS_NATIVE_PAC */
+++
++ 
++ /* BEGIN IGNORE CODESTYLE */
++ 
++@@ -146,6 +151,55 @@
++  *   tmp2 - scratch register
++  */
++ .macro PAC_INIT_KEY_STATE	tmp, tmp2
+++#if HAS_NATIVE_PAC
+++	/*
+++	 * ARMv8.3 keys are shared by EL0 and EL1. The kernel and every process
+++	 * use one key set per boot. The first CPU through here derives it from
+++	 * the counter with splitmix64; every later entry, including warm resets,
+++	 * loads the stored set. The MMU is off on this path, so the stores reach
+++	 * memory and later CPUs read them there. Clobbers x2-x6.
+++	 */
+++	adrp	\tmp, EXT(native_pac_keys)@page
+++	add		\tmp, \tmp, EXT(native_pac_keys)@pageoff
+++	ldr		\tmp2, [\tmp, #(NATIVE_PAC_KEY_WORDS * 8)]
+++	cbnz	\tmp2, 2f
+++	mrs		\tmp2, CNTPCT_EL0
+++	MOV64	x3, 0x9e3779b97f4a7c15
+++	MOV64	x4, 0xbf58476d1ce4e5b9
+++	MOV64	x5, 0x94d049bb133111eb
+++	mov		x2, #0
+++1:
+++	add		\tmp2, \tmp2, x3
+++	eor		x6, \tmp2, \tmp2, lsr #30
+++	mul		x6, x6, x4
+++	eor		x6, x6, x6, lsr #27
+++	mul		x6, x6, x5
+++	eor		x6, x6, x6, lsr #31
+++	str		x6, [\tmp, x2, lsl #3]
+++	add		x2, x2, #1
+++	cmp		x2, #(NATIVE_PAC_KEY_WORDS)
+++	b.lo	1b
+++	mov		x2, #1
+++	str		x2, [\tmp, #(NATIVE_PAC_KEY_WORDS * 8)]
+++	dsb		sy
+++2:
+++	ldp		x2, x3, [\tmp, #0]
+++	msr		APIAKeyLo_EL1, x2
+++	msr		APIAKeyHi_EL1, x3
+++	ldp		x2, x3, [\tmp, #16]
+++	msr		APIBKeyLo_EL1, x2
+++	msr		APIBKeyHi_EL1, x3
+++	ldp		x2, x3, [\tmp, #32]
+++	msr		APDAKeyLo_EL1, x2
+++	msr		APDAKeyHi_EL1, x3
+++	ldp		x2, x3, [\tmp, #48]
+++	msr		APDBKeyLo_EL1, x2
+++	msr		APDBKeyHi_EL1, x3
+++	ldp		x2, x3, [\tmp, #64]
+++	msr		APGAKeyLo_EL1, x2
+++	msr		APGAKeyHi_EL1, x3
+++	isb		sy
+++#endif /* HAS_NATIVE_PAC */
++ #if HAS_PARAVIRTUALIZED_PAC
++ #if HIBERNATION
++ 	#error PAC_INIT_KEY_STATE is not implemented for HAS_PARAVIRTUALIZED_PAC && HIBERNATION
++diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
++index 11de723..5763466 100644
++--- a/osfmk/arm64/start.s
+++++ b/osfmk/arm64/start.s
++@@ -893,3 +893,12 @@ arm_init_tramp:
++ //#include	"globals_asm.h"
++ 
++ /* vim: set ts=4: */
+++
+++#if HAS_NATIVE_PAC
+++	/* Key set of PAC_INIT_KEY_STATE and its ready word; written with the MMU off. */
+++	.section __DATA, __data
+++	.align 4
+++	.globl EXT(native_pac_keys)
+++LEXT(native_pac_keys)
+++	.space	(NATIVE_PAC_KEY_WORDS + 1) * 8, 0
+++#endif /* HAS_NATIVE_PAC */
++diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
++--- a/pexpert/pexpert/arm64/BCM2837.h
+++++ b/pexpert/pexpert/arm64/BCM2837.h
++@@ -8,6 +8,15 @@
++ #define NO_MONITOR 1
++ #define NO_ECORE 1
++ 
+++/*
+++ * arm64e on a non-Apple ARMv8.3 CPU: pointer authentication uses the
+++ * architectural key registers (see HAS_NATIVE_PAC in arm64/pac_asm.h).
+++ */
+++#if defined(__arm64e__)
+++#define HAS_APPLE_PAC             1
+++#define HAS_NATIVE_PAC            1
+++#endif
+++
++ #define BCM2837
++ #define BCM2837_BRINGUP
++ #define ARM_ARCH_TIMER
+diff --git a/patches/xnu-10063-arm64e/split-block-keeps-mapping.patch b/patches/xnu-10063-arm64e/split-block-keeps-mapping.patch
+new file mode 100644
+index 0000000..2955aec
+--- /dev/null
++++ b/patches/xnu-10063-arm64e/split-block-keeps-mapping.patch
+@@ -0,0 +1,23 @@
++diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
++index a688021..f9e5dfe 100644
++--- a/osfmk/arm64/arm_vm_init.c
+++++ b/osfmk/arm64/arm_vm_init.c
++@@ -1021,6 +1021,18 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
++ 
++ 			ppte = (pt_entry_t*)alloc_ptpage(pa_offset == 0);
++ 			bzero(ppte, ARM_PGBYTES);
+++			if ((tmplate & ARM_TTE_VALID) && ((tmplate & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_BLOCK)) {
+++				/*
+++				 * Splitting a live block: keep its mapping for the pages this request does not cover.
+++				 * Without this, a 4K-page kernel loses the rest of the 2MB block, e.g. kext headers in
+++				 * a fileset __PRELINK_TEXT beyond the end of a kernel __TEXT placed inside it.
+++				 */
+++				pt_entry_t attrs = (pt_entry_t)(tmplate & ~(ARM_TTE_BLOCK_L2_MASK | ARM_PTE_HINT_MASK | 0x3ULL));
+++				pmap_paddr_t block_pa = (pmap_paddr_t)(tmplate & ARM_TTE_BLOCK_L2_MASK);
+++				for (i = 0; i <= (ARM_TT_L3_INDEX_MASK >> ARM_TT_L3_SHIFT); i++) {
+++					ppte[i] = attrs | (block_pa + ((pmap_paddr_t)i << ARM_PGSHIFT)) | ARM_PTE_TYPE_VALID;
+++				}
+++			}
++ 			ppte_phys = kvtophys((vm_offset_t)ppte);
++ 
++ 			*tte2 = pa_to_tte(ppte_phys) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
+diff --git a/patches/xnu-10063-arm64e/upstream-clang-auth-null.patch b/patches/xnu-10063-arm64e/upstream-clang-auth-null.patch
+new file mode 100644
+index 0000000..570e88d
+--- /dev/null
++++ b/patches/xnu-10063-arm64e/upstream-clang-auth-null.patch
+@@ -0,0 +1,19 @@
++diff --git a/libkern/os/base.h b/libkern/os/base.h
++--- a/libkern/os/base.h
+++++ b/libkern/os/base.h
++@@ -347,7 +347,15 @@
++ #if __has_feature(ptrauth_calls)
++ #include <ptrauth.h>
++ #define OS_PTRAUTH_SIGNED_PTR(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type))
+++#if __has_feature(ptrauth_qualifier_authenticate_null_values) || defined(__apple_build_version__)
++ #define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type), "authenticates-null-values")
+++#else
+++/*
+++ * Upstream clang has no fourth __ptrauth argument. The only user is ucred.cr_label, which is never
+++ * null, and a non-null value is signed the same way with or without authenticates-null-values.
+++ */
+++#define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type))
+++#endif
++ #define OS_PTRAUTH_DISCRIMINATOR(str) ptrauth_string_discriminator(str)
++ #define __ptrauth_only
++ #else //  __has_feature(ptrauth_calls)
+diff --git a/scripts/linux/prepare-xnu.py b/scripts/linux/prepare-xnu.py
+index efef7a6..60f4d66 100755
+--- a/scripts/linux/prepare-xnu.py
++++ b/scripts/linux/prepare-xnu.py
+@@ -9,6 +9,7 @@
+ Each rewrite checks whether it is still needed, so both modes can run on every build.
+ """
+ from pathlib import Path
++import os
+ import shutil
+ import subprocess
+ import sys
+@@ -120,7 +121,9 @@ def build_cc_kext():
+     objects.mkdir(parents=True, exist_ok=True)
+     out.parent.mkdir(parents=True, exist_ok=True)
+     for name in PROFILE_SOURCES:
+-        subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-arch', 'arm64', '-isysroot', FAKEROOT,
++        # The kernel slice: arm64, or arm64e for the iOS 17 iPhone kernelcaches (UNIXNU_XNU_ARCH).
++        arch = os.environ.get('UNIXNU_XNU_ARCH', 'arm64')
++        subprocess.run(['xcrun', 'clang', '-target', f'{arch}-apple-ios17.0', '-arch', arch, '-isysroot', FAKEROOT,
+                         '-mkernel', '-DKERNEL_USE', '-O3', '-fPIC', '-w',
+                         '-I', rt / 'include', '-I', FAKEROOT / 'System/Library/Frameworks/Kernel.framework/Headers',
+                         '-idirafter', src / 'Libc/include', '-idirafter', XNU / 'libsyscall/wrappers',
+diff --git a/scripts/unixnu/kernel.py b/scripts/unixnu/kernel.py
+index ac2723c..69ca092 100644
+--- a/scripts/unixnu/kernel.py
++++ b/scripts/unixnu/kernel.py
+@@ -92,14 +92,20 @@ def linux_env(ctx):
+         if not path.exists():
+             raise Error(f'{path} missing; run "sudo scripts/linux/setup-toolchain.py {toolchain}"')
+     fakeroot = ctx.tree / '.cache/fakeroot'
++    # arm64e (iOS 17 iPhone kernelcaches) also needs the function pointer discrimination Apple clang uses
++    # for -mkernel; upstream clang has it opt-in.
++    arch = os.environ.get('UNIXNU_XNU_ARCH', 'arm64')
++    extra = '-mllvm -disable-atexit-based-global-dtor-lowering'
++    if arch == 'arm64e':
++        extra = '-fptrauth-function-pointer-type-discrimination ' + extra
+     return {'PATH': os.pathsep.join([str(clt / 'bin'), str(toolchain / 'bin'), os.environ.get('PATH', '')]),
+             'LC_ALL': 'C', 'CLT_PREFIX': str(clt), 'XCTOOLCHAIN_PREFIX': str(xctoolchain),
+             'XNU_TOOLCHAIN_BIN': f'{clt / "bin"} {xctoolchain / "bin"}',
+             'UNIXNU_SDKROOT': str(fakeroot), 'UNIXNU_SDK_VERSION': '17.0',
+             'UNIXNU_PLATFORM_PATH': str(fakeroot / 'Platforms/iPhoneOS.platform'),
+-            'CROSS_CLANG': str(toolchain / 'llvm/bin/clang'), 'DARWIN_TRIPLE': 'arm64-apple-ios17.0',
+-            'CROSS_EXTRA_FLAGS': '-mllvm -disable-atexit-based-global-dtor-lowering',
+-            'CCC_OVERRIDE_OPTIONS': '# +-Wno-missing-designated-field-initializers +-Wno-unused-but-set-global'}
++            'CROSS_CLANG': str(toolchain / 'llvm/bin/clang'), 'DARWIN_TRIPLE': f'{arch}-apple-ios17.0',
++            'CROSS_EXTRA_FLAGS': extra,
++            'CCC_OVERRIDE_OPTIONS': '# +-Wno-missing-designated-field-initializers +-Wno-unused-but-set-global +-Wno-unsafe-buffer-usage +-Wno-shadow-header'}
+ 
+ 
+ def archive_plan(ctx):
+-- 
+2.53.0
+

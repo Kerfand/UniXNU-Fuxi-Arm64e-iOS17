@@ -1,0 +1,1 @@
+../../device/scripts/check-boot-process-probe.py

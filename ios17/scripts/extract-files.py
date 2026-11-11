@@ -1,0 +1,1 @@
+../../device/scripts/extract-files.py

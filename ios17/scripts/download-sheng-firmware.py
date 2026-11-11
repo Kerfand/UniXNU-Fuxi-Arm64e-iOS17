@@ -1,0 +1,1 @@
+../../device/scripts/download-sheng-firmware.py

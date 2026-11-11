@@ -1,0 +1,19 @@
+diff --git a/libkern/os/base.h b/libkern/os/base.h
+--- a/libkern/os/base.h
++++ b/libkern/os/base.h
+@@ -347,7 +347,15 @@
+ #if __has_feature(ptrauth_calls)
+ #include <ptrauth.h>
+ #define OS_PTRAUTH_SIGNED_PTR(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type))
++#if __has_feature(ptrauth_qualifier_authenticate_null_values) || defined(__apple_build_version__)
+ #define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type), "authenticates-null-values")
++#else
++/*
++ * Upstream clang has no fourth __ptrauth argument. The only user is ucred.cr_label, which is never
++ * null, and a non-null value is signed the same way with or without authenticates-null-values.
++ */
++#define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type))
++#endif
+ #define OS_PTRAUTH_DISCRIMINATOR(str) ptrauth_string_discriminator(str)
+ #define __ptrauth_only
+ #else //  __has_feature(ptrauth_calls)

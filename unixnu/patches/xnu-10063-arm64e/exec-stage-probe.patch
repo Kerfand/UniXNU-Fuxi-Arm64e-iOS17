@@ -1,0 +1,203 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -327,6 +327,7 @@
+ #include <sys/imgact.h>
+ 
+ #include <sys/sdt.h>
++extern void unixnu_stage(unsigned int);   /* exec-stage-probe.patch: on-screen stage mark (osfmk/arm64/pcb.c) */
+ 
+ 
+ /*
+@@ -1190,6 +1191,7 @@
+ static int
+ exec_mach_imgact(struct image_params *imgp)
+ {
++	unixnu_stage(3);
+ 	struct mach_header *mach_header = (struct mach_header *)imgp->ip_vdata;
+ 	proc_t                  p = vfs_context_proc(imgp->ip_vfs_context);
+ 	int                     error = 0;
+@@ -2211,6 +2213,7 @@
+ static int
+ exec_activate_image(struct image_params *imgp)
+ {
++	unixnu_stage(2);
+ 	struct nameidata *ndp = NULL;
+ 	const char *excpath;
+ 	int error;
+@@ -2247,6 +2250,7 @@
+ 	    UIO_SYSSPACE, CAST_USER_ADDR_T(excpath), imgp->ip_vfs_context);
+ 
+ again:
++	unixnu_stage(11);
+ 	error = namei(ndp);
+ 	if (error) {
+ 		if (error == ERESTART) {
+@@ -2254,6 +2258,7 @@
+ 		}
+ 		goto bad_notrans;
+ 	}
++	unixnu_stage(12);
+ 	imgp->ip_ndp = ndp;     /* successful namei(); call nameidone() later */
+ 	imgp->ip_vp = ndp->ni_vp;       /* if set, need to vnode_put() at some point */
+ 
+@@ -2276,6 +2281,7 @@
+ 		goto bad_notrans;
+ 	}
+ 
++	unixnu_stage(13);
+ 	error = exec_check_permissions(imgp);
+ 	if (error) {
+ 		goto bad;
+@@ -2287,6 +2293,7 @@
+ 		*imgp->ip_origvattr = *imgp->ip_vattr;
+ 	}
+ 
++	unixnu_stage(14);
+ 	error = vn_rdwr(UIO_READ, imgp->ip_vp, imgp->ip_vdata, PAGE_SIZE, 0,
+ 	    UIO_SYSSPACE, IO_NODELOCKED,
+ 	    vfs_context_ucred(imgp->ip_vfs_context),
+@@ -2300,6 +2307,7 @@
+ 	}
+ 
+ encapsulated_binary:
++	unixnu_stage(15);
+ 	/* Limit the number of iterations we will attempt on each binary */
+ 	if (++itercount > EAI_ITERLIMIT) {
+ 		error = EBADEXEC;
+@@ -5167,6 +5175,7 @@
+ int
+ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+ {
++	unixnu_stage(1);
+ 	struct image_params *imgp = NULL;
+ 	struct vnode_attr *vap = NULL;
+ 	struct vnode_attr *origvap = NULL;
+@@ -6482,6 +6491,7 @@
+ static int
+ exec_check_permissions(struct image_params *imgp)
+ {
++	unixnu_stage(22);
+ 	struct vnode *vp = imgp->ip_vp;
+ 	struct vnode_attr *vap = imgp->ip_vattr;
+ 	proc_t p = vfs_context_proc(imgp->ip_vfs_context);
+@@ -6502,6 +6512,7 @@
+ 	VATTR_WANTED(vap, va_fsid64);
+ 	VATTR_WANTED(vap, va_fileid);
+ 	VATTR_WANTED(vap, va_data_size);
++	unixnu_stage(18);
+ 	if ((error = vnode_getattr(vp, vap, imgp->ip_vfs_context)) != 0) {
+ 		return error;
+ 	}
+@@ -6544,6 +6555,7 @@
+ 	}
+ 
+ #if CONFIG_MACF
++	unixnu_stage(19);
+ 	error = mac_vnode_check_exec(imgp->ip_vfs_context, vp, imgp);
+ 	if (error) {
+ 		return error;
+@@ -6556,12 +6568,14 @@
+ 	if (p->p_lflag & P_LTRACED) {
+ 		action |= KAUTH_VNODE_READ_DATA;
+ 	}
++	unixnu_stage(20);
+ 	if ((error = vnode_authorize(vp, NULL, action, imgp->ip_vfs_context)) != 0) {
+ 		return error;
+ 	}
+ 
+ #if 0
+ 	/* Don't let it run if anyone had it open for writing */
++	unixnu_stage(21);
+ 	vnode_lock(vp);
+ 	if (vp->v_writecount) {
+ 		panic("going to return ETXTBSY %x", vp);
+diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -94,6 +94,7 @@
+ #include <os/overflow.h>
+ 
+ #include "kern_exec_internal.h"
++extern void unixnu_stage(unsigned int);   /* exec-stage-probe.patch: on-screen stage mark (osfmk/arm64/pcb.c) */
+ 
+ /* XXX should have prototypes in a shared header file */
+ extern int      get_map_nentries(vm_map_t);
+@@ -449,6 +450,7 @@
+ 	load_result_t           *result
+ 	)
+ {
++	unixnu_stage(4);
+ 	struct vnode            *vp = imgp->ip_vp;
+ 	off_t                   file_offset = imgp->ip_arch_offset;
+ 	off_t                   macho_size = imgp->ip_arch_size;
+@@ -788,6 +790,7 @@
+ 	struct image_params     *imgp
+ 	)
+ {
++	unixnu_stage(5);
+ 	uint32_t                ncmds;
+ 	struct load_command     *lcp;
+ 	struct dylinker_command *dlp = 0;
+@@ -2070,6 +2073,7 @@
+ 	load_result_t           *result,
+ 	struct image_params     *imgp)
+ {
++	unixnu_stage(6);
+ 	struct segment_command_64 segment_command, *scp;
+ 	kern_return_t           ret;
+ 	vm_map_size_t           delta_size;
+@@ -3054,6 +3058,7 @@
+ 	struct image_params     *imgp
+ 	)
+ {
++	unixnu_stage(10);
+ 	const char              *name;
+ 	struct vnode            *vp = NULLVP;   /* set by get_macho_vnode() */
+ 	struct mach_header      *header;
+@@ -3428,6 +3433,7 @@
+ 	load_result_t                   *result,
+ 	struct image_params             *imgp)
+ {
++	unixnu_stage(7);
+ 	int             ret;
+ 	kern_return_t   kr;
+ 	vm_offset_t     addr;
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -100,6 +100,7 @@
+     ((void) ((cond) ? 0 : panic("Assert failed: %s", # cond)))
+ #else
+ #include <kern/assert.h>
++extern void unixnu_stage(unsigned int);   /* exec-stage-probe.patch: on-screen stage mark (osfmk/arm64/pcb.c) */
+ #endif /* DIAGNOSTIC */
+ 
+ static int ubc_info_init_internal(struct vnode *vp, int withfsize, off_t filesize);
+@@ -4666,6 +4667,7 @@
+ 	__unused int    flags,
+ 	struct cs_blob  **ret_blob)
+ {
++	unixnu_stage(8);
+ 	ptrauth_generic_signature_t cs_blob_sig = {0};
+ 	struct ubc_info *uip = NULL;
+ 	struct cs_blob tmp_blob = {0};
+diff --git a/security/mac_vfs.c b/security/mac_vfs.c
+--- a/security/mac_vfs.c
++++ b/security/mac_vfs.c
+@@ -88,6 +88,7 @@
+ #include <miscfs/devfs/fdesc.h>
+ 
+ #include <security/mac_internal.h>
++extern void unixnu_stage(unsigned int);   /* exec-stage-probe.patch: on-screen stage mark (osfmk/arm64/pcb.c) */
+ 
+ /* convert {R,W,X}_OK values to V{READ,WRITE,EXEC} */
+ #define ACCESS_MODE_TO_VNODE_MASK(m)    (m << 6)
+@@ -1330,6 +1331,7 @@
+     unsigned int *cs_flags, unsigned int *signer_type,
+     int flags, unsigned int platform)
+ {
++	unixnu_stage(9);
+ 	int error;
+ 	char *fatal_failure_desc = NULL;
+ 	size_t fatal_failure_desc_len = 0;

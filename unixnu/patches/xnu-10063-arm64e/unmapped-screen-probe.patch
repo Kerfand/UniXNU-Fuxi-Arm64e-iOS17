@@ -1,0 +1,27 @@
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1145,6 +1145,11 @@
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif
++	{
++		/* unmapped-screen-probe.patch: panic identity on screen (osfmk/arm64/pcb.c). */
++		extern void unixnu_panic_screen(const char *, va_list *, void *, unsigned long);
++		unixnu_panic_screen(panic_format_str, panic_args, ctx, panic_caller);
++	}
+ 
+ #if CONFIG_SPTM
+ 	/*
+@@ -2303,6 +2308,11 @@
+ {
+ 	void *site = __builtin_ptrauth_strip(__builtin_return_address(0), 0);
+ 	uint32_t hit = os_atomic_inc(&unixnu_fileset_unmapped_hits, relaxed);
++	{
++		/* unmapped-screen-probe.patch: also draw the hit on screen (osfmk/arm64/pcb.c), for a dead console. */
++		extern void unixnu_unmapped_screen(uint32_t, void *, uint64_t, uint64_t);
++		unixnu_unmapped_screen(hit, site, x16, arg0);
++	}
+ 
+ 	if (unixnu_fileset_unmapped_mode < 0) {
+ 		uint32_t mode = 0;

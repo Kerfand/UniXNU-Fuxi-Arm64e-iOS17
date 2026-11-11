@@ -1,0 +1,1 @@
+../../device/scripts/seed-data-skip-setup.py

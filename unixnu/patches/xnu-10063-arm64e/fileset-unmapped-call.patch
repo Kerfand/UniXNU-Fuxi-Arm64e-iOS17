@@ -1,0 +1,51 @@
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index dac0091..0750ea1 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -2273,3 +2273,46 @@ set_awl_scratch_exists_flag_and_subscribe_for_pm(void)
+ 	}
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, set_awl_scratch_exists_flag_and_subscribe_for_pm);
++
++/*
++ * Target of original kext calls into kernel functions this kernel does not have (fileset emission
++ * redirects them here). The return address is the call site in the original component.
++ *
++ * The entry is assembly so the probe also sees x16: an original component that reaches this stub through a
++ * tail call from an indirect call (blraa/braa x16) leaves the intermediate function's address there.
++ *
++ * Probe: boot-arg unixnu-unmapped=1 logs each call (site, x0..x3, x16) and returns 0 to the caller, so one
++ * boot lists the unmapped calls startup actually reaches. The 64th call, or any call without the
++ * boot-arg, panics with the same message. Returning 0 is not a substitute implementation.
++ */
++__asm__(
++	"	.text\n"
++	"	.globl	_unixnu_fileset_unmapped\n"
++	"	.p2align	2\n"
++	"_unixnu_fileset_unmapped:\n"
++	"	bti	c\n"
++	"	mov	x4, x16\n"
++	"	b	_unixnu_fileset_unmapped_report\n");
++
++static uint32_t unixnu_fileset_unmapped_hits;
++static int unixnu_fileset_unmapped_mode = -1;
++
++__attribute__((noinline, used))
++uint64_t
++unixnu_fileset_unmapped_report(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t x16)
++{
++	void *site = __builtin_ptrauth_strip(__builtin_return_address(0), 0);
++	uint32_t hit = os_atomic_inc(&unixnu_fileset_unmapped_hits, relaxed);
++
++	if (unixnu_fileset_unmapped_mode < 0) {
++		uint32_t mode = 0;
++		unixnu_fileset_unmapped_mode = PE_parse_boot_argn("unixnu-unmapped", &mode, sizeof(mode)) ? (int)mode : 0;
++	}
++	if (unixnu_fileset_unmapped_mode > 0 && hit < 64) {
++		printf("fileset: unmapped call #%u from %p (x0 0x%llx x1 0x%llx x2 0x%llx x3 0x%llx x16 0x%llx); returning 0\n",
++		    hit, site, arg0, arg1, arg2, arg3, (uint64_t)__builtin_ptrauth_strip((void *)x16, 0));
++		return 0;
++	}
++	panic("fileset: original component called an unmapped kernel function from %p (x0 0x%llx x1 0x%llx x16 0x%llx) hit %u",
++	    site, arg0, arg1, (uint64_t)__builtin_ptrauth_strip((void *)x16, 0), hit);
++}

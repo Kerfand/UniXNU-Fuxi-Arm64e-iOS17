@@ -1,0 +1,44 @@
+diff --git a/docs/drivers/sheng-hid-input.md b/docs/drivers/sheng-hid-input.md
+index 6bdbb99..9189a3c 100644
+--- a/docs/drivers/sheng-hid-input.md
++++ b/docs/drivers/sheng-hid-input.md
+@@ -19,3 +19,5 @@ The catalog records implementation scope, hardware and OS requirements, board de
+ [Component catalog](/reference/components)
+ 
+ For the iPadOS 26 source-build path and its current linking/runtime limits, see [public-source driver builds](/porting/migration#source-drivers). Historical iOS 17 device results do not qualify this path.
++
++Local fuxi iPadOS17 build: the board runtime touch flag also enables the shared combined digitizer and contact sink. This restores the activation branch found in the working t32 image; rebuild hardware validation is pending.
+diff --git a/docs/zh/drivers/sheng-hid-input.md b/docs/zh/drivers/sheng-hid-input.md
+index 7ca3ae3..f57cc28 100644
+--- a/docs/zh/drivers/sheng-hid-input.md
++++ b/docs/zh/drivers/sheng-hid-input.md
+@@ -19,3 +19,5 @@ sheng 触控、按键与 IOHIDFamily 的集成。
+ [组件目录](/zh/reference/components)
+ 
+ iPadOS 26 的源码构建方法及当前链接、运行时限制见[公开源码驱动构建](/zh/porting/migration#source-drivers)。历史 iOS 17 真机结果不代表该路径已通过验证。
++
++本机 fuxi iPadOS17 构建：共享 HID 同时接受板级运行时触控启用标记，启用组合数字化器和触点接收回调。这恢复了可用 t32 镜像中的启用分支；新构建仍待实机验证。
+diff --git a/drivers/Adreno740 b/drivers/Adreno740
+--- a/drivers/Adreno740
++++ b/drivers/Adreno740
+@@ -1 +1 @@
+-Subproject commit a9a2cbb43b89d672e2921e19721a6438b738b17f
++Subproject commit a9a2cbb43b89d672e2921e19721a6438b738b17f-dirty
+diff --git a/drivers/AdrenoMetal b/drivers/AdrenoMetal
+--- a/drivers/AdrenoMetal
++++ b/drivers/AdrenoMetal
+@@ -1 +1 @@
+-Subproject commit a0f0287be80a5d8aef5c6b97a6cab62129e152bd
++Subproject commit a0f0287be80a5d8aef5c6b97a6cab62129e152bd-dirty
+diff --git a/drivers/GopFramebuffer b/drivers/GopFramebuffer
+--- a/drivers/GopFramebuffer
++++ b/drivers/GopFramebuffer
+@@ -1 +1 @@
+-Subproject commit 19ef3a75ad2c53da85b8d923553d922716fce377
++Subproject commit 19ef3a75ad2c53da85b8d923553d922716fce377-dirty
+diff --git a/kits/XnuPrelink b/kits/XnuPrelink
+--- a/kits/XnuPrelink
++++ b/kits/XnuPrelink
+@@ -1 +1 @@
+-Subproject commit ddb7afa0046668b3d44efe0cc5c986f1c442644d
++Subproject commit ddb7afa0046668b3d44efe0cc5c986f1c442644d-dirty

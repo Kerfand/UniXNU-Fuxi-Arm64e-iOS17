@@ -1,0 +1,238 @@
+# Board description of the Xiaomi 13 (fuxi, SM8550), read by the unixnu build driver.
+
+[board]
+name = "fuxi"
+soc = "SM8550"
+description = "Xiaomi 13"
+# The archive builders inherited from sheng all address the device package as
+# kits/sheng (115 references), so keep that name: it is only the link name the
+# build tree uses for package/, not the board identity.
+kit = "sheng"
+
+# Checkpoint 1 of the iOS 17 move: the iPhone15,2 iOS 17.7 21H16 kernelcache, arm64e kernel, no userdata.
+# The target OS image (was the iPad7,1 iPadOS 17.7.11 restore image). Give --ipsw PATH to use a local file; without
+# it the remote url is read with range requests, only the members that are needed.
+[ipsw]
+url = "file:///mnt/c/Users/Xiaomi/Downloads/iPhone15,2_17.7_21H16_Restore.ipsw"
+product = "iPhone15,2"
+version = "17.7"
+build = "21H16"
+device_class = "d73ap"
+chip_id = 0x8120
+board_id = 12
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+
+[ipsw.sha256]
+
+# The raw image for the userdata partition: the OS and SystemOS disk images of the IPSW behind a manifest.
+# first_lba and last_lba are the GPT entry "userdata" of LUN 0, read from the tablet.
+[userdata]
+first_lba = 0x2F7840
+# last_lba as NativeUfs read it from this phone's LUN 0 GPT (native-ufs-probe=10, 2026-11-06:
+# userdata first=0x2f7840 last=0x3afc3fa); the earlier 0x76923FA did not match the device.
+last_lba = 0x3AFC3FA
+lba_bytes = 4096
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
+
+[kernel]
+defconfig = "fuxi_ios17_kernel_defconfig"
+# Archive builders of the kernel step, in order. Each is a script of the build tree with its arguments.
+# Checkpoint 2b, the iPadOS owner-root chain on 21H16: NativeAES on the 21H16 IOAESAccelerator bindings,
+# NativeUfs and NativeVirtioBlock in verified multi-policy mode (NativeVirtioBlock carries the storage
+# bindings of scripts/data/native-storage-original-bindings.S), and the header-only VerifiedRoot inputs
+# of build-ios17-verified-root.py (the hash tables are userdata data objects "<window>.hashes").
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "build-arm-driver.py ArmDTPlatform",
+  "build-arm-driver.py ArmCpu",
+  "build-arm-driver.py NativeAES",
+  "build-native-aes-bindings.py",
+  "build-arm-driver.py NativeUfs --verified-root --verified-root-bundle",
+  "build-arm-driver.py NativeVirtioBlock --verified-root --verified-root-bundle",
+  "build-arm-driver.py NativeRamBlock",
+  "build-libpthread-kernel.py",
+  "build-ios17-verified-root.py",
+  "build-boot-log.py",
+  "build-fuxi-usb-debug.py",
+  "prepare-fuxi-gmu.py --dtb ../../../../uefi-fuxi/Resources/DTBs/fuxi.dtb",
+  "prepare-fuxi-gmu-votes.py --dtb ../../../../uefi-fuxi/Resources/DTBs/fuxi.dtb",
+  "prepare-fuxi-command-db-oracle.py",
+  "prepare-fuxi-driver-compat.py",
+  "build-arm-driver.py Adreno740",
+  "build-adreno740-kits.py",
+  "build-adreno740-accelerator.py",
+  "build-ios17-hid-input.py",
+  "build-ios17-legacy-display.py",
+  "build-ios17-stubs.py",
+]
+
+
+[kernel.prelink]
+tool = "kits/XnuPrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+kernelcache_sha256 = "9bd1028796b0baa12922ab44fda1805b11595981338288c7881c669238d352e5"
+slide = "-0x1000000"
+# _initializeAppleMobileFileIntegrity of 21H16 (pacibsp entry; same body as 21H461 0xfffffff005ab4ae0).
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff008f2c4c4"
+# Bring-up: match against the symbol-bearing RELEASE build of the same XNU source and send
+# unmatched calls to the reporting stub of fileset-unmapped-call.patch.
+# The kexts right after the original kernel code (AppleARMPlatform, AppleARMWatchdogTimer) cap the native code
+# at the original kernel's code size; --move-code moves their __TEXT_EXEC (+0x200000, fileset_move.py) so the
+# native kernel can carry the GPU driver.
+extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--allow-missing",
+              "--move-code", "com.apple.driver.AppleARMPlatform", "--move-code", "com.apple.driver.AppleARMWatchdogTimer"]
+# Checkpoint 1 (root wait): security, crypto, storage and filesystem kexts only. The iPad list's audio,
+# display, GPU and HDCP families are left out; they also keep the original kernel's holes too small.
+roots = [
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.driver.AppleMobileFileIntegrity",
+  "com.apple.filesystems.apfs",
+  "com.apple.iokit.IOStorageFamily",
+  "com.apple.kec.corecrypto",
+  "com.apple.kec.Libm",
+  "com.apple.kext.AppleMatch",
+  "com.apple.kext.CoreTrust",
+  "com.apple.security.AppleImage4",
+  "com.apple.security.sandbox",
+  "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOHIDEventDriver",
+  # Codeless: the kernel IOHIDEventDriver personality for digitizers (usage page 13), used with dk=0.
+  "com.apple.iokit.IOHIDEventDriverSafeBoot",
+  # Display bring-up: IOSurface (every graphics client) and the non-DCP IOMobileGraphicsFamily that holds
+  # IOMobileFramebufferLegacy, the original lifecycle the GOP framebuffer backend binds to.
+  "com.apple.iokit.IOSurface",
+  # GPU: the original IOAcceleratorES base of the staged AGXAccelerator (Metal discovery matches IOAcceleratorES).
+  "com.apple.iokit.IOGPUFamily",
+  # Display: the non-DCP IOMobileGraphicsFamily (IOMobileFramebufferLegacy, same ABI as 21H461). It pulls 9
+  # audio/AV/HDCP/DART/scaler dependencies; the largest __PRELINK_TEXT gap left is 0x139499, which fits native __TEXT
+  # only with assert-expr-strings.patch (0x164000 -> 0x120000).
+  "com.apple.iokit.IOMobileGraphicsFamily",
+]
+
+[firmware]
+config = "fuxi"                   # Resources/Configs/sheng.toml in the Mu-Silicium checkout (--uefi)
+dsc = "Platforms/Xiaomi/fuxiPkg/fuxi.dsc"
+fd = "Build/fuxiPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+preflight = ["scripts/check-fuxi.py"]
+submodules = ["Common/Mu", "Common/Mu_OEM_Sample", "Silicium-ACPI", "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
+patches = ["Resources/MuPatches/Gic-Spurious.patch"]
+packages = [
+  "{uefi}",
+  "{uefi}/Platforms/Xiaomi",
+  "{tree}/package",
+  "{tree}/drivers/DarwinBoot",
+  "{edk2}",
+  "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample",
+  "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium",
+  "{uefi}/Silicon/Samsung",
+  "{uefi}/Silicium-ACPI",
+  "{uefi}/Silicium-ACPI/Platforms/Xiaomi",
+  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
+]
+
+[firmware.defines]
+ENABLE_SECUREBOOT = "1"
+DEVICE_MODEL = "fuxi"
+MEMORY_PROTECTION = "TRUE"
+SHIP_MODE = "FALSE"
+BUILDID_STRING = "fuxi-research"
+
+# The ramdisk of the boot image: a FAT volume with the UniXNU config, the kernel, its device tree and
+# the optional trust cache and Data seed. The loader (DarwinBoot) is part of the firmware volume.
+[payload]
+volume = "FUXIESP"
+size_mib = 176
+loader = "firmware"
+tools = true                      # show the Tools menu (menu plugins, e.g. Advanced Logger)
+title = "fuxi first boot: source 4K XNU to console"
+dram_size = "0x80000000"             # SMEM RAM table observed on the device
+skip_setup_tool = "scripts/seed-data-skip-setup.py"   # used by --skip-setup
+panic_screen = true                  # patch panic() screen output into the payload copy of the kernel
+# The original static/System trust caches, and the owner trust bundle built around them.
+trust_cache_sha256 = [
+  "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
+  "8900d6a93d7a59ce1a872a5c081e559f4240a218f97e12d44d22dda46644d68f",
+]
+kernel_args = [
+  "serial=3",
+  "debug=0x14e",
+  "kt_fixed_zones=120",
+  "offline-apfs-load=1",
+  "-apfs_shared_datavolume",
+  "offline-key-events=1",
+  "offline-legacy-register=1",
+  "offline-legacy-gop=1",
+  "offline-legacy-unit-scale=2",
+  "offline-legacy-pm=1",
+  "offline-legacy-validate=1",
+  "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1",
+  "offline-legacy-phase=4",
+  "offline-mobile-graphics-client=1",
+  "offline-mobile-graphics-load=1",
+  "boot-ui-focus4=SpringBoard",
+  "native-fuxi-ufs-root=1",
+  "sheng-log=1",
+  "sheng-pmgr=2",
+  "sheng-gpu-metal=1",
+  "sheng-gpu-addon=1",
+  "sheng-gpu-dcvs=1",
+  "sheng-fb-gpu=1",
+  "sheng-vsync=120",
+  "sheng-dpu=3",
+  "armcpu-spi-ipi=1",
+  "sheng-smp=1",
+  "sheng-cpufreq=4",
+  "sheng-aks=1",
+  "sheng-gpu-power=9",
+  "sheng-gpu-pause-us=100",
+  "sheng-disable-watchdogd=1",
+  "sheng-disable-jobs=com.apple.identityservicesd,com.apple.locationd,com.apple.CommCenter,com.apple.bluetoothd,com.apple.liveactivitiesd",
+  "sheng-lite=1",
+  "sheng-data-persist=2",
+  "qcom-usb-debug=1",
+  "-no_slto_panic",
+  "ml-timeout-lock-panic-scale=40",
+  "fuxi-touch=4",
+  "fuxi-touch-poll=1",
+  "fuxi-touch-hid=1",
+  "fuxi-buttons=1",
+  "fuxi-wifi=3",
+  "sheng-backlight=1",
+  "fuxi-backlight=dsi",
+]
+text_fixups = [
+  "dyld_shared_cache_arm64.43,384eda4,f85fbca9f65701a9,000080d2c0035fd6",
+  "dyld_shared_cache_arm64.13,afebd0,fd7bbfa9fd030091,000080d2c0035fd6",
+  "dyld_shared_cache_arm64.13,afec74,e923bd6df44f01a9,000080d2c0035fd6",
+  "BTAudioHALPlugin,38bec,ffc300d1f44f01a9,000080d2c0035fd6",
+]
+
+[payload.adt]
+tool = "scripts/make-fuxi-adt.py"
+chip_id = "207"
+# fuxiPkg/MemoryMapLib exposes the 6 GiB conventional bank at 0x980000000;
+# DarwinBoot places the window at the run start plus the kernel's 0x7C000 base
+# offset, so a 4.75 GiB request (sheng's value) fits with headroom. This is the
+# RAM XNU sees: the previous 320 MiB low window booted into launchd but left
+# only ~32 MiB free and jetsam kept killing SpringBoard/powerd.
+owned_memory_size = "0x130000000"
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+packed_data_ramdisk = true
+persistent_data = true
+# Match the installed iPad7,1 iPadOS 17.7.11 system; no phone override.
+ipad_identity = true
+unique_chip_id = "required"          # the platform seed is not stored in any repository
+
+# Image parameters come from the Mu-Silicium device config; [bootimg.image] would override them.
+
+# fuxi.dtb already contains /reserved-memory/splash_region, so do not add it again.
+# The legacy `unixnu bootimg` node patch fails on that node with FDT_ERR_EXISTS;
+# `unixnu bootimage` packs the live tree as-is and tolerates nodes that already exist.

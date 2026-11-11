@@ -1,0 +1,1 @@
+../../device/scripts/build-sheng-payload.py

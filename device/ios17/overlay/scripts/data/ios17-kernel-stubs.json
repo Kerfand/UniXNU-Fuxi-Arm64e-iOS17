@@ -1,0 +1,314 @@
+{
+ "boot_progress_banner_rows": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_progress_banner_text": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_progress_ext": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_progress_ext_wide": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_progress_page_text": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_progress_panic_text": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_progress_profile_rows": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_progress_tag": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_reset_bootloader": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_reset_probe": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_ui_trace_hot_rows": {
+  "kind": "data",
+  "decl": ""
+ },
+ "boot_ui_trace_role_rows": {
+  "kind": "data",
+  "decl": ""
+ },
+ "fuxi_buttons_stats": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_cache_stats": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_cached_read32": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_client_log": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_coherent_skips": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_dram_read32": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_export_stats": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_fence_phys": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_fence_wait": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_ib_log": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_ib_log_count": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_import_diag": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_import_fail_offset": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_import_fail_pa": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_import_stage": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_io_coherent": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_map_fail": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_metal_askers": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_metal_rows": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_method_stats": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_reassert_ticks": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_ring_log": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_ring_log_count": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_stall": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_stall_mem": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_view_diag": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_vm_phase_us": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_wait_outer": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_adreno_wc_audit": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_cpufreq_row": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_errors": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_first_lba": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_gpt": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_gpt_after": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_header": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_loaded": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_pages": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_present": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_state": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_syncs": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_data_persist_writes": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_dpu_more": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_dpu_pipes": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_dpu_stats": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_gop_wait_stats": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_gpu_coherence_row": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_gpu_idle_sleeps": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_gpu_idle_spins": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_gpu_perf_vote": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_legacy_clients_dump": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_legacy_display_probe": {
+  "kind": "function",
+  "decl": "extern void native_legacy_display_probe(void);"
+ },
+ "native_legacy_prepare_report": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_legacy_properties_now": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_legacy_state_words": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_legacy_swap_timeline": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_process_wait_port": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_touch_extent": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_touch_probe": {
+  "kind": "function",
+  "decl": "extern void native_touch_probe(void);"
+ },
+ "native_touch_stroke_count": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_touch_strokes": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_ufs_export_blocks": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_ufs_export_write": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_ufs_log_open": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_ufs_log_sync": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_ufs_log_write": {
+  "kind": "data",
+  "decl": ""
+ },
+ "native_ufs_store_gpt_check": {
+  "kind": "data",
+  "decl": ""
+ }
+}

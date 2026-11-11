@@ -1,0 +1,12 @@
+--- a/iokit/DriverKit/Makefile
++++ b/iokit/DriverKit/Makefile
+@@ -60,6 +60,9 @@
+ 	%.h : %.iig
+ 	@$(LOG_IIG) "$@"
+ 	$(_v)$(IIG) --def $< --header $@ --impl $(patsubst %.h,%.iig.cpp,$@) --framework-name DriverKit ${OTHER_IIG_FLAGS} -- ${OTHER_IIG_CFLAGS} $(_vstdout)
++ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),arm64e)
++	@if [ "$(notdir $@)" = IOService.h ]; then python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); a=sys.argv[2]; assert s.count(a)==1; p.write_text(s.replace(a,sys.argv[3]))' "$(patsubst %.h,%.iig.cpp,$@)" 'SimpleMemberFunctionCast(IOService::StateNotificationItemCreate_Handler, *self, &IOService::StateNotificationItemCreate_Impl)' '[](OSMetaClassBase *object, OSString *name, OSDictionary *schema) -> kern_return_t { return static_cast<IOService *>(object)->StateNotificationItemCreate_Impl(name, schema); }'; fi
++endif
+ 
+ $(GENERATED_IMPL) : $(GENERATED_HEADERS)
+ 

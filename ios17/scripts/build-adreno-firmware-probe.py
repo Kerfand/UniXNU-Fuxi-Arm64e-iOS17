@@ -1,0 +1,1 @@
+../../device/scripts/build-adreno-firmware-probe.py

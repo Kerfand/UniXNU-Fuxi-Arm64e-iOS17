@@ -1,0 +1,1 @@
+../../device/scripts/check-sheng-pmgr-observation.py

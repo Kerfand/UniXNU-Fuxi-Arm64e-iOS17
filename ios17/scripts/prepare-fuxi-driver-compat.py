@@ -1,0 +1,1 @@
+../../device/scripts/prepare-fuxi-driver-compat.py

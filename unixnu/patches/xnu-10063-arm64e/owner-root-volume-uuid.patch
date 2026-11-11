@@ -1,0 +1,24 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7063,6 +7063,11 @@
+ 	printf("offline-owner-cache stage=%d status=%d mount_status=%d authorized=%d root_recheck=%d selected=%d actual=%d union=%d\n", native_owner_cache_stage, native_owner_cache_status, native_owner_cache_mount_status, authorized, native_owner_cache_root_recheck, (int)native_owner_cache_selected_device, (int)native_owner_cache_mounted_device, native_owner_cache_native_union); __asm__ volatile("" : : "r"(status), "r"(authorized) : "memory");
+ }
+ 
++/* owner-root-volume-uuid.patch: the OS volume of the signed root policy (owner-data-volume.h); the sheng/e5 21H461
++ * volume stays the default. */
++#ifndef XNU_OWNER_ROOT_VOLUME_UUID
++#define XNU_OWNER_ROOT_VOLUME_UUID "04769D26-2CA0-4825-B443-E2E5F88300F2"
++#endif
+ static int
+ native_owner_cache_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp)
+ {
+@@ -7174,7 +7179,7 @@
+ 	if (!root_recheck) error = EAUTH;
+ #if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
+ 	if (!error && cache_authorized && root_recheck &&
+-	    !native_owner_publish_boot_manifest(root_device, "04769D26-2CA0-4825-B443-E2E5F88300F2",
++	    !native_owner_publish_boot_manifest(root_device, XNU_OWNER_ROOT_VOLUME_UUID,
+ 	        selected, volume)) error = EAUTH;
+ #endif
+ #if defined(XNU_OWNER_CACHE_STARTUP) && XNU_OWNER_CACHE_STARTUP

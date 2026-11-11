@@ -1,0 +1,1 @@
+../../device/scripts/reconcile-sheng-firmware.py

@@ -1,0 +1,65 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1844,6 +1844,61 @@
+ 		    p->p_exit_reason->osr_namespace, p->p_exit_reason->osr_code, exit_reason_desc ?
+ 		    exit_reason_desc : "none");
+ 	}
++	{
++		/* exit-probe.patch (log only): where the critical process died, then time for the USB console. */
++		extern int unixnu_thread_user_state(thread_t, uint64_t *);
++		extern int fill_procregioninfo(task_t, uint64_t, struct proc_regioninfo_internal *, uintptr_t *, uint32_t *);
++		extern void IOSleep(unsigned int);
++		uint64_t st[9] = {0};
++		if (unixnu_thread_user_state(current_thread(), st)) {
++			printf("unixnu exit: pid %d signal %d status %d pc %#llx lr %#llx sp %#llx far %#llx esr %#llx cpsr %#llx\n",
++			    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv), st[0], st[1], st[2], st[3], st[4], st[5]);
++			printf("unixnu exit:   x0 %#llx x16 %#llx x17 %#llx\n", st[6], st[7], st[8]);
++			for (int i = 0; i < 2; i++) {
++				struct proc_regioninfo region = {0};
++				uintptr_t vnodeaddr = 0;
++				uint32_t vnodeid = 0;
++				char path[MAXPATHLEN];
++				int length = sizeof(path);
++				path[0] = 0;
++				if (!fill_procregioninfo(proc_task(p), st[i], (struct proc_regioninfo_internal *)&region, &vnodeaddr,
++				    &vnodeid)) {
++					printf("unixnu exit:   %s %#llx unmapped\n", i ? "lr" : "pc", st[i]);
++					continue;
++				}
++				if (vnodeaddr && vnode_getwithvid((vnode_t)vnodeaddr, vnodeid) == 0) {
++					vn_getpath((vnode_t)vnodeaddr, path, &length);
++					vnode_put((vnode_t)vnodeaddr);
++				}
++				printf("unixnu exit:   %s %#llx in [%#llx +%#llx] file offset %#llx prot %#x %s\n", i ? "lr" : "pc", st[i],
++				    region.pri_address, region.pri_size, region.pri_offset, region.pri_protection, path[0] ? path : "(anonymous)");
++			}
++		}
++		{
++			/* dyld_all_image_infos (64-bit layout): errorMessage +0x38, errorKind +0x78, errorClientOfDylibPath +0x80,
++			 * errorTargetDylibPath +0x88, errorSymbol +0x90, sharedCacheSlide +0x98, sharedCacheBaseAddress +0xb0. */
++			extern mach_vm_address_t task_get_all_image_info_addr(task_t);
++			mach_vm_address_t infos = task_get_all_image_info_addr(proc_task(p));
++			uint64_t w[0x20] = {0};
++			if (infos && copyin((user_addr_t)infos, w, sizeof(w)) == 0) {
++				printf("unixnu exit: dyld infos %#llx version %u images %u dyld %#llx error kind %llu cache slide %#llx base %#llx\n",
++				    infos, (uint32_t)w[0], (uint32_t)(w[0] >> 32), w[4], w[15], w[19], w[22]);
++				static const char *const names[] = {"message", "client", "target", "symbol"};
++				const int slots[] = {7, 16, 17, 18};
++				for (int i = 0; i < 4; i++) {
++					char text[256];
++					size_t done = 0;
++					uint64_t at = (uint64_t)ptrauth_strip((void *)w[slots[i]], ptrauth_key_asda);
++					if (at && copyinstr((user_addr_t)at, text, sizeof(text), &done) == 0) {
++						printf("unixnu exit:   dyld %s: %s\n", names[i], text);
++					}
++				}
++			} else {
++				printf("unixnu exit: dyld infos %#llx unreadable\n", infos);
++			}
++		}
++		IOSleep(3000);
++	}
+ 
+ 	const char *prefix_str;
+ #if defined(XNU_BOOT_PROGRESS) && XNU_BOOT_PROGRESS

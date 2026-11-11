@@ -1,0 +1,2 @@
+ddb7afa0046668b3d44efe0cc5c986f1c442644d Fileset support for the iPhone15,2 iOS 17.7 (21H16) arm64e kernelcache
+https://github.com/UniXNU/XnuPrelink.git

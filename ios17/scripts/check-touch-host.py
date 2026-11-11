@@ -1,0 +1,1 @@
+../../device/scripts/check-touch-host.py

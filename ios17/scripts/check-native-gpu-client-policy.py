@@ -1,0 +1,1 @@
+../../device/scripts/check-native-gpu-client-policy.py

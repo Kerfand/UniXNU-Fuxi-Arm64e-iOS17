@@ -1,0 +1,1129 @@
+diff --git a/emit_prelink.py b/emit_prelink.py
+index 0c104a6..6e8f8a1 100644
+--- a/emit_prelink.py
++++ b/emit_prelink.py
+@@ -319,6 +319,8 @@ def main():
+     parser.add_argument('--fileset-reference', type=Path, help='symbol-bearing comparison kernel for fileset matching')
+     parser.add_argument('--allow-missing', action='store_true',
+                         help='MH_FILESET only: emit an experimental image with incomplete mappings')
++    parser.add_argument('--move-code', action='append', default=[], metavar='BUNDLE',
++                        help='MH_FILESET only: move this retained kext\'s __TEXT_EXEC past the following free space')
+     args = parser.parse_args()
+     if args.output.exists():
+         raise SystemExit('Refuse to overwrite an existing candidate')
+@@ -361,7 +363,8 @@ def main():
+         # a stale address. Data references still have no such fallback.
+         stub_symbol = '_unixnu_fileset_unmapped' if args.allow_missing else None
+         image, report = emit_images(original_data, native_data, pairing, args.root,
+-                                    stub_symbol=stub_symbol, early_security_init=initializers or None)
++                                    stub_symbol=stub_symbol, early_security_init=initializers or None,
++                                    move_code=args.move_code or None)
+         report.update(kernelcache=str(args.prelinked.resolve()), native=str(args.kernel.resolve()),
+                       map=str(map_path.resolve()))
+         # Filesets use the native link address so early XNU can find their root.
+diff --git a/fileset_emit.py b/fileset_emit.py
+index fcd8b42..37a7918 100755
+--- a/fileset_emit.py
++++ b/fileset_emit.py
+@@ -247,6 +247,8 @@ class Emit:
+         self.old_ranges = ranges(self.old.segments)
+         self.entry_ranges = {}
+         for name, (va, entry_at) in cache.entries.items():
++            if closure is not None and name != 'com.apple.kernel' and name not in closure:
++                continue
+             self.entry_ranges[name] = ranges(Image(bytes(cache.data), entry_at).segments)
+         self.owner_ranges = sorted((begin, end, name) for name, items in self.entry_ranges.items()
+                                    for begin, end in items)
+@@ -679,7 +681,7 @@ def validate_map(raw, native_data, payload):
+     return expected
+ 
+ 
+-def emit_images(raw, native_data, payload, roots, stub_symbol=None, early_security_init=None):
++def emit_images(raw, native_data, payload, roots, stub_symbol=None, early_security_init=None, move_code=None):
+     inputs = validate_map(raw, native_data, payload)
+     from fileset_match import MATCHER_VERSION, matcher_signature
+     if payload.get('matcher_version') != MATCHER_VERSION or payload.get('matcher_signature') != matcher_signature():
+@@ -694,6 +696,11 @@ def emit_images(raw, native_data, payload, roots, stub_symbol=None, early_securi
+         entry = Image(cache.data, cache.entries[identifier][1])
+         if not any(s['name'] == '__TEXT_EXEC' and s['va'] <= address < s['va'] + s['size'] for s in entry.segments):
+             raise ValueError(f'Early security initializer {address:#x} is outside {identifier} code')
++    move_report = None
++    if move_code:
++        # Kext code right after the kernel caps the native code (UNIXNU_FILESET_KERNEL_FIRST); move it first.
++        from fileset_move import move_kext_code
++        cache, move_report = move_kext_code(cache, closure, list(move_code))
+     cache, collection_slide, dropped_personalities = rebase_collection(
+         cache, native.base, closure, early_security_init, set(roots))
+     pairs = {(address + collection_slide) & MASK64: target for address, target in pairs.items()}
+@@ -729,6 +736,7 @@ def emit_images(raw, native_data, payload, roots, stub_symbol=None, early_securi
+                     for owner, targets in sorted(emit.stubbed.items())},
+         'stub_symbol': stub_symbol,
+         'personalities_dropped': dropped_personalities,
++        'moved_code': move_report,
+         'early_security_init': {k: hex(v) for k, v in (early_security_init or {}).items()},
+         'missing_address_space': 'output collection',
+         'mapping_complete': not bool(emit.missing), 'runtime_qualified': False, 'loadable': False,
+diff --git a/fixtures/fileset-21H16-symbols.json b/fixtures/fileset-21H16-symbols.json
+index fb92ef8..66943a8 100644
+--- a/fixtures/fileset-21H16-symbols.json
++++ b/fixtures/fileset-21H16-symbols.json
+@@ -4,6 +4,20 @@
+     "entry": "com.apple.kernel"
+   },
+   "functions": [
++    {
++      "original": "0xfffffff0083a73f0",
++      "original_size": 48,
++      "original_sha256": "b6c15e222ca5e80e69c7d768df2d4d1dbaedce98c0dcd2dc5c07a9f3dfa7ec1d",
++      "native_symbol": "__ZN13IOEventSource8openGateEv",
++      "evidence": "IOEventSource::openGate. 48-byte forwarder in com.apple.kernel __TEXT_EXEC, a function start whose next start is 0xfffffff0083a7420: 'bti c; ldr x0,[x0,#48]' (IOEventSource::_workLoop at +0x30), then authenticated dispatch to IOWorkLoop vtable slot 0xD8 (216) via 'ldr x8,[x16,#216]!; braa x8'. The native IOEventSource::openGate (0xfffffff0084a59c8) uses the identical slot; the neighbouring thunks 0xfffffff0083a73c0 (slot 0xD0) and 0xfffffff0083a7420 (slot 0xE0) match XNU's signalWorkAvailable/openGate/closeGate declaration order. Inside com.apple.iokit.IOHIDFamily the only branch to it is the veneer 0xfffffff009962070 ('bti c; b 0xfffffff0083a73f0'), reached by 'bl' at 0xfffffff009925ac4 (IOHIDDevice::handleReport_u207e+0x98) and 0xfffffff0099278f4 (IOHIDDevice::handleReportWithTime+0x610, vtable slot 197); the emitter sends that veneer to _unixnu_fileset_unmapped, and because the veneer branches with 'b' the stub reports the kext return addresses 0xfffffff009925ac8/0xfffffff0099278f8 (fuxi boots 2026-11-08 21:25). The gates are incidental to delivery, but the report path runs ungated without them. The same thunk is also called from AppleEmbeddedUSB, AppleM68Buttons, AppleOnboardSerial, IOAVFamily, IOSCSIBlockCommandsDevice, IOSkywalkFamily and IOMikeyBusFamily."
++    },
++    {
++      "original": "0xfffffff0083a7420",
++      "original_size": 48,
++      "original_sha256": "a7042fe5b7282abf79f42e87c3d3288de9a06d9a40fb9210f46115b2c0a069d3",
++      "native_symbol": "__ZN13IOEventSource9closeGateEv",
++      "evidence": "IOEventSource::closeGate. 48-byte forwarder in com.apple.kernel __TEXT_EXEC, a function start whose next start is 0xfffffff0083a7450: 'bti c; ldr x0,[x0,#48]' (IOEventSource::_workLoop at +0x30), then authenticated dispatch to IOWorkLoop vtable slot 0xE0 (224) via 'ldr x8,[x16,#224]!; braa x8'. The native IOEventSource::closeGate (0xfffffff0084a5a54) uses the identical slot; 0xfffffff0083a73f0 (openGate, slot 0xD8) and 0xfffffff0083a73c0 (signalWorkAvailable, slot 0xD0) are its neighbours in XNU declaration order. Inside com.apple.iokit.IOHIDFamily the only branch to it is the veneer 0xfffffff009962068 ('bti c; b 0xfffffff0083a7420'), reached by 'bl' at 0xfffffff009925a74 (IOHIDDevice::handleReport_u207e+0x48) and 0xfffffff009927f80 (IOHIDDevice::handleReportWithTime+0x29c); the emitter sends that veneer to _unixnu_fileset_unmapped, hence the boot log sites 0xfffffff009925a78/0xfffffff009927584. Also called from AppleEmbeddedUSB, AppleM68Buttons, AppleOnboardSerial, IOAVFamily, IOSCSIBlockCommandsDevice, IOSkywalkFamily and IOMikeyBusFamily."
++    },
+     {
+       "original": "0xfffffff00845c0ec",
+       "original_size": 36,
+@@ -360,6 +374,1007 @@
+       "original_sha256": "4ad0d46adb132153b700d446e628ecabe13cfa232975cb053c8193fd40824965",
+       "native_symbol": "__ZN9IOService15getPMRootDomainEv",
+       "evidence": "BTI c; ldr x0, [global 0xfffffff00a35c5d0]; ret, between the reviewed getPlatform (reads gIOPlatform) and getResourceService (reads gIOResources); IOService.cpp defines exactly getPlatform, getPMRootDomain, getResourceService in that order (lines 1552-1567). Native getPMRootDomain is the same adrp/ldr/ret. Stubbed for AppleARMPlatform and ApplePMGR. Source: iokit/Kernel/IOService.cpp getPMRootDomain."
++    },
++    {
++      "original": "0xfffffff008377060",
++      "original_size": 16,
++      "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
++      "native_symbol": "__ZN9IOServiceD2Ev",
++      "evidence": "Base-object destructor of IOService. Every IOStorageFamily IOService subclass D2 ends in a BTI/B tail call to it after its own teardown (IOBlockStorageDevice D2 0xfffffff009b2d648 and the adapter at 0xfffffff009b44a98), which is how a C2/D2 pair chains to the direct base. Sits right after the IOService MetaClass/structor block in IOService.cpp; the map names the IOService D1 0xfffffff00843d900 separately. Hit by IOStorageFamily teardown in the fuxi native-ufs-probe=12 boot (2026-11-06, calls #15/#25)."
++    },
++    {
++      "original": "0xfffffff008377d74",
++      "original_size": 68,
++      "original_sha256": "4bf1161c5a9a35ab2d4ff28eea4a57c73d96857653e945b7baa2df11dee39006",
++      "native_symbol": "__ZNK9IOService10isInactiveEv",
++      "evidence": "Calls the virtual at vtable offset 0x298 with PAC discriminator 0xc90d, which in the native kernel belongs only to IOService::getState() const, then returns (result & 1) as bool: kIOServiceInactiveState == 1, i.e. isInactive() { return 0 != (kIOServiceInactiveState & getState()); }. Between IONotifier operator delete and IOSetCoreAnalyticsSendEventProc/IOService::initialize in IOService.cpp. IOStorageFamily called it in the native-ufs-probe=12 boot (call #9)."
++    },
++    {
++      "original": "0xfffffff0083b0d5c",
++      "original_size": 236,
++      "original_sha256": "c3c9b3c8df0d8252b585abcca0e2b8e65125beb78f42202425696a8b88d0489a",
++      "native_symbol": "__ZN24IOBufferMemoryDescriptor12withCapacityEmjb",
++      "evidence": "Allocates through the IOBufferMemoryDescriptor metaclass alloc (vtable +104), then calls the init virtual with options = direction | (contiguous ? kIOMemoryPhysicallyContiguous 0x10 : 0), capacity, alignment = contiguous ? capacity : 1 and releases on failure: the inlined withCapacity(inCapacity, inDirection, inContiguous) of IOBufferMemoryDescriptor.cpp. Sits between IOBufferMemoryDescriptor operator new and withBytes. IOStorageFamily called it with (0x200, kIODirectionIn, false) three times in the native-ufs-probe=12 boot (calls #10/#12/#14)."
++    },
++    {
++      "original": "0xfffffff0083159f8",
++      "original_size": 44,
++      "original_sha256": "0371aebe4a847ade51fe12adb66520cc9832c0289b01ac84568ce63109ef48cc",
++      "native_symbol": "__ZN8OSNumberC2EPK11OSMetaClass",
++      "evidence": "BTI entry that sets retainCount (offset 8) = 1 and stores the signed vptr __ZTV8OSNumber+16 (0xfffffff0078e4f60, paired by vtable layout to native __ZTV8OSNumber): OSNumber(const OSMetaClass *) with the OSObject base constructor inlined. Native OSNumber C2 stores the same paired vtable after OSObject C2. In the OSNumber.cpp block (after the OSNumber MetaClass destructors, before operator delete). apfs calls it right after OSObject_typed_operator_new(24) for an OSNumber subclass and then stores its own vptr through the returned x0; the stub's 0 caused the data abort at 0xfffffff009eff824 (native-ufs-probe=12 boot, call #18)."
++    },
++    {
++      "original": "0xfffffff008328c80",
++      "original_size": 12,
++      "original_sha256": "b50fe8a1f6bf8076998832a62b68f8eeaa6a572fb9b0f229eb0e6f7ac7e2ac58",
++      "native_symbol": "_uuid_clear",
++      "evidence": "BTI c; STP XZR, XZR, [X0]; RET: clears the 16-byte uuid_t, instruction-identical to native uuid_clear. First of the libkern/uuid/uuid.c block (uuid_clear, uuid_compare 0xfffffff008328c8c, uuid_copy 0xfffffff008328c98, then the paired uuid_generate_random). apfs clears two adjacent uuid fields with it. Replaces an earlier behaviour-only bind to an empty function that came from a disassembly which dropped the STP."
++    },
++    {
++      "original": "0xfffffff0082e39ac",
++      "original_size": 180,
++      "original_sha256": "6fae1a727a3b38b61aaf0183ffbc15a0dfb74220f32324ca7246d9897669899a",
++      "native_symbol": "__ZN20OSCollectionIterator14withCollectionEPK12OSCollection",
++      "evidence": "Allocates through a libkern metaclass alloc (gMetaClass vtable +104), calls the init virtual with PAC discriminator 0xbffe on the new object with the single argument, releases and returns NULL on failure. In the native kernel 0xbffe belongs only to OSCollectionIterator::initWithCollection(const OSCollection *): the withCollection factory of OSCollectionIterator.cpp. IOStorageFamily calls it on a property collection (ldr x0, [x20, #184]) three times in the native-ufs-probe=12 boot of 2026-11-06 16:45 (calls #9-#11)."
++    },
++    {
++      "original": "0xfffffff008328c8c",
++      "original_size": 12,
++      "original_sha256": "015c0552d7066dea26a8ea25e45cdd22321d3011765a38a18c203191a81518ed",
++      "native_symbol": "_uuid_compare",
++      "evidence": "BTI c; MOV W2, #16; B memcmp: instruction-identical to native uuid_compare (memcmp of 16 bytes). Between uuid_clear and uuid_copy in libkern/uuid/uuid.c."
++    },
++    {
++      "original": "0xfffffff008328c98",
++      "original_size": 16,
++      "original_sha256": "a80496f17e576dc4bc6f97dca9ff6ac148d8a25c159d8ccb2ded7c03cccee1f4",
++      "native_symbol": "_uuid_copy",
++      "evidence": "BTI c; LDR Q0, [X1]; STR Q0, [X0]; RET: copies the 16-byte uuid_t, instruction-identical to native uuid_copy. Third of the uuid.c block before the paired uuid_generate_random. apfs calls it three times (native-ufs-probe=12 boot 2026-11-06 17:01, calls #14-#16)."
++    },
++    {
++      "original": "0xfffffff007eca8d4",
++      "original_size": 64,
++      "original_sha256": "d03c838fdd9a9db9baf4a2ab9b313865d32607eb5c371282540ac9c61955273a",
++      "native_symbol": "_absolutetime_to_nanoseconds",
++      "evidence": "Divides abstime by the rtclock timebase divisor word, multiplies seconds by 1000000000 (0x3b9aca00), adds remainder*1e9/divisor and stores the nanoseconds through x1: instruction-identical to native absolutetime_to_nanoseconds except the ADRP page. In the rtclock block after rtclock_intr. IOStorageFamily converts I/O times with it (native-ufs-probe=12 boot 2026-11-06 17:01, calls #9-#13, #20)."
++    },
++    {
++      "original": "0xfffffff0082e87d8",
++      "original_size": 56,
++      "original_sha256": "852b4cd7a1780f34944b80ee731a7bfde49c036075f0087303857b9fe98c4677",
++      "native_symbol": "__ZN12OSDictionary9setObjectEPKcRK11OSSharedPtrIK15OSMetaClassBaseE",
++      "evidence": "BTI c; loads x2 = *x2 (the raw pointer of the OSSharedPtr reference) and tail-calls the virtual at vtable +0x100 with PAC discriminator 0xc323, which natively belongs only to OSDictionary::setObject(const char *, const OSMetaClassBase *): the OSSharedPtr const& overload forwarding to it. In the OSDictionary.cpp block after withCapacity. apfs sets \"Physical Block Size\", \"Logical Block Size\" and \"EncryptionBlockSize\" with it (native-ufs-probe=12 boot 2026-11-06 17:01, calls #17-#19)."
++    },
++    {
++      "original": "0xfffffff008315a50",
++      "original_size": 16,
++      "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
++      "native_symbol": "__ZN8OSNumberD2Ev",
++      "evidence": "BTI c; MOV X8, #-1; STR X8, [X0]; RET: the OSNumber destructor with the OSObject/OSMetaClassBase base destructors inlined down to the vptr poison (-1) that OSMetaClassBase::~OSMetaClassBase writes. In the OSNumber.cpp block right after OSNumber C2/C1 (0xfffffff0083159f8/0xfffffff008315a24) and before operator delete. Native OSNumber D2 tail-calls the base destructor chain that ends in the same poison. apfs OSNumber-subclass destructors call it (native-ufs-probe=12 boot 2026-11-06 17:12, calls #9-#12, #15-#18)."
++    },
++    {
++      "original": "0xfffffff007ece180",
++      "original_size": 16,
++      "original_sha256": "4dc850a0d658eb7b5d8c24f544af59869afd82ffff13dc26cc3fe133bc06e4f4",
++      "native_symbol": "__get_commpage_priv_address",
++      "evidence": "BTI c; ADRP; LDR X0, [commpage pointer 0xfffffff0078b9468]; RET. That read-only-late variable (zero in the image) is used by clock_gettimeofday, clock_set_calendar_microtime, clock_update_calendar, processor_up, processor_doshutdown, thread_invoke and thread_quantum_expire, the kernel writers of the commpage, i.e. the writable commpage_rw_addr; natively _get_commpage_priv_address is exactly LDR X0, commpage_rw_addr; RET. Sits after commpage_populate. apfs reads commpage byte 19 through it; the stub 0 made it fault at 0xfffffff009ecd8c0 (native-ufs-probe=12 boot 2026-11-06 17:12, call #13)."
++    },
++    {
++      "original": "0xfffffff007eda018",
++      "original_size": 56,
++      "original_sha256": "36fc986151c8d88eba7ddedfd09909700c9b7d83526ae7db35b2157a8fd0ed78",
++      "native_symbol": "_crc32",
++      "evidence": "Table-driven CRC-32 (crc, buf, len): ~crc, per byte table[(b ^ crc) & 0xff] ^ (crc >> 8), returns ~crc. Instruction-identical to native crc32 except the table ADRP page. In the bsd/libkern block next to random and strsep. IOStorageFamily checks the 92-byte GPT header with crc32(0, header, 92) (native-ufs-probe=12 boot 2026-11-06 17:12, call #14), which the stub 0 failed."
++    },
++    {
++      "original": "0xfffffff007df6fe8",
++      "original_size": 80,
++      "original_sha256": "dcea729188aadac98ac26e35acf5e6c1feee70d3da5215500c060754000aa84a",
++      "native_symbol": "_zfree",
++      "evidence": "Loads (zone, stats) from the zone view in x0, bzero(addr, zone element size u16 at +52) and tail-calls zfree_ext(zone, stats, addr, size): the zeroing zfree(zone_or_view, addr) of osfmk/kern/zalloc.c, between the paired zfree_nozero_n and zfree_percpu. apfs frees through a zone view with it (native-ufs-probe=12 boot 2026-11-06 17:33, calls #12-#31, #36-#50)."
++    },
++    {
++      "original": "0xfffffff00835c0a0",
++      "original_size": 212,
++      "original_sha256": "e5b7875d3c25d7f3daf559577f3628d50f9ba9680c5ce3475f50e5605fb116b4",
++      "native_symbol": "__ZN15IORegistryEntry16propertyHasValueEPKcPK8OSObject",
++      "evidence": "Calls the virtual with PAC discriminator 0x5a20 (natively IORegistryEntry::copyProperty(const char *)) on this with the key, returns true when both are NULL, else value->isEqualTo(property) (discriminator 0xfc74 = isEqualTo(const OSMetaClassBase *)) and releases the copy: propertyHasValue(const char *, const OSObject *) of IORegistryEntry.cpp, after copyPropertyKeys. apfs tests \"Ejectable\" and \"Removable\" with it (native-ufs-probe=12 boot 2026-11-06 17:33, calls #10/#11)."
++    },
++    {
++      "original": "0xfffffff00831d61c",
++      "original_size": 180,
++      "original_sha256": "55471a6887bcc2f2a3e82fafa24384707994724f6e49890fd516f3423907d190",
++      "native_symbol": "__ZN8OSString17withCStringNoCopyEPKc",
++      "evidence": "Allocates through the metaclass at 0xfffffff00a32a1f0, the same one the paired OSString::withCString (0xfffffff00831d568) allocates through, calls the init virtual with discriminator 0xa6ed (natively initWithCStringNoCopy) on the C string and releases on failure: OSString::withCStringNoCopy, right after the paired OSString::withCString. apfs passes \"System\" (native-ufs-probe=12 boot 2026-11-06 17:33, call #35)."
++    },
++    {
++      "original": "0xfffffff007ee9f90",
++      "original_size": 560,
++      "original_sha256": "67fdff432aeacb0e625feb4fd2c05999b4443aaf0385ecc68b009dbfb601c825",
++      "native_symbol": "_fs_buffer_cache_gc_register",
++      "evidence": "Takes the buffer-cache GC lock (CAS of the current thread id), scans a fixed table of callback slots for a free one and stores (callback, context): fs_buffer_cache_gc_register(cb, ctx) of bsd/vfs/vfs_bio.c, immediately before the paired fs_buffer_cache_gc_unregister. apfs registers its callback with it (native-ufs-probe=12 boot 2026-11-06 17:33, calls #9/#32)."
++    },
++    {
++      "original": "0xfffffff007f32218",
++      "original_size": 28,
++      "original_sha256": "f4906fac8dc725ae850f4c4b220cd808c3b444dc52821983f462fc818fed83cf",
++      "native_symbol": "_vnode_specrdev",
++      "evidence": "BTI c; loads and authenticates vp->v_specinfo (vnode +120, address-diversified DA discriminator 0x26e) and returns its si_rdev (+24): vnode_specrdev(vnode_t) of bsd/vfs/kpi_vfs.c, which sits between the paired vnode_clearfsnode and vnode_isvroot exactly as in the source. apfs_vfsop_mountroot asks it for the root device number; the stub 0 made every mountroot fail with ENOENT (\"unable to root from devvp ... 2\", native-fuxi-ufs-root=1 boot 2026-11-06 17:51, calls #9-#17)."
++    },
++    {
++      "original": "0xfffffff007f293ec",
++      "original_size": 2576,
++      "original_sha256": "1bb9ba38a4b216ba0447b3f09a2b1ac1c4efc277c79e1313aaba7561191d757f",
++      "native_symbol": "_utf8_normalizeOptCaseFoldAndCompare",
++      "evidence": "Six-argument normalizing compare (strA, lenA, strB, lenB, case_sensitive, bool *are_equal; x5 is kept for the result) with the normalization state tables on the stack: utf8_normalizeOptCaseFoldAndCompare of bsd/vfs/vfs_unicode.c, right after the paired utf8_normalizeOptCaseFoldGetUVersion and utf8_normalizeOptCaseFoldAndHash. apfs compares the 4-byte name \"root\" with it while loading the root directory; the stub left are_equal unset and mountroot failed with \"No entry for root dir!\" (native-fuxi-ufs-root=1 boot 2026-11-06 18:07, call #12)."
++    },
++    {
++      "original": "0xfffffff007f310a8",
++      "original_size": 144,
++      "original_sha256": "7af6b29bdce5ec291bfbb1855d52bc5bf26696d14fd58565079f4f49c8031dc2",
++      "native_symbol": "_vfs_setfsprivate",
++      "evidence": "Takes the mount lock (CAS of the current thread id on mp+32), stores x1 at mp+2296 (mnt_data) and releases it: vfs_setfsprivate(mount_t, void *) of bsd/vfs/kpi_vfs.c, right after the paired vfs_fsprivate. apfs stores its per-mount data with it during mountroot (native-fuxi-ufs-root=1 boot 2026-11-06 18:07, call #11)."
++    },
++    {
++      "original": "0xfffffff00835c3f4",
++      "original_size": 212,
++      "original_sha256": "7fc19370e055f059bd33ef3c7fcb4ada6fda1df299e9aea0b71fb9b3cc26564f",
++      "native_symbol": "__ZNK15IORegistryEntry16propertyHasValueEPKcPK8OSObjectPK15IORegistryPlanej",
++      "evidence": "Same shape as the paired propertyHasValue(const char *, const OSObject *) (0xfffffff00835c0a0) but calls the virtual with PAC discriminator 0x5c68 passing (key, plane, options); natively 0x5c68 belongs only to IORegistryEntry::copyProperty(const char *, const IORegistryPlane *, IOOptionBits) const, then value->isEqualTo (0xfc74): the plane-search overload of propertyHasValue. apfs looks up \"AppleTDMLocked\" with it (native-fuxi-ufs-root=1 boot 2026-11-06 18:07, calls #10/#15)."
++    },
++    {
++      "original": "0xfffffff0081edfe4",
++      "original_size": 80,
++      "original_sha256": "7a4e1858ac4a7ab02354db083b32c5d0930687fb66d3b1fc781101b2e6a03d8c",
++      "native_symbol": "_enable_developer_mode",
++      "evidence": "Builds a 24-byte code-signing configuration request with the enable byte set to 1 and hands it to the shared code-signing monitor routine 0xfffffff0081eef94: enable_developer_mode of bsd/kern/kern_codesigning.c, in the block after code_signing_configuration and disable_code_signing_feature. AMFI calls it right after logging \"Enabling developer mode since protected data is not available\" (native-fuxi-ufs-root=1 boot 2026-11-06 18:07, call #9)."
++    },
++    {
++      "original": "0xfffffff0081ee034",
++      "original_size": 80,
++      "original_sha256": "6c6dd51b193100ecf6decc7b40c314ab18e9609353db1fb88b4703853a6c7897",
++      "native_symbol": "_disable_developer_mode",
++      "evidence": "Sibling that directly follows enable_developer_mode and calls the same monitor routine 0xfffffff0081eef94 with the request byte cleared: disable_developer_mode of bsd/kern/kern_codesigning.c. AMFI calls it on its \"Disable developer mode\" branches."
++    },
++    {
++      "original": "0xfffffff00844d134",
++      "original_size": 24,
++      "original_sha256": "aca095ab926722ea62711227fe56664a0449bcad74cb33ef80709eccb95dcecb",
++      "native_symbol": "_IOPMRootDomainGetWillShutdown",
++      "evidence": "BTI c; returns (a 32-bit IOPMrootDomain global != 0): IOPMRootDomainGetWillShutdown() { return gWillShutdown != 0; } of IOPMrootDomain.cpp, just before the paired halt_log_enter. apfs polls it during mount (native-fuxi-ufs-root=1 boot 2026-11-06 18:07, call #13)."
++    },
++    {
++      "original": "0xfffffff0081c6220",
++      "original_size": 16,
++      "original_sha256": "dd5da6be8b3dc654bf948fef264858b5730f0e51228940b65ea1ff82a8ad3044",
++      "native_symbol": "_get_system_inshutdown",
++      "evidence": "BTI c; returns a 32-bit global: get_system_inshutdown() { return system_inshutdown; } of bsd/kern/kern_shutdown.c, immediately before the paired reboot_kernel. apfs calls it right after IOPMRootDomainGetWillShutdown (native-fuxi-ufs-root=1 boot 2026-11-06 18:07, call #14)."
++    },
++    {
++      "original": "0xfffffff007f32100",
++      "original_size": 40,
++      "original_sha256": "f2870d72e5b1d279b0dbc96d0906f4fae80c28f6b8693a5ae036c2cf9bb37cf1",
++      "native_symbol": "_vnode_mount",
++      "evidence": "BTI c; loads vp->v_mount (+216), NULL-checks it and authenticates it with discriminator 0xd6ef (55023): vnode_mount of bsd/vfs/kpi_vfs.c, right after the paired vnode_vid; native vnode_mount uses the same offset and discriminator. apfs passed its NULL stub result to vfs_fsprivate, which faulted at far 0x8f8 = mnt_data offset (native-fuxi-ufs-root=1 boot 2026-11-06 18:16, after the first apfs mount-complete, call #12)."
++    },
++    {
++      "original": "0xfffffff007f304d8",
++      "original_size": 28,
++      "original_sha256": "b440438a783bd2e600d90ab1bd6e51f77da976616809d14e931d696a6a525a4e",
++      "native_symbol": "_vfs_typenum",
++      "evidence": "BTI c; authenticates mp->mnt_vtable (+48, discriminator 0xfb4a = 64330) and returns its 32-bit vfc_typenum (+24); native vfs_typenum reads the same field with the same discriminator. Between the paired vfs_throttle_mask and vfs_mntlabel in kpi_vfs.c (native-fuxi-ufs-root=1 boot 2026-11-06 18:16, after the first apfs mount-complete, call #9)."
++    },
++    {
++      "original": "0xfffffff007eeee74",
++      "original_size": 120,
++      "original_sha256": "7da45cf26c966a8332a64fd985c76ba2d44a6312aea0608b11197a3d94954083",
++      "native_symbol": "_cluster_max_io_size",
++      "evidence": "type 2 (CL_WRITE) / 1 (CL_READ) selects mp+2304 / mp+2312 (mnt_maxwritecnt / mnt_maxreadcnt): instruction-identical to native cluster_max_io_size. First function of bsd/vfs/vfs_cluster.c before the paired cluster_zero (native-fuxi-ufs-root=1 boot 2026-11-06 18:16, after the first apfs mount-complete, calls #10/#11)."
++    },
++    {
++      "original": "0xfffffff00837b6d8",
++      "original_size": 168,
++      "original_sha256": "b59d28f17bcb9ddbb8f1551211c5a71a6be414a5d5fa50c9a4e1b49591814d09",
++      "native_symbol": "__ZN9IOService14waitForServiceEP12OSDictionaryP13mach_timespec",
++      "evidence": "Static IOService entry (OSDictionary *matching, mach_timespec_t *timeout): when timeout is non-NULL it converts {tv_sec, tv_nsec} to nanoseconds (tv_sec * 1000000000 + tv_nsec) and passes it on, else waits without a timeout: the deprecated IOService::waitForService wrapper of waitForMatchingService in IOService.cpp, between the paired IOServicePH::checkPMReady and IOService::waitForState. AppleImage4 calls waitForService(serviceMatching(\"IODTNVRAM\"), NULL) to force-sync its nonce magazine (native-fuxi-ufs-root=1 boot 2026-11-06 20:29, call #9); IODTNVRAM exists on this board."
++    },
++    {
++      "original": "0xfffffff0081ba15c",
++      "original_size": 60,
++      "original_sha256": "61674a65d348369c31273e53d57420fbbb3460ec89bb6a36508588780c509b26",
++      "native_symbol": "_proc_isinitproc",
++      "evidence": "int proc_isinitproc(proc_t p): loads the global initproc, authenticates it with autda and the address-diversified string discriminator 0x706f (= ptrauth_string_discriminator(\"initproc\"), XNU_PTRAUTH_SIGNED_PTR(\"initproc\")), returns 0 when it is NULL, else (p == initproc). Source: bsd/kern/kern_proc.c. sandbox calls it from its exec hook (mac_vnode_check_exec) and panics \"\\\"shenanigans!\\\" @execve.c:888\" when it returns 0; the unmapped stub returned 0 for /sbin/launchd (fuxi on-screen unmapped probe 2026-11-07 08:42, hit #9, site 0xfffffff009ea2544 in com.apple.security.sandbox __text +0x1b154)."
++    },
++    {
++      "original": "0xfffffff007f2e5e0",
++      "original_size": 68,
++      "original_sha256": "4dc55e9e2f8de50c53ce62abbb84175a42c197125dd675db40d0879abac49791",
++      "native_symbol": "_vnode_setasnamedstream",
++      "evidence": "errno_t vnode_setasnamedstream(vnode_t vp, vnode_t svp): loads vp->v_mount (+0xd8, autda with the address-diversified discriminator 0xd6ef = ptrauth_string_discriminator(\"vnode.v_mount\")), tests mnt_kern_flag (+0x74) bit 18 (MNTK_NAMED_STREAMS 0x40000, ldrb +0x76 bit 2), returns EINVAL (22) when clear, else calls vnode_setasnamedstream_internal (the next function, same args) and returns 0. Source: bsd/vfs/vfs_xattr.c. apfs calls it during the /sbin/launchd exec (fuxi on-screen unmapped probe 2026-11-07 09:00, hit #9, site 0xfffffff009ed561c in com.apple.filesystems.apfs __text +0x1fdac)."
++    },
++    {
++      "original": "0xfffffff0083c4e18",
++      "original_size": 244,
++      "original_sha256": "dc37d192e14d92594ec440f9bb579cd9a0494be475bdc9d491d3d9dae0e9d2f2",
++      "native_symbol": "__ZN18IOMemoryDescriptor11withOptionsEPvjjP4taskjP8IOMapper",
++      "evidence": "static IOMemoryDescriptor::withOptions(void *buffers, UInt32 count, UInt32 offset, task_t task, IOOptionBits opts, IOMapper *mapper): allocates through IOGeneralMemoryDescriptor::gMetaClass->alloc() (vtable +0x68), then calls the virtual initWithOptions with the six arguments (vtable +0x78, discriminator 0xfe46 = ptrauth_string_discriminator(\"_ZN18IOMemoryDescriptor15initWithOptionsEPvjjP4taskjP8IOMapper\")) and releases and returns NULL on failure. Source: iokit/Kernel/IOMemoryDescriptor.cpp. IOStorageFamily calls it with (buffers, count, 0, kernel_task, options, NULL) and fails the I/O with kIOReturnNoMemory (0xe00002bd) on NULL; the unmapped stub returned NULL during the /sbin/launchd exec, which then failed (fuxi on-screen unmapped probe 2026-11-07 09:00, hit #10, site 0xfffffff009b3eaac in com.apple.iokit.IOStorageFamily __text +0x1512c)."
++    },
++    {
++      "original": "0xfffffff008183a8c",
++      "original_size": 128,
++      "original_sha256": "889e7a227695a10be505c5e6f6488d83e543423c50370a2f4749019ec8431b33",
++      "native_symbol": "_csblob_os_entitlements_copy",
++      "evidence": "void *csblob_os_entitlements_copy(struct cs_blob *csblob): loads csblob->csb_entitlements (+0xa0, autda with the address-diversified discriminator 0xaa50 = ptrauth_string_discriminator(\"cs_blob.csb_entitlements\")), returns NULL when it is NULL, else retains it (virtual call vtable +0x20, discriminator 0x2e4a) and returns it. Source: bsd/kern/kern_cs.c. AMFI calls it right after csblob_find_blob_bytes(..., CSSLOT_CODEDIRECTORY, 0xfade0c02) (fuxi on-screen unmapped probe 2026-11-07 09:11, /sbin/launchd exec in load_code_signature/mac_vnode_check_signature, hit #9, site 0xfffffff008f304b4 in AMFI __text +0x112f4)."
++    },
++    {
++      "original": "0xfffffff007df7ad8",
++      "original_size": 20,
++      "original_sha256": "2c02975f3268e70a92d29de5b25ac8b8d4d8df7e21489a30b55a1c1150fa6d5f",
++      "native_symbol": "_zalloc_flags",
++      "evidence": "void *zalloc_flags(zone_or_view_t zov, zalloc_flags_t flags): mov x2, x1; ldp x8, x1, [x0] (zv_zone, zv_stats); tail-calls zalloc_ext(zone, stats, flags), instruction for instruction the same as _zalloc_flags in the native release fileset reference; 0xfffffff007df7ac4 just before it is zalloc_noblock (w2 = 1). Source: osfmk/kern/zalloc.c. AMFI's typed operator new (0xfffffff008f25be8) passes its kalloc_type_view (which starts with a zone_view) and w1 = 4 (Z_ZERO). The unmapped stub returned NULL for an AMFI MetaClass::alloc() of a 0x28-byte OSObject (fuxi on-screen unmapped probe 2026-11-07 09:11, /sbin/launchd exec, hit #10, site 0xfffffff008f25ba0 in AMFI __text +0x69e0, x0 = kt_view 0xfffffff00a2dbec0 in kernel __DATA,__common)."
++    },
++    {
++      "original": "0xfffffff0082df1a0",
++      "original_size": 44,
++      "original_sha256": "7c2fb530aaeda674429d337d4335f13ee00f1461696f1b493a5d930857e55078",
++      "native_symbol": "__ZN8OSObjectC2EPK11OSMetaClass",
++      "evidence": "OSObject::OSObject(const OSMetaClass *) base constructor: stores the OSObject vtable (+0x10, pacda with this | 0xcda1 << 48) at [this] and sets retainCount (+8) to 1; the identical body follows at 0xfffffff0082df1cc (the other constructor variant). Source: libkern/c++/OSObject.cpp. AMFI MetaClass::alloc() calls it on the new object with its gMetaClass (fuxi on-screen unmapped probe 2026-11-07 09:11, /sbin/launchd exec in load_code_signature/mac_vnode_check_signature, hit #11, site 0xfffffff008f25bb4 in AMFI __text +0x69f4)."
++    },
++    {
++      "original": "0xfffffff007df7ab0",
++      "original_size": 20,
++      "original_sha256": "349c260c614981e53e48d09c77ac923a56482db5fafbb52087156fae9eeb71a3",
++      "native_symbol": "_zalloc",
++      "evidence": "void *zalloc(zone_or_view_t zov): bti c; ldp x8, x1, [x0] (zv_zone / z_self, zv_stats / z_stats); mov x0, x8; w2 = 0 (Z_WAITOK); tail-calls zalloc_ext, the same as _zalloc in the native release fileset reference. zalloc_noblock (w2 = 1) follows at 0xfffffff007df7ac4 and zalloc_flags at 0xfffffff007df7ad8. Source: osfmk/kern/zalloc.c. apfs calls it with a zone from its own zone table during nx_mount; the unmapped stub returned NULL, nx_mount failed \"object cache bootstrap failed: 12\" and the boot panicked \"Failed to mount root device\" (fuxi QUD USB log 2026-11-07 09:57, unmapped call #9 from 0xfffffff009f68b4c in apfs __text +0xb32dc, x0 = zone 0xfffffff00a2df3c0)."
++    },
++    {
++      "original": "0xfffffff0082e1f48",
++      "original_size": 36,
++      "original_sha256": "ec32215400a60851c2211cf6968c78741ef2bd8c38689050fee9316e5e96a0c5",
++      "native_symbol": "__ZN9OSBoolean11withBooleanEb",
++      "evidence": "OSBoolean::withBoolean(bool inValue): returns *(inValue ? &kOSBooleanTrue : &kOSBooleanFalse) (two adjacent kernel globals, csel on w0). Source: libkern/c++/OSBoolean.cpp. fuxi on-screen unmapped probe 2026-11-07 10:12, /sbin/launchd exec hang after root mount (QUD log ends at \"VM Swap Subsystem is ON\"); AMFI building its entitlement objects, hit #0x3d, site 0xfffffff008f3e9fc in AMFI __text +0x1f83c."
++    },
++    {
++      "original": "0xfffffff00831d6d0",
++      "original_size": 164,
++      "original_sha256": "25eda4f65a73ee762f67471e45466b09c0d7b113a8720b8c101583d381b84f44",
++      "native_symbol": "__ZN8OSString11withCStringEPKcm",
++      "evidence": "OSString::withCString(const char *cString, size_t length): OSString::gMetaClass->alloc() (vtable +0x68, discriminator 0x1601 = OSMetaClass::alloc), then the non-virtual initWithStringOfLength (0xfffffff00831d38c, which fails for a NULL string or length > 0x3fffd, i.e. >= kMaxStringLength 262142), releasing and returning NULL on failure. Source: libkern/c++/OSString.cpp. AMFI passes (begin, end - begin) of a byte range. fuxi on-screen unmapped probe 2026-11-07 10:12, /sbin/launchd exec hang after root mount (QUD log ends at \"VM Swap Subsystem is ON\"); AMFI building its entitlement objects, hit #0x3f, site 0xfffffff008f3ee20 in AMFI __text +0x1fc60."
++    },
++    {
++      "original": "0xfffffff00831f4e0",
++      "original_size": 252,
++      "original_sha256": "e5ca74490425593ecd40845adc79e13b2d5cb65b4ea20620d3813cb2a9bffb3f",
++      "native_symbol": "__ZN8OSSymbol10withStringEPK8OSString",
++      "evidence": "OSSymbol::withString(const OSString *aString): NULL check, getMetaClass() (vtable +0x38, discriminator 0xfffc = OSMetaClassBase::getMetaClass) compared with OSSymbol::gMetaClass for the already-a-symbol fast path (retain and return), else withCString / withCStringNoCopy of the string at +0x10. Source: libkern/c++/OSSymbol.cpp. AMFI feeds it the OSString::withCString result. fuxi on-screen unmapped probe 2026-11-07 10:12, /sbin/launchd exec hang after root mount (QUD log ends at \"VM Swap Subsystem is ON\"); AMFI building its entitlement objects, hit #0x40, site 0xfffffff008f3ee28 in AMFI __text +0x1fc68."
++    },
++    {
++      "original": "0xfffffff0082e8774",
++      "original_size": 52,
++      "original_sha256": "752bf359019340204a2744d82c02279082306d2e615ce29772466df63e5d4280",
++      "native_symbol": "__ZN12OSDictionary9setObjectERK11OSSharedPtrIK8OSSymbolERKS0_IK15OSMetaClassBaseE",
++      "evidence": "OSDictionary::setObject(const OSSharedPtr<const OSSymbol>&, const OSSharedPtr<const OSMetaClassBase>&): loads both raw pointers through the references and tail-calls the virtual setObject(const OSSymbol *, const OSMetaClassBase *) (vtable +0xf0, discriminator 0x8d9e = ptrauth_string_discriminator(\"_ZN12OSDictionary9setObjectEPK8OSSymbolPK15OSMetaClassBase\")); the const char * overload follows at 0xfffffff0082e87a8 (vtable +0xf8). Source: libkern/c++/OSDictionary.cpp. fuxi on-screen unmapped probe 2026-11-07 10:12, /sbin/launchd exec hang after root mount (QUD log ends at \"VM Swap Subsystem is ON\"); AMFI building its entitlement objects, hit #0x3e, site 0xfffffff008f3ee74 in AMFI __text +0x1fcb4."
++    },
++    {
++      "original": "0xfffffff00831f5dc",
++      "original_size": 364,
++      "original_sha256": "52d9bb6c547932429d749ae5c6001689ce237031ac2b815940ab64277da55ce1",
++      "native_symbol": "__ZN8OSSymbol11withCStringEPKc",
++      "evidence": "OSSymbol::withCString(const char *cString): strnlen(cString, kMaxStringLength 0x3fffe), NULL when the length reaches it, else OSSymbolPool::findSymbol on the global pool (then the insert path) -- the same sequence as __ZN8OSSymbol11withCStringEPKc in the native release fileset reference. It directly follows OSSymbol::withString (0xfffffff00831f4e0). Source: libkern/c++/OSSymbol.cpp. AppleARMPlatform builds its function symbols with it (\"newAppleARMFunction\", \"IOPMUBootErrorClear\", ...) and AMFI the \"AKSKernelServices\" key; with the unmapped stub returning NULL AMFI later released the NULL symbol: panic Kernel data abort at pc 0xfffffff008f29588, far 0 (fuxi QUD USB log 2026-11-07, unmapped calls #9-#30, sites 0xfffffff008601a40, 0xfffffff00863457c.., 0xfffffff008f294f4)."
++    },
++    {
++      "original": "0xfffffff00831f748",
++      "original_size": 536,
++      "original_sha256": "9dc255f090bb62501d52db940fa72e3d71f0eb5fbe791f3b39fa1f46fcc13705",
++      "native_symbol": "__ZN8OSSymbol17withCStringNoCopyEPKc",
++      "evidence": "OSSymbol::withCStringNoCopy(const char *cString): strnlen(cString, kMaxStringLength 0x3fffe), NULL when it reaches the limit, else the global OSSymbolPool lookup/insert -- the same sequence as __ZN8OSSymbol17withCStringNoCopyEPKc in the native release fileset reference; it directly follows OSSymbol::withCString (0xfffffff00831f5dc, 364 bytes). Source: libkern/c++/OSSymbol.cpp. Called from nine kexts; AppleARMPlatform builds \"AppleARMCPU-AllCPU-Initialized\", \"AppleARMPEFindCoprovider\", ... with it (fuxi QUD USB log 2026-11-07 10:50 (fuxi-20261107-105041-441), unmapped calls #9-#25, e.g. site 0xfffffff0085ffc30)."
++    },
++    {
++      "original": "0xfffffff00837d048",
++      "original_size": 368,
++      "original_sha256": "3b537f776a7d55571ab92e6662ef4c028a6eff81ec139e10bb5e404673cdf3ec",
++      "native_symbol": "__ZN9IOService15serviceMatchingEPKcP12OSDictionary",
++      "evidence": "IOService::serviceMatching(const char *name, OSDictionary *table): OSSymbol::withCStringNoCopy(name) (0xfffffff00831f748), OSSymbol::withString on it (0xfffffff00831f4e0), then table->setObject(gIOProviderClassKey, str) (vtable +0xf0) or a new dictionary -- the same shape as __ZN9IOService15serviceMatchingEPKcP12OSDictionary in the native release fileset reference. Source: iokit/Kernel/IOService.cpp. sandbox calls serviceMatching(\"IOMedia\", NULL); the unmapped stub returned NULL and sandbox panicked \"Unable to allocate IOKit matching dictionary for IOMedia\" @iokit.cpp:218 (fuxi QUD USB log 2026-11-07 10:50 (fuxi-20261107-105041-441), unmapped call #26, site 0xfffffff009e88a78)."
++    },
++    {
++      "original": "0xfffffff008183780",
++      "original_size": 12,
++      "original_sha256": "6240b6a6309c0e043e5ba016cc8eb9ee21d5247fabbea77e52c9cae3e90b0e38",
++      "native_symbol": "_csblob_get_flags",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. ldr w0, [x0, #0x20] (csb_flags)."
++    },
++    {
++      "original": "0xfffffff00818378c",
++      "original_size": 28,
++      "original_sha256": "52a6c80e4a9d0259da04f74bc88173d6cc416e4d98182fddb4e2cc88e5c90167",
++      "native_symbol": "_csblob_get_hashtype",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. csb_hashtype (+0x70) ? csb_hashtype->cs_type : 0, instruction for instruction the reference; the stub returning 0 is the \"Hash type is not SHA256 (2) but 0\" of fuxi QUD USB log 2026-11-07 10:58 (fuxi-20261107-105823-644): launchd and dyld failed \"Hash type is not SHA256 (2) but 0\"."
++    },
++    {
++      "original": "0xfffffff0081837a8",
++      "original_size": 140,
++      "original_sha256": "fac22eb725bf749139b7087ca0f02179a9a39b13677d901d78777235e89fdbce",
++      "native_symbol": "_csproc_get_blob",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. proc_t -> p_textvp (+0x548, signed) -> ubc_cs_blob_get."
++    },
++    {
++      "original": "0xfffffff008183834",
++      "original_size": 20,
++      "original_sha256": "a166148a46cde05345c0f04b741c8a9b881e5cc251306e591d3d41001638cf62",
++      "native_symbol": "_csvnode_get_blob",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. mov x3, x1; w1 = w2 = -1; tail call ubc_cs_blob_get, as the reference."
++    },
++    {
++      "original": "0xfffffff008183848",
++      "original_size": 12,
++      "original_sha256": "da7e370e67423a4cf1d966508772366c573f116fc6cf3a7279d8b3ed0fc72a60",
++      "native_symbol": "_csblob_get_teamid",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. ldr x0, [x0, #0x88] (csb_teamid)."
++    },
++    {
++      "original": "0xfffffff008183854",
++      "original_size": 88,
++      "original_sha256": "22cab56638e084dbf3b40d7c33bd5f08d225df50de4ae8ac35cad263cbb10a92",
++      "native_symbol": "_csblob_get_identity",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. csb_cd present (flags bit 0) ? code directory identity : NULL."
++    },
++    {
++      "original": "0xfffffff0081838b8",
++      "original_size": 12,
++      "original_sha256": "6093fdd3d959ebd2e704ba0b530470ceee27b3b2f81d673ccc8cdddeed17b8da",
++      "native_symbol": "_csblob_get_signer_type",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. ldr w0, [x0, #0x24] (csb_signer_type)."
++    },
++    {
++      "original": "0xfffffff0081838c4",
++      "original_size": 148,
++      "original_sha256": "f419ab11460d14c6a46465a68ea91bdfd06a738494f6bcaf2ac757895a0af2f1",
++      "native_symbol": "_csblob_set_validation_category",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. same 148-byte body as the reference."
++    },
++    {
++      "original": "0xfffffff008183958",
++      "original_size": 12,
++      "original_sha256": "61b6982b7463283ad077fde03fe3eca62f3922c4f4c17ddf345adc82cac9435b",
++      "native_symbol": "_csblob_get_validation_category",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. ldr w0, [x0, #0xb0]."
++    },
++    {
++      "original": "0xfffffff008183964",
++      "original_size": 12,
++      "original_sha256": "d9743982a8067ee7a7625af5388f265a7d5650f8c7e2fd4a3a50ed4cb94d139f",
++      "native_symbol": "_csblob_get_code_directory",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. ldr x0, [x0, #0x80] (csb_cd)."
++    },
++    {
++      "original": "0xfffffff008183970",
++      "original_size": 124,
++      "original_sha256": "051c57ee795c871d894e85320679c162fd2d1413c2eb0c266a4dda0be776bc04",
++      "native_symbol": "_csblob_entitlements_dictionary_copy",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. csb_entitlements (+0xa0, discriminator 0xaa50)."
++    },
++    {
++      "original": "0xfffffff008183a18",
++      "original_size": 116,
++      "original_sha256": "daae64931218f7b04b265e52a0323534037424f3fcaef096b2c110425f667664",
++      "native_symbol": "_csblob_os_entitlements_set",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. assert NULL, retain, store csb_entitlements."
++    },
++    {
++      "original": "0xfffffff008183b0c",
++      "original_size": 40,
++      "original_sha256": "69333d79a42bb9829752be05a4a0de49de0a411ec342a4a87772556bc2cb5e3b",
++      "native_symbol": "_csblob_os_entitlements_get",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. csb_entitlements (+0xa0, discriminator 0xaa50) without retain."
++    },
++    {
++      "original": "0xfffffff008183dfc",
++      "original_size": 144,
++      "original_sha256": "df1cecba344773aae05152cc51423c71729639f3897e37cda00f31b69fb19ab3",
++      "native_symbol": "_csproc_get_platform_path",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. between csproc_get_platform_binary and csproc_get_prod_signed."
++    },
++    {
++      "original": "0xfffffff00818402c",
++      "original_size": 268,
++      "original_sha256": "84437d2e081935e5e9e67e22d581c909d9df59f5b0a400def2c57859fe6eb287",
++      "native_symbol": "_csfg_get_platform_binary",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff008184138",
++      "original_size": 136,
++      "original_sha256": "861127aff500e08a34084c31fe5f9610b1d0f347c54701d0f7ff8467afbfe5b2",
++      "native_symbol": "_csfg_get_cdhash",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff0081841c0",
++      "original_size": 264,
++      "original_sha256": "e3b1cfe54660974176ce881ef6cf23f50448aec2150707ade0b83fcea3a32bd0",
++      "native_symbol": "_csfg_get_signer_type",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff0081843b0",
++      "original_size": 264,
++      "original_sha256": "8e7947d447b1ad69076697291eb88898f3d3c177d32979c24c199eb6248fdc63",
++      "native_symbol": "_csfg_get_teamid",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff0081844b8",
++      "original_size": 88,
++      "original_sha256": "6eda4d9e2f1a0af09e2fed72024672bc7a6c60975fa13a960d10731a8c7853e9",
++      "native_symbol": "_csfg_get_csblob",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff008184510",
++      "original_size": 272,
++      "original_sha256": "982503201c24136ac1607359f3bf9ff7a759739ddcf1f6322c5c60a685041960",
++      "native_symbol": "_csfg_get_prod_signed",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff0081846c8",
++      "original_size": 140,
++      "original_sha256": "ec17ad4dd0450d3d2b906eddccd99e8d9addbc62229861589ed4c61a2057498b",
++      "native_symbol": "_csfg_get_platform_identifier",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff0081847a4",
++      "original_size": 112,
++      "original_sha256": "544af46ae449f64505f8f1a945f89923b770c08e4858f3d73bc22a609ac7c8b4",
++      "native_symbol": "_csproc_get_platform_identifier",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. proc_t -> p_textvp (+0x548, discriminator 0x612c)."
++    },
++    {
++      "original": "0xfffffff008184854",
++      "original_size": 80,
++      "original_sha256": "f7a55fb0ea021b187e85fd2c83017c9bc159f777b246ae3f991d8a300a258fe3",
++      "native_symbol": "_csfg_get_path",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. fileglob -> fg_data (+0x28, discriminator 0x853c)."
++    },
++    {
++      "original": "0xfffffff008184c60",
++      "original_size": 12,
++      "original_sha256": "461f0cd8c82fda303d244bd2e7d866dfa0a3a0e88e4e29eeaa32547988cb1a92",
++      "native_symbol": "_launch_constraint_data_get_launch_type",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. ldrb w0, [x0]."
++    },
++    {
++      "original": "0xfffffff008184c6c",
++      "original_size": 12,
++      "original_sha256": "2af4c533673e04d5116c6a5aa4187e6285a11025ce4ba6873aa825c1dc8ef89a",
++      "native_symbol": "_sys_debug_syscall_reject_config",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. returns ENOTSUP (45)."
++    },
++    {
++      "original": "0xfffffff008184c78",
++      "original_size": 12,
++      "original_sha256": "2af4c533673e04d5116c6a5aa4187e6285a11025ce4ba6873aa825c1dc8ef89a",
++      "native_symbol": "_debug_syscall_reject",
++      "evidence": "kern_cs.c source order, aligned against the native release fileset reference between already-mapped anchors (csblob_get_cdhash, csblob_entitlements_dictionary_set, csblob_os_entitlements_copy, csblob_get_storage_addr, csproc_get_teamid/identity/signer_type/platform_binary/prod_signed/validation_category, csfg_get_validation_category, csfg_get_identity, csvnode_get_platform_identifier, cs_entitlement_flags, cs_restricted, cs_get_cdhash): the same number of functions between each pair of anchors, the same field offsets / PAC discriminators. Source: bsd/kern/kern_cs.c. returns ENOTSUP (45)."
++    },
++    {
++      "original": "0xfffffff0081ee084",
++      "original_size": 36,
++      "original_sha256": "1e917c3c39dc1201ebdd9baf8b06dfe64706d3eabeb2479f3745b014cdbb7f6e",
++      "native_symbol": "_developer_mode_state",
++      "evidence": "Loads the developer-mode state pointer, NULL -> 0, else *ptr & 1, instruction for instruction the reference; it follows disable_developer_mode. Source: bsd/kern/kern_codesigning.c. AMFI hits #15-#39 of fuxi QUD USB log 2026-11-07 10:58 (fuxi-20261107-105823-644): launchd and dyld failed \"Hash type is not SHA256 (2) but 0\"."
++    },
++    {
++      "original": "0xfffffff007df7ba4",
++      "original_size": 128,
++      "original_sha256": "90340616425b52c363e6ff030015b901e273ee28f937b91de391338527efd56a",
++      "native_symbol": "_zone_require_ro",
++      "evidence": "zone_require_ro(zid, elem_size, addr): from_ro_map range check, Z_FAST_ALIGNED against zone_ro_size_params[zid], zone_meta_from_addr(addr)->zm_index == zid, else zone_id_require_ro_panic -- the reference body; it lies between zalloc_ro and zalloc_ro_mut. Source: osfmk/kern/zalloc.c. AMFI hits (0xd, 0x78, elem) #14/#41-#46 of fuxi QUD USB log 2026-11-07 10:58 (fuxi-20261107-105823-644): launchd and dyld failed \"Hash type is not SHA256 (2) but 0\"."
++    },
++    {
++      "original": "0xfffffff0082e1270",
++      "original_size": 56,
++      "original_sha256": "4ecc4331bb043940e04edcb1de18d9062c596ed90cee4b1aa609a91a63d06848",
++      "native_symbol": "__ZN7OSArray9setObjectERK11OSSharedPtrIK15OSMetaClassBaseE",
++      "evidence": "OSArray::setObject(const OSSharedPtr<const OSMetaClassBase>&): setObject(count (+0x14), ptr) through vtable +0xf0, discriminator 0x354b = ptrauth_string_discriminator(\"_ZN7OSArray9setObjectEjPK15OSMetaClassBase\"). Source: libkern/c++/OSArray.cpp. AMFI hits #10-#12 of fuxi QUD USB log 2026-11-07 10:58 (fuxi-20261107-105823-644): launchd and dyld failed \"Hash type is not SHA256 (2) but 0\"."
++    },
++    {
++      "original": "0xfffffff0082e12a8",
++      "original_size": 48,
++      "original_sha256": "ca06ec7f6936be80f94e3d0b034e07f66fe0df26addc9699a0cb86bef072d8b0",
++      "native_symbol": "__ZN7OSArray9setObjectEjRK11OSSharedPtrIK15OSMetaClassBaseE",
++      "evidence": "OSArray::setObject(unsigned int, const OSSharedPtr<const OSMetaClassBase>&): x2 = *x2, tail call through vtable +0xf0 with discriminator 0x354b; it directly follows the single-argument overload. Source: libkern/c++/OSArray.cpp."
++    },
++    {
++      "original": "0xfffffff0082def80",
++      "original_size": 16,
++      "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
++      "native_symbol": "__ZN8OSObjectD2Ev",
++      "evidence": "OSObject::~OSObject() base destructor: stores -1 into [this] (poison) and returns; it directly precedes OSObject::operator delete(void *, size_t) (0xfffffff0082def90, mapped). AMFI deleting destructors call it and then operator delete(this, 0x28) (site 0xfffffff008f25b34). The native D2 is an empty function. Source: libkern/c++/OSObject.cpp. AMFI hits #47/#58 of fuxi QUD USB log 2026-11-07 10:58 (fuxi-20261107-105823-644): launchd and dyld failed \"Hash type is not SHA256 (2) but 0\"."
++    },
++    {
++      "original": "0xfffffff00820e470",
++      "original_size": 8,
++      "original_sha256": "405d132ace74d16c494016788f778baf29a7205fa087401c58293da856dd14a3",
++      "native_symbol": "_ubc_upl_range_needed",
++      "evidence": "ubc_upl_range_needed(upl, index, count): bti; b upl_range_needed (0xfffffff007e6a30c: count <= 0 or no UPL_INTERNAL (flags bit 4) -> return, else mark the pages needed within upl_adjusted_size). Source: bsd/kern/ubc_subr.c. apfs hit #62 of fuxi QUD USB log 2026-11-07 10:58 (fuxi-20261107-105823-644): launchd and dyld failed \"Hash type is not SHA256 (2) but 0\", site 0xfffffff009f115f4."
++    },
++    {
++      "original": "0xfffffff00837cea8",
++      "original_size": 416,
++      "original_sha256": "d41a1d53e68333b5a1faeeb0e5fc31516f8078ee0789153651d5a3aab1a9e1d6",
++      "native_symbol": "__ZN9IOService15serviceMatchingEPK8OSString11OSSharedPtrI12OSDictionaryE",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). Calls OSSymbol::withString first."
++    },
++    {
++      "original": "0xfffffff00837d1b8",
++      "original_size": 132,
++      "original_sha256": "7618495b8163b40f43bd8a8edafab1f31648fd01c94d446f45f9799994bea90f",
++      "native_symbol": "__ZN9IOService15serviceMatchingEPKc11OSSharedPtrI12OSDictionaryE",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). Calls serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048)."
++    },
++    {
++      "original": "0xfffffff00837d23c",
++      "original_size": 244,
++      "original_sha256": "9b03108f34650a3524ef9faefd8c5cb0180e12b7e5ce5b606aec3dd66eaf2f2b",
++      "native_symbol": "__ZN9IOService12nameMatchingEPK8OSStringP12OSDictionary",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). mov x19, x1; mov x20, x0; cbz x1 prologue as the reference."
++    },
++    {
++      "original": "0xfffffff00837d330",
++      "original_size": 324,
++      "original_sha256": "a3bb6817f1a5f324b6b75c4d5af688a54d1d357b09c39c5202c3735e5fb17883",
++      "native_symbol": "__ZN9IOService12nameMatchingEPK8OSString11OSSharedPtrI12OSDictionaryE",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). Between the two nameMatching anchors."
++    },
++    {
++      "original": "0xfffffff00837d474",
++      "original_size": 300,
++      "original_sha256": "4da8aa8a177137204d302c8a06b1aa8e05f67347d52771ddef526530ebd3e665",
++      "native_symbol": "__ZN9IOService12nameMatchingEPKcP12OSDictionary",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). OSSymbol::withCStringNoCopy(name), then table->setObject(gIONameMatchKey, ...) (the serviceMatching sibling uses gIOProviderClassKey). sandbox calls nameMatching(\"AppleMobileFileIntegrity\", NULL) and then waitForMatchingService(dict, UINT64_MAX); with the unmapped stub returning NULL it took its panic path (fuxi on-screen unmapped probe 2026-11-07 11:14, hit #9, site 0xfffffff009eabcd4 in sandbox __text +0x248e4). AppleARMPlatform calls it too."
++    },
++    {
++      "original": "0xfffffff00837d5a0",
++      "original_size": 416,
++      "original_sha256": "59a055c1195cb51db311716739bae04dd976319e4d634f2e76dffed9b4f45726",
++      "native_symbol": "__ZN9IOService12nameMatchingEPKc11OSSharedPtrI12OSDictionaryE",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). mov x19, x1; bl withCString* as the reference."
++    },
++    {
++      "original": "0xfffffff00837d740",
++      "original_size": 484,
++      "original_sha256": "1c28f95cebcb73fc7910e40d91bde94b6b473663fab695d53ba928db74df9cf4",
++      "native_symbol": "__ZN9IOService16resourceMatchingEPK8OSString11OSSharedPtrI12OSDictionaryE",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). mov x19, x1; mov x2x, x0 prologue as the reference."
++    },
++    {
++      "original": "0xfffffff00837d924",
++      "original_size": 432,
++      "original_sha256": "25486f9d4ed370aeb0ec5c9c669829ed7826de077fe973ff724a1c5c5386e26f",
++      "native_symbol": "__ZN9IOService16resourceMatchingEPKcP12OSDictionary",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). mov x20, x1; bl withCString* as the reference."
++    },
++    {
++      "original": "0xfffffff00837dad4",
++      "original_size": 132,
++      "original_sha256": "4a1b18140c3f1d9b1488349a3e46fc181924abbf74e62f98f7d3736e1fe693f5",
++      "native_symbol": "__ZN9IOService16resourceMatchingEPKc11OSSharedPtrI12OSDictionaryE",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). Calls resourceMatching(const char *, OSDictionary *) (0xfffffff00837d924)."
++    },
++    {
++      "original": "0xfffffff00837db58",
++      "original_size": 464,
++      "original_sha256": "da9dfb310af7cf10d4b3d86678558764ed4aad292c0d6cca5a1e538c69f123d9",
++      "native_symbol": "__ZN9IOService16propertyMatchingEPK8OSSymbolPK8OSObject11OSSharedPtrI12OSDictionaryE",
++      "evidence": "IOService matching helpers in iokit/Kernel/IOService.cpp source order, aligned against the native release fileset reference around the mapped anchor serviceMatching(const char *, OSDictionary *) (0xfffffff00837d048): same order, same register prologue, same callees (OSSymbol::withString 0x831f4e0, OSSymbol::withCStringNoCopy 0x831f748, the sibling overload). Three-argument prologue (mov x20, x2) as the reference."
++    },
++    {
++      "original": "0xfffffff0081ba724",
++      "original_size": 80,
++      "original_sha256": "33f80db1116136ab5980b6aeaa6e121b5a82a91c7e682cfa4a632c2a66b684d3",
++      "native_symbol": "_proc_getexecutablevnode",
++      "evidence": "kern_proc.c source order after proc_is_zombie (0xfffffff0081ba714, mapped), as in the native release fileset reference: proc_getexecutablevnode then proc_getexecutablevnode_noblock, both 80 bytes reading p_textvp (+0x548, signed) and returning NULL when it is unset. Source: bsd/kern/kern_proc.c. Calls vnode_getwithref (0xfffffff007f06420, mapped). AMFI does proc_find(pid) then proc_getexecutablevnode(p); fuxi on-screen unmapped probe 2026-11-07 11:24, hit #9 (the only one), site 0xfffffff008f2d40c in AMFI __text +0xe24c, during the /sbin/launchd exec."
++    },
++    {
++      "original": "0xfffffff0081ba774",
++      "original_size": 80,
++      "original_sha256": "b58876e76d30f2da9b73edf3dc4363f5faa172b9b9c0b6c034230ea26e6292ea",
++      "native_symbol": "_proc_getexecutablevnode_noblock",
++      "evidence": "kern_proc.c source order after proc_is_zombie (0xfffffff0081ba714, mapped), as in the native release fileset reference: proc_getexecutablevnode then proc_getexecutablevnode_noblock, both 80 bytes reading p_textvp (+0x548, signed) and returning NULL when it is unset. Source: bsd/kern/kern_proc.c. Calls vnode_getwithref_noblock (0xfffffff007f0a0e0, mapped)."
++    },
++    {
++      "original": "0xfffffff008187984",
++      "original_size": 72,
++      "original_sha256": "61ba5af48f2516822ca941b51a4b5ebd62f41b15d106b8bd49aa1bd38d9bab2c",
++      "native_symbol": "_fg_get_vnode",
++      "evidence": "vnode_t fg_get_vnode(struct fileglob *fg): FILEGLOB_DTYPE(fg) through fg_ops (+0x28, autda discriminator 0x853c) == DTYPE_VNODE (1) ? fg_get_data(fg) (+0x38, discriminator 0x11b5) : NULL. It directly precedes fp_getfvp (0xfffffff0081879cc, mapped). Source: bsd/kern/kern_descrip.c. sandbox (site 0xfffffff009e98dbc) and AMFI call it for every file launchd touches (fuxi QUD USB log 2026-11-07 13:49 (owner no-ignition startup, launchd running), 27 hits)."
++    },
++    {
++      "original": "0xfffffff00820e478",
++      "original_size": 80,
++      "original_sha256": "17a0e4207e66400291f2241e389c2b17dddde260e43533108e5a3818295e836f",
++      "native_symbol": "_ubc_is_mapped",
++      "evidence": "bsd/kern/ubc_subr.c source order after ubc_upl_range_needed (0xfffffff00820e470, mapped), as in the native release fileset reference: ubc_is_mapped, ubc_is_mapped_writable, ubc_was_mapped_writable, each testing ubc_info (v_type +0x70 == VREG, v_ubcinfo +0x78 signed) then the mapped/writable flags. First of the three."
++    },
++    {
++      "original": "0xfffffff00820e4c8",
++      "original_size": 72,
++      "original_sha256": "5bbfe31aa45309184668b77530b9b90130dbeccef57bad9b9db5ab9ff3ab6bd1",
++      "native_symbol": "_ubc_is_mapped_writable",
++      "evidence": "bsd/kern/ubc_subr.c source order after ubc_upl_range_needed (0xfffffff00820e470, mapped), as in the native release fileset reference: ubc_is_mapped, ubc_is_mapped_writable, ubc_was_mapped_writable, each testing ubc_info (v_type +0x70 == VREG, v_ubcinfo +0x78 signed) then the mapped/writable flags. apfs calls it (site 0xfffffff009f1a18c, fuxi QUD USB log 2026-11-07 13:49 (owner no-ignition startup, launchd running), 27 hits)."
++    },
++    {
++      "original": "0xfffffff00820e510",
++      "original_size": 72,
++      "original_sha256": "ce33fee3b34b992ae50d788f0158e5c026a02112be24a5007ac026a1dc696c8a",
++      "native_symbol": "_ubc_was_mapped_writable",
++      "evidence": "bsd/kern/ubc_subr.c source order after ubc_upl_range_needed (0xfffffff00820e470, mapped), as in the native release fileset reference: ubc_is_mapped, ubc_is_mapped_writable, ubc_was_mapped_writable, each testing ubc_info (v_type +0x70 == VREG, v_ubcinfo +0x78 signed) then the mapped/writable flags. Third of the three."
++    },
++    {
++      "original": "0xfffffff00820d644",
++      "original_size": 60,
++      "original_sha256": "b4d9397758c0b8bdc62464b682ef37f4fdb38295503a8a7225646464e1946b8e",
++      "native_symbol": "_ubc_getsize",
++      "evidence": "bsd/kern/ubc_subr.c source order between ubc_setsize (0xfffffff00820d620, mapped) and ubc_setthreadcred (0xfffffff00820d740, mapped), as in the native release fileset reference: ubc_getsize (76), ubc_umcallback (176), ubc_getcred (76); each starts with the UBCINFOEXISTS test (v_type +0x70 == VREG, v_ubcinfo +0x78 signed). First of the three (60 bytes). apfs calls it (site 0xfffffff009f19e14, fuxi QUD USB log 2026-11-07 15:22 (scratch Data mounted at /private/var, launchd boot tasks))."
++    },
++    {
++      "original": "0xfffffff00820d680",
++      "original_size": 132,
++      "original_sha256": "39774152d4c178f358bbb17b5a0cc7690709562aea3afac7fdda2a483436fcd1",
++      "native_symbol": "_ubc_umcallback",
++      "evidence": "bsd/kern/ubc_subr.c source order between ubc_setsize (0xfffffff00820d620, mapped) and ubc_setthreadcred (0xfffffff00820d740, mapped), as in the native release fileset reference: ubc_getsize (76), ubc_umcallback (176), ubc_getcred (76); each starts with the UBCINFOEXISTS test (v_type +0x70 == VREG, v_ubcinfo +0x78 signed). Second (132 bytes, the only one with a frame: it calls the pager)."
++    },
++    {
++      "original": "0xfffffff00820d704",
++      "original_size": 60,
++      "original_sha256": "3f9580caf4a8b7e26c193bbb7089ae0e31cff7b4a65a26545d2078fe862dccae",
++      "native_symbol": "_ubc_getcred",
++      "evidence": "bsd/kern/ubc_subr.c source order between ubc_setsize (0xfffffff00820d620, mapped) and ubc_setthreadcred (0xfffffff00820d740, mapped), as in the native release fileset reference: ubc_getsize (76), ubc_umcallback (176), ubc_getcred (76); each starts with the UBCINFOEXISTS test (v_type +0x70 == VREG, v_ubcinfo +0x78 signed). Third (60 bytes)."
++    },
++    {
++      "original": "0xfffffff0082ddf40",
++      "original_size": 12,
++      "original_sha256": "eacee867bca8bd548e83141056717c7521637cf58fc5b0f7a6a52051439ece7b",
++      "native_symbol": "__ZNK11OSMetaClass13getSuperClassEv",
++      "evidence": "libkern/c++/OSMetaClass.cpp: `ldr x0, [x0, #0x10]; ret` returns superClassLink (+0x10; the native getClassNameSymbol reads className at +0x18), directly after OSMetaClass::reservedCalled (0xfffffff0082ddedc, mapped). sandbox walks a class chain with it: loop at 0xfffffff009e8792c calls getClassName (0xfffffff0082dc490), strlen, a callback, then this function on the same object and repeats while nonzero (site 0xfffffff009e87974). Mapping it to getClassNameSymbol (2026-11-07 15:34) made the loop treat an OSSymbol as a metaclass -> getClassName NULL -> strlen(NULL) data abort (screen 15:44: pc strlen, lr 0xfffffff009e8793c, far 0, esr 0x96000005)."
++    },
++    {
++      "original": "0xfffffff007dce5b4",
++      "original_size": 120,
++      "original_sha256": "ef72f1a7e9320241e22dfd598178c274a754322b1ffef3e7ff3c112f698bde00",
++      "native_symbol": "_task_update_physical_writes",
++      "evidence": "osfmk/kern/task.c source order between pid_from_task (0xfffffff007dce488, mapped) and task_update_logical_writes (0xfffffff007dce62c, mapped); the native build has the open-source empty body. apfs calls it per write with (task, flavor 1, io_size 0x1000, flags 1) (site 0xfffffff009fc4800, fuxi QUD USB log 2026-11-07 15:22 (scratch Data mounted at /private/var, launchd boot tasks))."
++    },
++    {
++      "original": "0xfffffff007e83a40",
++      "original_size": 288,
++      "original_sha256": "b9498a970d1f7ae9f3bd2020fbd0f26c3670d0e2e8b288ca31ae7ea01c369bf6",
++      "native_symbol": "_mach_vm_allocate_external",
++      "evidence": "osfmk/vm/vm_user.c: kern_return_t mach_vm_allocate_external(vm_map_t map, mach_vm_offset_t *addr, mach_vm_size_t size, int flags) with mach_vm_allocate_kernel inlined: rejects flags & 0xf8af60 (KERN_INVALID_ARGUMENT 4), NULL map, size 0 -> *addr = 0, page-rounds with the map page shift (+0x34), derives the VM tag from flags >> 24 (VM_GET_FLAGS_ALIAS), then vm_map_enter; directly precedes mach_vm_deallocate (0xfffffff007e83b60, mapped) as in the native fileset reference (mach_vm_allocate_external/_kernel then vm_allocate, mach_vm_deallocate). sandbox calls it (map, &addr, size, VM_FLAGS_ANYWHERE) at 0xfffffff009eb2c80 and memcpy()s into the result: the stub returned KERN_SUCCESS without an address -> memcpy write to NULL (screen 2026-11-07 15:54: panics 6/7 Kernel data abort pc memmove, lr 0xfffffff009eb2cf0, far 0, esr 0x96000045)."
++    },
++    {
++      "original": "0xfffffff008182aa0",
++      "original_size": 484,
++      "original_sha256": "0b0160c03979a7626121eaf38dcf36deda5a52a3a58aa048b4d3d29f364e9754",
++      "native_symbol": "_kauth_cred_label_update",
++      "evidence": "bsd/kern/kern_credential.c source order, as in the native release fileset reference: kauth_cred_getgroups (0xfffffff0081829a4, mapped), kauth_cred_label_update + its block_invoke (0xfffffff008182c84, named), kauth_proc_label_update + its block_invoke (0xfffffff008182d70, named), the execve block_invoke (0xfffffff008182dd8). Directly before its own block_invoke; same prologue as the reference (pacibsp; sub sp; stp x20,x19; ... mov x19, x0)."
++    },
++    {
++      "original": "0xfffffff008182cec",
++      "original_size": 132,
++      "original_sha256": "85e40b226e2668d5c87afed50c35381d762dc9b526ecfed9b66fa59ffc8d3e5b",
++      "native_symbol": "_kauth_proc_label_update",
++      "evidence": "bsd/kern/kern_credential.c source order, as in the native release fileset reference: kauth_cred_getgroups (0xfffffff0081829a4, mapped), kauth_cred_label_update + its block_invoke (0xfffffff008182c84, named), kauth_proc_label_update + its block_invoke (0xfffffff008182d70, named), the execve block_invoke (0xfffffff008182dd8). Directly before its own block_invoke; prologue identical to the reference (add x8, sp, #0x8; adrp block descriptor). sandbox calls it (proc, label) at 0xfffffff009e8ba14 when kauth_cred_proc_ref gives no usable credential (screen 2026-11-07 16:06, unmapped site 0xfffffff009e8ba18): the stub returned 0 without applying the sandbox label."
++    },
++    {
++      "original": "0xfffffff0083b0c7c",
++      "original_size": 224,
++      "original_sha256": "0fa42ae2916994c5383950cd44818337a9afeadb0cadbc2176fc7f2dd4de051b",
++      "native_symbol": "__ZN24IOBufferMemoryDescriptor11withOptionsEjmm",
++      "evidence": "iokit/Kernel/IOBufferMemoryDescriptor.cpp: directly before withCapacity (0xfffffff0083b0d5c, named), after inTaskWithGuardPages and inTaskWithPhysicalMask as in the reference. IOSurface calls it (kIOMemoryKernelUserShared|kIODirectionInOut 0x10003, 0x4000, 0x1000) at site 0xfffffff009b67438; the stub returned NULL -> \"failed to allocate a surface shared block\" (QUD log 2026-11-07 17:46 (IOSurface added to the prelink roots)); also stubbed in IOCryptoAcceleratorFamily, IOHIDFamily, IOReportFamily."
++    },
++    {
++      "original": "0xfffffff00835c174",
++      "original_size": 72,
++      "original_sha256": "402a369b366095e2aa5616d7950195f0ddceda7401ac1979168a28cfbe19cbd4",
++      "native_symbol": "__ZNK15IORegistryEntry14propertyExistsEPK8OSSymbolPK15IORegistryPlanej",
++      "evidence": "iokit/Kernel/IORegistryEntry.cpp source order after propertyHasValue(const char*, const OSObject*) (0xfffffff00835c0a0, mapped), as in the native release fileset reference: the three 72-byte plane overloads of propertyExists (OSSymbol, OSString, const char*), each a tail of getProperty(key, plane, options). First."
++    },
++    {
++      "original": "0xfffffff00835c1bc",
++      "original_size": 72,
++      "original_sha256": "973cc1ee4ea16d7970d9b23fbb3d17e37f0bd9af0a1b46936dbcbeab70b4db3e",
++      "native_symbol": "__ZNK15IORegistryEntry14propertyExistsEPK8OSStringPK15IORegistryPlanej",
++      "evidence": "iokit/Kernel/IORegistryEntry.cpp source order after propertyHasValue(const char*, const OSObject*) (0xfffffff00835c0a0, mapped), as in the native release fileset reference: the three 72-byte plane overloads of propertyExists (OSSymbol, OSString, const char*), each a tail of getProperty(key, plane, options). Second."
++    },
++    {
++      "original": "0xfffffff00835c204",
++      "original_size": 72,
++      "original_sha256": "1cf3535093778c8de5e73ee2622df25d71055f002c764430c9e2d3e8bb49d050",
++      "native_symbol": "__ZNK15IORegistryEntry14propertyExistsEPKcPK15IORegistryPlanej",
++      "evidence": "iokit/Kernel/IORegistryEntry.cpp source order after propertyHasValue(const char*, const OSObject*) (0xfffffff00835c0a0, mapped), as in the native release fileset reference: the three 72-byte plane overloads of propertyExists (OSSymbol, OSString, const char*), each a tail of getProperty(key, plane, options). Third; IOSurface calls it (entry, \"key\", plane, kIORegistryIterateRecursively) at 0xfffffff009b63074 (QUD log 2026-11-07 17:46 (IOSurface added to the prelink roots))."
++    },
++    {
++      "original": "0xfffffff0082e8948",
++      "original_size": 172,
++      "original_sha256": "3d76a7879f3b195668995823338fa1dfb75064f5a59155a1c6044ebcdef6dd9e",
++      "native_symbol": "__ZN12OSDictionary14iterateObjectsEPvPFbS0_PK8OSSymbolP8OSObjectE",
++      "evidence": "libkern/c++/OSDictionary.cpp source order directly before OSIterator::getMetaClass (0xfffffff0082e8aa0, named), as in the reference: iterateObjects(void*, callback) then iterateObjects(block); both start with the count test. First."
++    },
++    {
++      "original": "0xfffffff0082e89f4",
++      "original_size": 172,
++      "original_sha256": "84080edc0fe1716f788376dfe8078fecb7e8858425ad9ea9b052a9a9cafb84ac",
++      "native_symbol": "__ZN12OSDictionary14iterateObjectsEU13block_pointerFbPK8OSSymbolP8OSObjectE",
++      "evidence": "libkern/c++/OSDictionary.cpp source order directly before OSIterator::getMetaClass (0xfffffff0082e8aa0, named), as in the reference: iterateObjects(void*, callback) then iterateObjects(block); both start with the count test. Second; sandbox (site 0xfffffff009e87ec8), IOHIDFamily and IOSurface call it (QUD log 2026-11-07 17:46 (IOSurface added to the prelink roots))."
++    },
++    {
++      "original": "0xfffffff0083a9efc",
++      "original_size": 196,
++      "original_sha256": "399872cd83e295575055b18991a6745ef602c5674ce6f20e4d6b613f0a6b018c",
++      "native_symbol": "__ZN13IOCommandGate11commandGateEP8OSObjectPFiS1_PvS2_S2_S2_E",
++      "evidence": "iokit/Kernel/IOCommandGate.cpp source order after the two 72-byte IOCommandGate(const OSMetaClass*) constructors that follow IOCommandGate::operator new (0xfffffff0083a9e08, named), as in the reference: commandGate(OSObject *owner, Action action = 0), then runActionBlock (mov x2, x1; vtable dispatch). 8 kexts call it; IOSurface (owner, 0) at 0xfffffff009b631d8 (QUD log 2026-11-07 17:46 (IOSurface added to the prelink roots))."
++    },
++    {
++      "original": "0xfffffff0083a9fc0",
++      "original_size": 80,
++      "original_sha256": "f2328d072ca81d07a3a238f6d39940ac77109743646c938258539d923940cf29",
++      "native_symbol": "__ZN13IOCommandGate14runActionBlockEU13block_pointerFivE",
++      "evidence": "iokit/Kernel/IOCommandGate.cpp source order after the two 72-byte IOCommandGate(const OSMetaClass*) constructors that follow IOCommandGate::operator new (0xfffffff0083a9e08, named), as in the reference: commandGate(OSObject *owner, Action action = 0), then runActionBlock (mov x2, x1; vtable dispatch). runActionBlock."
++    },
++    {
++      "original": "0xfffffff0083a8964",
++      "original_size": 220,
++      "original_sha256": "6139ff6f5af52b10155e5a9b33bc377e7609efb19e51e82f00a6f90f7141855a",
++      "native_symbol": "_unixnu_interrupt_event_source_soft",
++      "evidence": "iokit/Kernel/IOInterruptEventSource.cpp source order after operator new (0xfffffff0083a8864, named) and the two 72-byte default constructors, as in the native release fileset reference: interruptEventSource(OSObject*, Action, IOService*, int), then the block variant. IOSurface calls it (owner, action signed IA 0x12f7, NULL, 0) at 0xfffffff009b6323c (QUD log 2026-11-07 17:58). Bound to the software-only wrapper (device-ios17 build-ios17-stubs.py): the plain mapping let ApplePMGR (pulled in by IOMobileGraphicsFamily, 2 calls with a provider) register Apple interrupts and the boot died before the USB console (2026-11-07 19:54 screen: pmap.c:3514 assert(not_in_kdp) on cpu3/cpu2); provider-NULL callers are AppleARMPlatform, AppleM2ScalerCSCDriver, IOHIDFamily, IOMobileGraphicsFamily, IOSurface (IOSurfaceRoot needs it, else IOCoreSurfaceRoot never appears)."
++    },
++    {
++      "original": "0xfffffff007e6a830",
++      "original_size": 44,
++      "original_sha256": "6c89793003cf03e9abdb41bee11313f484ada9c432eacf9f55a9e9e210cd9d51",
++      "native_symbol": "_upl_dirty_page",
++      "evidence": "osfmk/vm/vm_upl.c source order, as in the native release fileset reference: upl_page_present (0xfffffff007e6a818, mapped), upl_dirty_page, upl_valid_page, vm_countdirtypages (0xfffffff007e6a88c, named); each indexes the page list (sbfiz x8, x1, #3) and tests the entry. apfs calls it per page right after upl_page_present (site 0xfffffff009f10e44, 30 hits until the unmapped-call reporter panicked, screen 2026-11-07 20:32 + QUD log 20:31 (display driver running))."
++    },
++    {
++      "original": "0xfffffff007e6a85c",
++      "original_size": 48,
++      "original_sha256": "40f988b8fa105b1da701898cbb2b1df6c29d8a2e5c7bd79b3ae9266b41dc26e5",
++      "native_symbol": "_upl_valid_page",
++      "evidence": "osfmk/vm/vm_upl.c source order, as in the native release fileset reference: upl_page_present (0xfffffff007e6a818, mapped), upl_dirty_page, upl_valid_page, vm_countdirtypages (0xfffffff007e6a88c, named); each indexes the page list (sbfiz x8, x1, #3) and tests the entry. apfs calls it (site 0xfffffff009f12018, screen 2026-11-07 20:32 + QUD log 20:31 (display driver running))."
++    },
++    {
++      "original": "0xfffffff0083efc68",
++      "original_size": 16,
++      "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
++      "native_symbol": "__ZN12IOUserClientD2Ev",
++      "evidence": "iokit/Kernel/IOUserClient.cpp: the base destructor (vptr poisoned with -1) between IOUserClient C1 (0xfffffff0083efc3c, named) and operator delete (0xfffffff0083efc78, named), the same place as every other IOKit class D2 in this kernel. 15 kexts call it from their user-client destructors; IOMobileGraphicsFamily at 0xfffffff0099e45d4 (screen 2026-11-07 20:32 + QUD log 20:31 (display driver running))."
++    },
++    {
++      "original": "0xfffffff007f47330",
++      "original_size": 84,
++      "original_sha256": "7bcdddb3e1b857c9d924900f23477c80266f9f1fe617806f06d047bbfffb2e32",
++      "native_symbol": "_decmpfs_cnode_free",
++      "evidence": "bsd/kern/decmpfs.c source order, as in the native release fileset reference: decmpfs_cnode_alloc (named), decmpfs_cnode_free, decmpfs_cnode_init (named), ... decmpfs_cnode_get_vnode_state (named), decmpfs_cnode_set_vnode_state, decmpfs_cnode_get_vnode_cached_size (named). Between cnode_alloc and cnode_init; apfs calls it (site 0xfffffff009f69d38, 37 hits, QUD log 2026-11-07 21:06 + screen 21:07 (display running))."
++    },
++    {
++      "original": "0xfffffff007f474e0",
++      "original_size": 196,
++      "original_sha256": "be523d6901ae85e9a5e0889bdf7bf62b040d90ac80e4d3c8539748dff50cc347",
++      "native_symbol": "_decmpfs_cnode_set_vnode_state",
++      "evidence": "bsd/kern/decmpfs.c source order, as in the native release fileset reference: decmpfs_cnode_alloc (named), decmpfs_cnode_free, decmpfs_cnode_init (named), ... decmpfs_cnode_get_vnode_state (named), decmpfs_cnode_set_vnode_state, decmpfs_cnode_get_vnode_cached_size (named). Between get_vnode_state and get_vnode_cached_size; apfs calls it (cnode, state, skiplock) at 0xfffffff009f5dba0 (11 hits, QUD log 2026-11-07 21:06 + screen 21:07 (display running)): unset, compressed files never leave the unknown state."
++    },
++    {
++      "original": "0xfffffff00831a1b8",
++      "original_size": 204,
++      "original_sha256": "6ec5c819713cce519527a64eb063c0ad62b53529827dd6c5f56959a729c1ff57",
++      "native_symbol": "__ZN12OSSerializer9forTargetEPvPFbS0_S0_P11OSSerializeES0_",
++      "evidence": "libkern/c++/OSSerializer.cpp source order after OSSerializer::operator new (0xfffffff00831a0b8, named) and the two 72-byte default constructors, as in the reference: forTarget(void *, Callback, void *), then withBlock. IOMobileGraphicsFamily and IOHIDFamily call it (target, signed callback, NULL); site 0xfffffff0099f9be0 (QUD log 2026-11-07 21:06 + screen 21:07 (display running))."
++    },
++    {
++      "original": "0xfffffff00831a284",
++      "original_size": 216,
++      "original_sha256": "535252d44e9126f127f223b37488d216f5bd8f3a5ed1c1980468179a0bd0ac3c",
++      "native_symbol": "__ZN12OSSerializer9withBlockEU13block_pointerFbP11OSSerializeE",
++      "evidence": "libkern/c++/OSSerializer.cpp source order after OSSerializer::operator new (0xfffffff00831a0b8, named) and the two 72-byte default constructors, as in the reference: forTarget(void *, Callback, void *), then withBlock. withBlock."
++    },
++    {
++      "original": "0xfffffff007d7de0c",
++      "original_size": 12,
++      "original_sha256": "891cd3edb165f54c48e80b222c6872682dda5e51986ffb6388b46fc184b89bda",
++      "native_symbol": "_mach_continuous_time",
++      "evidence": "osfmk/arm64 rtclock source order, as in the native release fileset reference: clock_absolutetime_interval_to_deadline (60 bytes, timebase + per-cpu offset), clock_continuoustime_interval_to_deadline, mach_continuous_time, clock_get_uptime (52 bytes), continuoustime_to_absolutetime, absolutetime_to_continuoustime, rtclock_gettime, rtclock_getattr. The raw `mrs x0, CNTVCTSS_EL0; ret` without the per-cpu timebase offset sits in the mach_continuous_time slot (between clock_continuoustime_interval_to_deadline, 24 bytes, and clock_get_uptime). Previously mis-mapped to mach_absolute_time."
++    },
++    {
++      "original": "0xfffffff0081bfeb8",
++      "original_size": 12,
++      "original_sha256": "7c921fc862f95f93030a1bb1528f153f8ef915bb3f1bdd710390d820d403e1c5",
++      "native_symbol": "_proc_pgrpid",
++      "evidence": "bsd/kern/kern_proc.c source order, as in the native release fileset reference: proc_get_pthread_jit_allowlist (named), proc_pgrpid (ldr w0,[x0,#0x28]; ret), proc_sessionid (ldr w0,[x0,#0x44]; ret), proc_selfpgrpid (named); the native accessors read the same offsets. sandbox calls it (site 0xfffffff009e9d368, 22 hits, QUD log 2026-11-07 21:18 (display running))."
++    },
++    {
++      "original": "0xfffffff0081bfec4",
++      "original_size": 12,
++      "original_sha256": "68b21846ad9560cd4d58aff1fa53c2951666f2c02a3f3e8cbbcd3a9f914e892b",
++      "native_symbol": "_proc_sessionid",
++      "evidence": "bsd/kern/kern_proc.c source order, as in the native release fileset reference: proc_get_pthread_jit_allowlist (named), proc_pgrpid (ldr w0,[x0,#0x28]; ret), proc_sessionid (ldr w0,[x0,#0x44]; ret), proc_selfpgrpid (named); the native accessors read the same offsets. Second accessor."
++    },
++    {
++      "original": "0xfffffff007d7de18",
++      "original_size": 52,
++      "original_sha256": "1bbbdaa61262b3e35376efc4945a1e778838791e0269fed8e1ae7f833ca681e3",
++      "native_symbol": "_clock_get_uptime",
++      "evidence": "osfmk/arm64 rtclock source order, as in the native release fileset reference: clock_absolutetime_interval_to_deadline (60 bytes, timebase + per-cpu offset), clock_continuoustime_interval_to_deadline, mach_continuous_time, clock_get_uptime (52 bytes), continuoustime_to_absolutetime, absolutetime_to_continuoustime, rtclock_gettime, rtclock_getattr. Reads timebase + per-cpu offset (TPIDR->0x150->0x50) with the retry loop and stores it to *x0, same 52-byte shape as the reference. IOStorageFamily calls it on request completion (site 0xfffffff009b34f7c, 64 hits -> reporter panic, QUD log 2026-11-07 21:32 (display running))."
++    },
++    {
++      "original": "0xfffffff0083fa608",
++      "original_size": 516,
++      "original_sha256": "7165a07734b694bc992b01a51e2c6a9d6c33ff29f6d7b20b9574e1c82089849e",
++      "native_symbol": "__ZN16IOUserClient202222dispatchExternalMethodEjP31IOExternalMethodArgumentsOpaquePK28IOExternalMethodDispatch2022mP8OSObjectPv",
++      "evidence": "IOSurfaceRootUserClient externalMethod (vtable slot 0x5d0, disc 0x5d9d, original 0xfffffff009b6e104) tail-calls it with x3 = IOSurface dispatch table 0xfffffff007c829c0 and x1 = selector; signature (this, selector, args, array, count, target, reference): checks array != NULL (else 0xe00002c2), selector < count, entry = selector * 40 (IOExternalMethodDispatch2022), checkScalarInputCount at +8 vs args+0x28, and calls the action with braa disc 0xbcad, the same discriminator as the native function and as IOSurface table entries. Hit from IOUserClient::callExternalMethod+0xd8 (QUD log 2026-11-08 12:47 (GPU first IB fixed, no frames on screen))."
++    },
++    {
++      "original": "0xfffffff0083eb18c",
++      "original_size": 92,
++      "original_sha256": "8bac147455abe62161975e63b3109d490bd6b303a8e19c61517aad7728d20960",
++      "native_symbol": "__ZN12IOUserClient10clientDiedEv",
++      "evidence": "IOMobileFramebufferUserClient vtable slot 0x568 (disc 0xea14) points here; body: if sharedInstance (byte +0x98) or CAS8(0 -> 1) on closed (+0x99) then tail-call vtable slot 0x560 (clientClose), else return 0xe00002d8 (kIOReturnNotReady) - the native IOUserClient::clientDied reads the same fields. Hit from iokit_client_died+0xa0 (QUD log 2026-11-08 12:47 (GPU first IB fixed, no frames on screen))."
++    },
++    {
++      "original": "0xfffffff007dd478c",
++      "original_size": 76,
++      "original_sha256": "e4ad281559c9f41f170905b758f3d12e59fa95067c40d6dc7b0bfc0e77572588",
++      "native_symbol": "_task_deallocate",
++      "evidence": "KPI task_deallocate with task_deallocate_grp inlined: NULL check, os_ref release (ldaddl -1) of task->ref_count at +0x10 with the underflow panic, then tail-call task_deallocate_internal(task, refs) (0xfffffff007dc7114). Called by IOSurface (sites 0xfffffff009b6a928/0xfffffff009b70a78 on a client task field), IOGPUFamily, IOHIDFamily, IOReportFamily, CoreAnalyticsFamily (QUD log 2026-11-08 12:47 (GPU first IB fixed, no frames on screen))."
++    },
++    {
++      "original": "0xfffffff007db48bc",
++      "original_size": 16,
++      "original_sha256": "497304f5933fb76b4c254f9a4edcc6f474085c6547f7c4965d63f75adc2dda04",
++      "native_symbol": "_thread_block",
++      "evidence": "16 bytes: bti c; mov x1, #0; mov w2, #0; b thread_block_reason - identical to the native thread_block. Hit from apfs site 0xfffffff009f7c94c with x0 = 0 (QUD log 2026-11-08 12:47 (GPU first IB fixed, no frames on screen))."
++    },
++    {
++      "original": "0xfffffff0083f1400",
++      "original_size": 16,
++      "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
++      "native_symbol": "__ZN16IOUserClient2022D2Ev",
++      "evidence": "IOSurfaceRootUserClient D1 (0xfffffff009b68be8) releases its members and tail-calls this base destructor; Apple folds the D2 chain to `str #-1, [x0]` (vptr poison). The native IOUserClient2022 D2 tail-calls IOService D2. Hit as site 0xfffffff009b68d10 (IOSurface D0 after the D1 call) (QUD log 2026-11-08 12:47 (GPU first IB fixed, no frames on screen))."
++    },
++    {
++      "original": "0xfffffff0083b08b8",
++      "original_size": 232,
++      "original_sha256": "f672576cdafc73c138e5f723ea4762a7b2b95aa339b02a2772655b62821f92b4",
++      "native_symbol": "__ZN24IOBufferMemoryDescriptor17inTaskWithOptionsEP4taskjmm",
++      "evidence": "Allocates through the IOBufferMemoryDescriptor metaclass (alloc, slot 0x68 disc 0x1601), then calls vtable slot 0x128 (initWithPhysicalMask, disc 0x1c03) with (task, options, capacity, alignment, physicalMask = 0); on failure releases the object and returns NULL - the 4-argument inTaskWithOptions. IOSurface allocates its 0xc74000-byte backing store with it (site 0xfffffff009b529fc, x0 = NULL task, options 0x110763, alignment 0x1000), IOStorageFamily too (QUD log 2026-11-08 13:22 (IOSurface dispatch mapped; surfaces still not created))."
++    },
++    {
++      "original": "0xfffffff007e34f90",
++      "original_size": 132,
++      "original_sha256": "f801a3121ee6db2e8005eb71813b9ebcfc8370aea3207af4ec8f3b7c197e9be5",
++      "native_symbol": "_vm_kernel_addrhide",
++      "evidence": "osfmk/vm/vm_kern.c order: follows vm_kernel_addrhash_external (0xfffffff007e34f80: adrp/ldr salt; b addrhash_internal, as native) and precedes the addrperm/unslide pair (0xfffffff007e35014 starts `mov x8, x0; xpaci x8`). This one strips x0 in place (`mov x19, x1; xpaci x0`) like the native vm_kernel_addrhide, range-checks the kernel/kext text and stores the unslid value or 0 to *x1. IOSurface sites 0xfffffff009b4f72c/0xfffffff009b52ad0, IOGPUFamily (QUD log 2026-11-08 13:22 (IOSurface dispatch mapped; surfaces still not created))."
++    },
++    {
++      "original": "0xfffffff007d96638",
++      "original_size": 80,
++      "original_sha256": "684a242d4a87b97b90b436fb96dda3cb6349cfdcabdc0effe389961c7a62b6d3",
++      "native_symbol": "_zfree",
++      "evidence": "zfree(zone_or_view, addr): ldp zone, stats from the view, esize = zone->+0x34 (u16), bzero(addr, esize), tail-call zfree_ext(zone, stats, addr, esize) - the native zfree minus its zone-flag debug checks. Reached from the IOSurface D0 (0xfffffff009b4f1c0: D1, then the kalloc_type view operator delete, size 0x3b8) as site 0xfffffff009b52b98 (QUD log 2026-11-08 13:22 (IOSurface dispatch mapped; surfaces still not created))."
++    },
++    {
++      "original": "0xfffffff0083ed854",
++      "original_size": 328,
++      "original_sha256": "4ba5b1dc3d4e3052599c6c778c09eca2fed5efc79fefcc522b33ff315e5a95c1",
++      "native_symbol": "__ZN12IOUserClient4freeEv",
++      "evidence": "AMFI user-client vtable free slot (0xfffffff007ad01a8, disc 0xedc5 = OSObject::free) points here; body starts with `ldr x0, [x0, #0x90]` (mappings) release, then the IOStatistics/lock teardown and tail-call 0xfffffff008370be8 (IOService::free slot target of the same class) - same shape as the native IOUserClient::free. Hit from OSArray::flushCollection+0xb8 (QUD log 2026-11-08 13:22 (IOSurface dispatch mapped; surfaces still not created))."
++    },
++    {
++      "original": "0xfffffff0083c5144",
++      "original_size": 216,
++      "original_sha256": "8c911b977bac0e0ed367856eafb9aa31d00fead3a0d4f29f3e8664c64f49b15e",
++      "native_symbol": "__ZN18IOMemoryDescriptor10setContextEP8OSObject",
++      "evidence": "Instruction-for-instruction the native IOMemoryDescriptor::setContext: reserved = this->+0x10, early out when both reserved and obj are NULL, lazy getKernelReserved allocation stored to +0x10, atomically clear reserved->contextObject (+0x58) and release the old object (slot 0x28 disc 0x3a87), retain obj (slot 0x20 disc 0x2e4a) and store it to +0x58. IOSurface calls it on its backing memory descriptor ([x19+0x30]) with a context object at sites 0xfffffff009b5235c and 0xfffffff009b57f60 (QUD log 2026-11-08 13:41 (IOBMD/addrhide/zfree mapped; IOSurface backing store set-up))."
++    },
++    {
++      "original": "0xfffffff00837df70",
++      "original_size": 400,
++      "original_sha256": "c694005b0c3b31a919524c7964d4464aa26bebd7e6ad6d3e174cffa7c22ad40f",
++      "native_symbol": "__ZN9IOService23registryEntryIDMatchingEyP12OSDictionary",
++      "evidence": "Factory (x0 = registry entry ID, x1 = table or NULL): an inlined OSNumber alloc + OSNumber::init (slot disc 0xe9cb), an OSDictionary alloc + initWithCapacity (disc 0x9c02) when the table is NULL, and OSDictionary::setObject (disc 0x8d9e) - the native registryEntryIDMatching (OSNumber::withNumber, OSDictionary::withCapacity, setObject). The original IOHIDDevice start path calls it with getRegistryEntryID(this) and NULL, then registers a matching notification on the result (site 0xfffffff0099208b4); the stub returned NULL and the vtable load of it faulted (ESR 0x96000005) (QUD log + panic screen 2026-11-08 18:07 (touch build: NativeHidInput start))."
++    },
++    {
++      "original": "0xfffffff0082e25c0",
++      "original_size": 16,
++      "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
++      "native_symbol": "__ZN12OSCollectionD2Ev",
++      "evidence": "`bti c; mov x8, #-1; str x8, [x0]; ret` (Apple folds the D2 chain to the vptr poison) right before the OSCollection metaclass constructor (0xfffffff0082e25d0: name \"OSCollection\", size 0x18); the native OSCollection D2 tail-calls OSObject D2. IOHIDFamily calls it from a destructor at site 0xfffffff009930304 (QUD log + panic screen 2026-11-08 18:07 (touch build: NativeHidInput start))."
++    },
++    {
++      "original": "0xfffffff008401d54",
++      "original_size": 204,
++      "original_sha256": "70a89968d6acb2c0d15352aa6582231c45d44140567cf2a72c74357b99315978",
++      "native_symbol": "__ZN16IOSimpleReporter4withEP9IOServicety",
++      "evidence": "Factory loads IOSimpleReporter::gMetaClass at 0xfffffff00a32c1e0; saves provider/categories/unit (x0,x1,x2), allocates and initializes reporter."
++    },
++    {
++      "original": "0xfffffff0084068dc",
++      "original_size": 344,
++      "original_sha256": "57ec3c09981bd6763da462cba770e894285d6f2e2c9cc315d3660064be0952d0",
++      "native_symbol": "__ZN14IOReportLegend4withEP7OSArray",
++      "evidence": "IOReportLegend factory used by IOHIDDevice reporter initialization, one nullable OSArray argument. Metaclass lies after IOReporter subclasses."
++    },
++    {
++      "original": "0xfffffff008407148",
++      "original_size": 148,
++      "original_sha256": "3446b50487ea12d24ac0eccf17a8e9ff3342c225d326f4755e27213f7b396bc7",
++      "native_symbol": "__ZN14IOReportLegend17addReporterLegendEP10IOReporterPKcS3_",
++      "evidence": "HID setup passes legend, reporter, group and subgroup; obtains reporter legend then calls addLegendEntry and releases temporary dictionary."
++    },
++    {
++      "original": "0xfffffff008406b40",
++      "original_size": 12,
++      "original_sha256": "eacee867bca8bd548e83141056717c7521637cf58fc5b0f7a6a52051439ece7b",
++      "native_symbol": "__ZN14IOReportLegend9getLegendEv",
++      "evidence": "Exact leaf BTI; ldr x0,[x0,#0x10]; ret. IOReportLegend::_reportLegend getter."
++    },
++    {
++      "original": "0xfffffff0082e11ac",
++      "original_size": 196,
++      "original_sha256": "786a7d50545729ad83328add815eb80e17902165ccec09b8b6ec0ca4bde6ace3",
++      "native_symbol": "__ZN7OSArray9withArrayEPKS_j",
++      "evidence": "IOHIDInterface::createMatchingElements(NULL,0) tail calls this factory with its array and capacity zero. Without mapping the event driver receives NULL and closes the interface."
++    },
++    {
++      "original": "0xfffffff0082e280c",
++      "original_size": 252,
++      "original_sha256": "33744d55128e260e8e98c3268b5284f4c336de953a37cee24f2952cfcbfb3e81",
++      "native_symbol": "__ZN12OSCollection14iterateObjectsEU13block_pointerFbP8OSObjectE",
++      "evidence": "OSCollection iteration with a captured block in x1; uses collection iterator virtuals and invokes the block. The HID caller constructs a stack block before calling."
++    },
++    {
++      "original": "0xfffffff0083fcf7c",
++      "original_size": 368,
++      "original_sha256": "7f9fb3c8ff4a4ea85135ad7b98e0c7c903f23da8e01a1ec4ebad5d5278646961",
++      "native_symbol": "__ZN17IOSharedDataQueue16initWithCapacityEj",
++      "evidence": "IOHIDEventServiceQueue inherits this capacity initializer; original shared-queue vtable slot 18 and native discriminator agree; fills queue descriptor and appendices."
++    },
++    {
++      "original": "0xfffffff0083fd850",
++      "original_size": 16,
++      "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
++      "native_symbol": "__ZN17IOSharedDataQueueD2Ev",
++      "evidence": "Original IOSharedDataQueue destructor with vptr poison; adjacent metaclass constructor names IOSharedDataQueue."
++    },
++    {
++      "original": "0xfffffff008400a4c",
++      "original_size": 672,
++      "original_sha256": "b45e693135dbc7a03808515e436a0b3f82a8bd8b1c382090527892e8f4073c46",
++      "native_symbol": "__ZN10IOReporter17getChannelIndicesEyPiS0_",
++      "evidence": "Reporter lookup called with channel ID and two output index pointers, under the reporter lock; source IOReporter getChannelIndices."
++    },
++    {
++      "original": "0xfffffff0082e86b0",
++      "original_size": 196,
++      "original_sha256": "5b875e97a524d9113df09991beb5751eb3189cc34a6d0ec25bd0da55283654e9",
++      "native_symbol": "__ZN12OSDictionary14withDictionaryEPKS_j",
++      "evidence": "Loads OSDictionary gMetaClass at 0xfffffff00a329f80; saves dictionary and capacity arguments; HIDEventService calls it when copying its event properties."
++    },
++    {
++      "original": "0xfffffff0083eb404",
++      "original_size": 52,
++      "original_sha256": "fd10113c92737a49b5d27ffb47b84720ffea5d6a06582df71e905fc2f35adc61",
++      "native_symbol": "__ZN12IOUserClient24registerNotificationPortEP8ipc_portjy",
++      "evidence": "64-bit IOUserClient notification registration forwarder. Tail-calls virtual slot 175 (0x578), discriminator 0xbcef, the 32-bit overload. Source IOUserClient.cpp. Native is_io_connect_set_notification_port_64 called it through slot 169; returning-zero unmapped stub suppresses the HID subclass notification callback."
++    },
++    {
++      "original": "0xfffffff0082e10e0",
++      "original_size": 204,
++      "original_sha256": "c8a018341e8daf6ef86bbeb5c4ff90be1bc39925fad57cd10d32dcb2d8ceeab5",
++      "native_symbol": "__ZN7OSArray11withObjectsEPPK8OSObjectjj",
++      "evidence": "Factory (x0 = object array, x1 = count, x2 = capacity): alloc through OSArray::gMetaClass 0xfffffff00a329ee0 (slot +0x68, disc 0x1601), then initWithObjects at vtable +0xd8 with discriminator 0x04ec, release on failure; it lies between OSArray::withCapacity (0xfffffff0082e102c) and OSArray::withArray (0xfffffff0082e11ac). Source: libkern/c++/OSArray.cpp withObjects. IOHIDFamily calls it with a one-element array (site 0xfffffff009955bf8) on the first digitizer event, stores the result at +0x18 and the stub NULL hung the event path (QUD log fuxi-20261111-181417-640, 54 hits after a finger touch)."
+     }
+   ],
+   "data": [
+@@ -596,6 +1611,30 @@
+       "native_symbol": "_vnop_searchfs_desc",
+       "addend": 0,
+       "evidence": "struct vnodeop_desc in original kernel __DATA: its vdesc_name pointer (at +8) points to the string \"vnop_searchfs\". apfs references it from its vnodeopv_entry_desc table; the other 55 descriptors apfs uses are already paired to their native _vnop_*_desc by name. Unbound, vfs_fsadd read a nameless operation and panicked \"operation not listed in vfs_op_descs\" (probe boot 2026-11-06 14:25). As the README notes, vnode descriptors must resolve to the native descriptors VFS initializes. Source: bsd/vfs/vnode_if.c vnop_searchfs_desc."
++    },
++    {
++      "original": "0xfffffff007928088",
++      "native_symbol": "_kOSBooleanTrue",
++      "addend": 0,
++      "evidence": "Read-only pointer in kernel __DATA_CONST whose fixup points to the __DATA object 0xfffffff00a35be58. OSBoolean::initialize stores the first OSBoolean it builds there (the source builds gOSBooleanTrue first); OSBoolean operator new and OSKext::copyInfo read it. Its sibling 0xfffffff0079272e8 points 8 bytes further (0xfffffff00a35be60) and is already paired to _kOSBooleanFalse; natively kOSBooleanTrue/kOSBooleanFalse reference gOSBooleanTrue/gOSBooleanFalse at +0/+8 the same way. Eight kexts import it; apfs dereferenced the unpaired original address and faulted at 0xfffffff009efe99c (native-ufs-probe=12 boot 2026-11-06 16:45)."
++    },
++    {
++      "original": "0xfffffff00a32966c",
++      "native_symbol": "_rootdev",
++      "addend": 0,
++      "evidence": "4-byte kernel __DATA variable just before the paired _rootvp. Original references: vfs_mountroot, bsd_init (twice), imageboot_mount_image, imageboot_read_file_internal; native _rootdev is referenced by vfs_mountroot, bsd_init, imageboot_mount_image, imageboot_setup and set_rootvnode, the same root-device users. Imported by apfs and sandbox."
++    },
++    {
++      "original": "0xfffffff00a322b50",
++      "native_symbol": "_rsr_check_vnode",
++      "addend": 0,
++      "evidence": "Kernel __DATA variable referenced only by vnode_is_rsr in the original; native _rsr_check_vnode is referenced only by vnode_is_rsr as well (the RSR vnode check hook). Co-reference over paired functions votes _rsr_check_vnode. Imported by apfs."
++    },
++    {
++      "original": "0xfffffff007895ab0",
++      "native_symbol": "_PAGE_SHIFT_CONST",
++      "addend": 0,
++      "evidence": "const unsigned int PAGE_SHIFT_CONST (osfmk/arm64 vm_param, SECURITY_READ_ONLY_LATE, zero in the image): the original kernel stores it at boot with mov w8, #0xe; str w8, [0xfffffff007895ab0] (0xfffffff007eb8804, arm_vm_init: PAGE_SHIFT_CONST = ARM_PGSHIFT 14), and 65 GOT slots of the retained kexts point at it (the PAGE_SHIFT macro of kexts). The reference-data matcher had paired it with native _cons_ops_index (value 0), so apfs computed upl pages = bufsize >> 0 and walked upl_page_present(pl, 0x3fff) off the end of the native page list: Kernel data abort at pc upl_page_present+4 / upl_device_page+0xc during the /sbin/launchd exec (fuxi on-screen panic probe 2026-11-07 12:09, panic #0 on cpu 7 from sleh_synchronous_sp1; QUD log 2026-11-07 10:58 x0 page list, x1 0x3fff, x23 0x4000, far = x0 + 0x1fff8). The native kernel is 4 KiB-paged, so the native value (12) matches the native UPL page lists apfs walks."
+     }
+   ]
+ }

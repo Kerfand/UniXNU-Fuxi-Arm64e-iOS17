@@ -1,0 +1,1 @@
+../../device/scripts/build-preflight.sh

@@ -1,0 +1,14 @@
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -26,7 +26,9 @@
+ #define __ARM_VFP__               4
+ #define __ARM_COHERENT_CACHE__    1
+ #define __ARM_DEBUG__             7
+-#define __ARM64_PMAP_SUBPAGE_L1__ 1
++/* user-va-39bit.patch: no subpage L1, so the 4K granule uses T0SZ/T1SZ 25 (39-bit VA): arm64e user code
++ * (Swift/objc FAST_DATA_MASK 0x7ffffffff8) expects the PAC field to start at bit 39 as on iOS. */
++#undef __ARM64_PMAP_SUBPAGE_L1__
+ 
+ /* Explicit native ARMv8.1+ bring-up; the original A53 target has no PAN. */
+ #if defined(XNU_NATIVE_PAN) && XNU_NATIVE_PAN

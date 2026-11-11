@@ -1,0 +1,1 @@
+../../device/scripts/check-boot-ui-trace-reference.py

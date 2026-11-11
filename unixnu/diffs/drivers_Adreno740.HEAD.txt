@@ -1,0 +1,2 @@
+a9a2cbb43b89d672e2921e19721a6438b738b17f fix(accelerator): include the ABI header from the renamed module
+https://github.com/UniXNU/Adreno740.git

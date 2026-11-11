@@ -1,0 +1,22 @@
+diff --git a/bsd/kern/kern_shutdown.c b/bsd/kern/kern_shutdown.c
+--- a/bsd/kern/kern_shutdown.c
++++ b/bsd/kern/kern_shutdown.c
+@@ -179,6 +179,18 @@
+ 	int hostboot_option = 0;
+ 	uint64_t startTime;
+ 
++	{
++		/* reboot-probe.patch (log and screen only): who reboots, then two seconds for the USB console. */
++		extern void unixnu_reboot_screen(int, int);
++		extern void IOSleep(unsigned int);
++		proc_t self = current_proc();
++		printf("unixnu reboot: howto %#x by %s[%d] message %s\n", howto, self ? proc_best_name(self) : "?",
++		    self ? proc_pid(self) : -1, message ? message : "(none)");
++		unixnu_reboot_screen(howto, self ? proc_pid(self) : -1);
++		if (!(howto & RB_PANIC)) {
++			IOSleep(2000);
++		}
++	}
+ 	if ((howto & (RB_PANIC | RB_QUICK)) == (RB_PANIC | RB_QUICK)) {
+ 		panic_kernel(howto, message);
+ 	}

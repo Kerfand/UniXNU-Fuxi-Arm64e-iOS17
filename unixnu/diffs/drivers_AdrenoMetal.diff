@@ -1,0 +1,31 @@
+diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
+index a7c0750..1e95b09 100644
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -93,7 +93,7 @@ static bool bootArgSet(const char *key) {
+     size_t size = sizeof args - 1;
+     return sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, key);
+ }
+-static unsigned patchFramebufferBranch(uintptr_t slide) {
++[[maybe_unused]] static unsigned patchFramebufferBranch(uintptr_t slide) {
+     const uintptr_t site = 0x184461928 + slide;
+     uint32_t word = 0;
+     if (!readTask(site, &word, sizeof word)) return 0x6E40;
+@@ -384,6 +384,9 @@ static id deviceForPort(unsigned port) {
+         setenv("CA_DISPLAY_EDR_HEADROOM", "1", 1);
+         setenv("CA_FP16_MIN_HEADROOM", "1e30", 1);
+         setenv("CA_ALLOW_EDR_MIRRORING", "0", 1);
++        // The addresses below are the 24A446 (iPadOS 27) cache's. The iOS 17 arm64e build (21H16, NATIVE_ADRENO_IOS17_ARM64E) has
++        // another cache: writing them there corrupted the render server, so it keeps the environment settings above only.
++#if !defined(NATIVE_ADRENO_IOS17_ARM64E)
+         if (void *start = dlsym(RTLD_DEFAULT, "CARenderServerStart")) {
+             const uintptr_t slide = (uintptr_t)ptrauth_strip(start, ptrauth_key_function_pointer) - 0x1846dce88;
+             const float one = 1.0f, never = 1e30f;
+@@ -424,6 +427,7 @@ static id deviceForPort(unsigned port) {
+             }, gpu) == 0)
+                 pthread_detach(reader);
+         }
++#endif  // !NATIVE_ADRENO_IOS17_ARM64E
+ #endif
+         // On an iPad the render server's queue runs at a high GPU priority (CoreAnimation asks for it with setGPUPriority: when it makes
+         // its MetalContext). A Vulkan queue's priority is fixed when the device opens, before that call, so the render server asks the

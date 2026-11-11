@@ -1,0 +1,1 @@
+../../device/scripts/check-metal-runtime-native.py

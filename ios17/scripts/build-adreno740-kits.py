@@ -1,0 +1,1 @@
+../../device/scripts/build-adreno740-kits.py

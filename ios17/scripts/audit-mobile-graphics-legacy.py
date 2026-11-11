@@ -1,0 +1,1 @@
+../../device/scripts/audit-mobile-graphics-legacy.py

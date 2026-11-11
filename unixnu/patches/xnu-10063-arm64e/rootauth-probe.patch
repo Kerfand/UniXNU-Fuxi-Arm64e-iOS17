@@ -1,0 +1,20 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1107,6 +1107,16 @@
+ 				native_owner_root_checkpoint(autherr, owner, device);
+ 			}
+ #endif
++			/*
++			 * Probe: log the FSIOC_KERNEL_ROOTAUTH result of the sealed root, which the panic below does not
++			 * report, and mark it on screen (osfmk/arm64/pcb.c). Logging only: the check itself is unchanged.
++			 */
++			printf("unixnu rootauth: FSIOC_KERNEL_ROOTAUTH=%d owner=%d mnt_flag=0x%llx\n", autherr,
++			    owner_authorized, (unsigned long long)vfs_flags(vnode_mount(rootvnode)));
++			{
++				extern void unixnu_screen_mark(unsigned int, unsigned int);
++				unixnu_screen_mark(1, 0x00ff0000);
++			}
+ 			if (autherr && !owner_authorized) {
+ 				panic("rootvp not authenticated after mounting");
+ 			}

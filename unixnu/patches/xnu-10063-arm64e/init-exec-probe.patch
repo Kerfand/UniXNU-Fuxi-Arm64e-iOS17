@@ -1,0 +1,27 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8001,7 +8001,22 @@
+ 	 */
+ 	set_security_token(p, proc_ucred_unsafe(p));
+ 
+-	return execve(p, &init_exec_args, retval);
++	/*
++	 * Probe (log and screen only): which init program the kernel tried and what execve returned. With
++	 * boot-arg unixnu-hang-probe=N the init task's threads are reported every N seconds (osfmk/arm64/pcb.c).
++	 */
++	{
++		extern void unixnu_init_hang_probe_arm(task_t);
++		extern void unixnu_screen_mark(unsigned int, unsigned int);
++		unixnu_screen_mark(2, 0x00ffff00);
++		unixnu_init_hang_probe_arm(proc_task(p));
++		error = execve(p, &init_exec_args, retval);
++		printf("unixnu init: exec %s returned %d\n", path, error);
++		unixnu_screen_mark(3, error ? 0x00ff00ff : 0x0000ff00);
++		extern void unixnu_init_hang_probe_disarm(int);
++		unixnu_init_hang_probe_disarm(error);
++	}
++	return error;
+ }
+ 
+ static const char * init_programs[] = {

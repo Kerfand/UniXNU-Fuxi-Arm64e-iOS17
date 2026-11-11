@@ -1,0 +1,83 @@
+--- a/NativeAdrenoUserClient.cpp
++++ b/NativeAdrenoUserClient.cpp
+@@ -2,6 +2,24 @@
+ #include "NativeAdrenoUserClient.h"
+ #include <kern/task.h>
+ #include <sys/resource_private.h>   /* PRIO_DARWIN_GPU_*: the process's GPU role, set by the system */
++// Darwin 23 has task background policy, but predates the separate GPU role API.
++// Preserve queue priorities using that real policy; report the unavailable GPU
++// role as -1 in diagnostics rather than fabricate a task_get_gpu_role export.
++#if !defined(PRIO_DARWIN_GPU_BACKGROUND) || !defined(PRIO_DARWIN_GPU_UTILITY)
++#include <sys/kdebug.h>
++// Exact XNU 10063 policy_internal.h prototype; its full header is C-only.
++extern "C" int proc_get_effective_task_policy(task_t, int);
++static int32_t nativeAdrenoTaskGpuRole(task_t) { return -1; }
++static bool nativeAdrenoTaskGpuBackground(task_t task) {
++    return proc_get_effective_task_policy(task, IMP_TASK_POLICY_DARWIN_BG) != 0;
++}
++#else
++static int32_t nativeAdrenoTaskGpuRole(task_t task) { return task_get_gpu_role(task); }
++static bool nativeAdrenoTaskGpuBackground(task_t task) {
++    const auto role = task_get_gpu_role(task);
++    return role == PRIO_DARWIN_GPU_BACKGROUND || role == PRIO_DARWIN_GPU_UTILITY;
++}
++#endif
+ extern "C" volatile uint32_t native_adreno_trace_stage;
+ /* 0 keeps user BOs cacheable and maintained before every submission (int-070..097); the board sets it from the sheng-gpu-wc boot argument. */
+ /* sheng-gpu-owned-coherent=1: the GPU's own BOs use the IO-coherent path (CPU write-back view, GPU write-back inner-shareable mapping) instead of
+@@ -384,8 +402,7 @@
+ int32_t NativeAdrenoUserClient::submitPriority() const
+ {
+     if(priority_foreground_<0 && priority_background_<0)return -1;
+-    const int32_t role=task_get_gpu_role(current_task());
+-    const bool background=role==PRIO_DARWIN_GPU_BACKGROUND || role==PRIO_DARWIN_GPU_UTILITY;
++    const bool background=nativeAdrenoTaskGpuBackground(current_task());
+     return background?(priority_background_>=0?priority_background_:priority_foreground_)
+                      :(priority_foreground_>=0?priority_foreground_:priority_background_);
+ }
+@@ -398,7 +415,7 @@
+     {
+         const uint32_t n=native_adreno_prio_count;
+         volatile uint32_t *row=native_adreno_prio_log[n&31];
+-        row[0]=uint32_t(proc_selfpid());row[1]=foreground;row[2]=background;row[3]=uint32_t(task_get_gpu_role(current_task()));
++        row[0]=uint32_t(proc_selfpid());row[1]=foreground;row[2]=background;row[3]=uint32_t(nativeAdrenoTaskGpuRole(current_task()));
+         row[4]=&native_adreno_now_us?uint32_t(native_adreno_now_us()/1000):0;row[5]=priority_told_;
+         native_adreno_prio_count=n+1;
+         if(priority_told_<0xffffffffu)++priority_told_;
+@@ -435,7 +452,7 @@
+     ring_->useContext(context_);
+     submit_->nextOwner(proc_selfpid());
+     submit_->nextPriority(submitPriority());
+-    submit_->nextRole(task_get_gpu_role(current_task()));
++    submit_->nextRole(nativeAdrenoTaskGpuRole(current_task()));
+     const IOReturn status=submit_->submit(vm_,buffers,request->buffer_count,
+         queue_base_+request->queue,&fence,clock);
+     if(status)return status;
+--- a/NativeAdrenoMemory.cpp
++++ b/NativeAdrenoMemory.cpp
+@@ -308,7 +308,9 @@
+ }
+ /* Frees of an owned BO whose first pages a user task still maps: [0] count, [1] the last mapping's page number. */
+ extern "C" {volatile uint32_t native_adreno_free_user_mapped[2];}
++#if defined(NATIVE_ADRENO_PMAP_MAPPING_DIAGNOSTICS)
+ extern "C" unsigned int native_pmap_user_mappings(ppnum_t,void **,uint64_t *,char *) __attribute__((weak_import));
++#endif
+ IOReturn NativeAdrenoMemory::release()
+ {
+     native_adreno_trace_stage=30;
+@@ -329,6 +331,7 @@
+         }
+         imported_->release();imported_=nullptr;
+     }
++#if defined(NATIVE_ADRENO_PMAP_MAPPING_DIAGNOSTICS)
+     if(descriptor_ && !system_ && native_pmap_user_mappings && spans_) {
+         /* A page a user task still maps (a BO view over physical pages holds no reference to them) is counted before the pages are freed:
+          * the first page of up to 64 spans, then which process maps it. XNU frees such a page under the mapping (pmap_assert_free). A view
+@@ -342,6 +345,7 @@
+             }
+         }
+     }
++#endif
+     if(descriptor_) {
+         if(prepared_) {
+             native_adreno_trace_stage=31;

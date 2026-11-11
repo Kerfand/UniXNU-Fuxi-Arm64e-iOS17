@@ -1,0 +1,1 @@
+../../device/scripts/fuxi_legacy_metadata.py

@@ -1,0 +1,1 @@
+../../device/scripts/package-sheng-probe.py

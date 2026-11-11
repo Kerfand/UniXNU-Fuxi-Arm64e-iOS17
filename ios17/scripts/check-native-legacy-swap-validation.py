@@ -1,0 +1,1 @@
+../../device/scripts/check-native-legacy-swap-validation.py

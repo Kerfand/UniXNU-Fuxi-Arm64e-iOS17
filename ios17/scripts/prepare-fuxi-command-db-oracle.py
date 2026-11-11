@@ -1,0 +1,1 @@
+../../device/scripts/prepare-fuxi-command-db-oracle.py

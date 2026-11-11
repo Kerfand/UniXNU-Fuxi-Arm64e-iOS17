@@ -1,0 +1,14 @@
+# Proprietary files of the Xiaomi 13 (fuxi), SM8550 / Adreno 740. They stay out of Git:
+# scripts/extract-files.py copies them into .cache/firmware/, checks each against its
+# SHA-256 and refuses any other content.
+#
+# path|sha256       path relative to the source (a dump directory, a mounted partition, an ssh path or the fetch base)
+# -path|sha256      optional file: a missing one is reported, not an error
+# @fetch BASE       public mirror used when no source is given; BASE + path is the file URL
+#
+@fetch https://raw.githubusercontent.com/ljhhkx529/fuxi-firmware/66a28c7c28a70362ac931ce606a3a3c1f3eb75a3/
+
+# GPU / GMU firmware. These hashes must match scripts/data/fuxi-adreno-inputs.json.
+vendor/firmware/gmu_gen70200.bin|1a2a419c39046d3141fc5fed5aa7f971de2db40cc7a1d89693c3e26fad64dd98
+vendor/firmware/a740_sqe.fw|2b49a17244c0527a2d9728af2e255d4b26d18111bb595f010f167823ce5c5c1f
+odm/firmware/a740_zap.mbn|4e5f47219714dfc1ca54e49c4d2fe08b1448446040a60512ba05d691348701c3

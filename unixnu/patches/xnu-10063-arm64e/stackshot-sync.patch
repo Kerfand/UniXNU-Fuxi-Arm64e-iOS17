@@ -1,0 +1,63 @@
+diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
+--- a/osfmk/arm/model_dep.c
++++ b/osfmk/arm/model_dep.c
+@@ -979,6 +979,7 @@
+ 	int max_cpu;
+ 	cpu_data_t      *target_cpu_datap;
+ 	cpu_data_t      *cpu_data_ptr = getCpuDatap();
++	int unixnu_stackshot_unsignalled = 0;
+ 
+ 	/* Check for nested debugger entry. */
+ 	cpu_data_ptr->debugger_active++;
+@@ -998,6 +999,10 @@
+ 	debug_cpus_spinning = 0;
+ 
+ #pragma unused(is_stackshot)
++	/* stackshot-sync.patch: no dbgwrap on this board; a stackshot never proceeds with cores that did not stop. */
++	if (is_stackshot) {
++		proceed_on_sync_failure = FALSE;
++	}
+ 
+ 	/*
+ 	 * Try to signal all CPUs (except ourselves, of course).  Use debugger_sync to
+@@ -1026,6 +1031,9 @@
+ 			} else if (proceed_on_sync_failure) {
+ 				kprintf("cpu_signal failed in DebuggerXCallEnter\n");
+ 			}
++			if (ret != KERN_SUCCESS && is_stackshot) {
++				unixnu_stackshot_unsignalled++;
++			}
+ 		}
+ 
+ 		max_mabs_time = os_atomic_load(&debug_ack_timeout, relaxed);
+@@ -1047,6 +1055,16 @@
+ 			current_mabs_time = mach_absolute_time();
+ 		}
+ 	}
++	if (unixnu_stackshot_unsignalled) {
++		/* stackshot-sync.patch: a core that could not be signalled keeps running; refuse the stackshot. */
++		static uint32_t unixnu_stackshot_unsignalled_refused;
++		uint32_t n = ++unixnu_stackshot_unsignalled_refused;
++		if (n <= 4 || (n & (n - 1)) == 0) {
++			printf("stackshot-sync: refused stackshot %u, %d core(s) could not be signalled\n", n, unixnu_stackshot_unsignalled);
++		}
++		DebuggerXCallReturn();
++		return KERN_OPERATION_TIMED_OUT;
++	}
+ 
+ 	if (!proceed_on_sync_failure && (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
+ 		__builtin_arm_dmb(DMB_ISH);
+@@ -1078,6 +1096,13 @@
+ 			return KERN_SUCCESS;
+ 		} else {
+ 			DebuggerXCallReturn();
++			if (is_stackshot) {
++				static uint32_t unixnu_stackshot_refused;
++				uint32_t n = ++unixnu_stackshot_refused;
++				if (n <= 4 || (n & (n - 1)) == 0) {
++					printf("stackshot-sync: refused stackshot %u, %d core(s) did not stop\n", n, (int)debugger_sync);
++				}
++			}
+ 			kprintf("%s>returning KERN_OPERATION_TIMED_OUT\n", __FUNCTION__);
+ 			return KERN_OPERATION_TIMED_OUT;
+ 		}

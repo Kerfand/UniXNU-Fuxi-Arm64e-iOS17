@@ -1,0 +1,1 @@
+../../device/scripts/check-quartzcore-blur-host.py

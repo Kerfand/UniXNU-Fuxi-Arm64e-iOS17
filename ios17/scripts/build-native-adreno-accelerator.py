@@ -1,0 +1,1 @@
+../../device/scripts/build-native-adreno-accelerator.py

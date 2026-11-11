@@ -1,0 +1,2 @@
+3c75734014cdab0acd9541e88057b7606ee7ae08 feat(boot): accept arm64e MH_EXECUTE kernels and a separate root policy sidecar
+https://github.com/UniXNU/DarwinBoot.git

@@ -1,0 +1,1 @@
+../../device/scripts/build-ath12k-wifi.py

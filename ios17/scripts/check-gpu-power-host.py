@@ -1,0 +1,1 @@
+../../device/scripts/check-gpu-power-host.py

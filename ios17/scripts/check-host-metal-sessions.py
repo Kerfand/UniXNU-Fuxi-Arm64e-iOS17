@@ -1,0 +1,1 @@
+../../device/scripts/check-host-metal-sessions.py

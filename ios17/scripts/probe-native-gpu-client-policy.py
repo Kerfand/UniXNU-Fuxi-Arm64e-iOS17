@@ -1,0 +1,1 @@
+../../device/scripts/probe-native-gpu-client-policy.py

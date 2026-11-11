@@ -1,0 +1,1 @@
+../../device/scripts/fuxi_adreno_common.py

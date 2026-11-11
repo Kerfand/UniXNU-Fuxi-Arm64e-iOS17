@@ -1,0 +1,1 @@
+../../device/scripts/audit-amfi-pmgr-contract.py

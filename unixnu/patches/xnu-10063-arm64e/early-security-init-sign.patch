@@ -1,0 +1,29 @@
+diff --git a/libkern/c++/OSKext.cpp b/libkern/c++/OSKext.cpp
+index 411850b..7a57054 100644
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -39,6 +39,7 @@ extern "C" {
+ #include <vm/vm_map.h>
+ #include <kextd/kextd_mach.h>
+ #include <libkern/kernel_mach_header.h>
++#include <ptrauth.h>
+ #include <libkern/kext_panic_report.h>
+ #include <libkern/kext_request_keys.h>
+ #include <libkern/mkext.h>
+@@ -8483,7 +8484,15 @@ OSKext::start(bool startDependenciesFlag)
+ 			if (!executable) {
+ 				panic("NativePrelink: early security initializer outside module code");
+ 			}
+-			((void (*)(void))target)();
++			/*
++			 * target is an address computed from the prelink property, not a signed function pointer. On arm64e
++			 * this call compiles to blraaz (IA key, zero discriminator), so sign it the same way first; the type
++			 * discriminator macro differs here (0x4a27), which would fail authentication. No-op without ptrauth.
++			 */
++			typedef void (*early_security_init_t)(void);
++			early_security_init_t early_security_init = (early_security_init_t)ptrauth_sign_unauthenticated(
++				(void *)target, ptrauth_key_function_pointer, 0);
++			early_security_init();
+ 	#else
+ 			panic("NativePrelink: early security initializer requires MAC framework");
+ 	#endif

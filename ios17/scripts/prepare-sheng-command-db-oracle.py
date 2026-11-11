@@ -1,0 +1,1 @@
+../../device/scripts/prepare-sheng-command-db-oracle.py

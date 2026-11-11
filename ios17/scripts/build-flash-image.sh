@@ -1,0 +1,1 @@
+../../device/scripts/build-flash-image.sh

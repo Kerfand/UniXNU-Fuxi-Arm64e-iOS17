@@ -1,0 +1,23 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index a688021..f9e5dfe 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1021,6 +1021,18 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
+ 
+ 			ppte = (pt_entry_t*)alloc_ptpage(pa_offset == 0);
+ 			bzero(ppte, ARM_PGBYTES);
++			if ((tmplate & ARM_TTE_VALID) && ((tmplate & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_BLOCK)) {
++				/*
++				 * Splitting a live block: keep its mapping for the pages this request does not cover.
++				 * Without this, a 4K-page kernel loses the rest of the 2MB block, e.g. kext headers in
++				 * a fileset __PRELINK_TEXT beyond the end of a kernel __TEXT placed inside it.
++				 */
++				pt_entry_t attrs = (pt_entry_t)(tmplate & ~(ARM_TTE_BLOCK_L2_MASK | ARM_PTE_HINT_MASK | 0x3ULL));
++				pmap_paddr_t block_pa = (pmap_paddr_t)(tmplate & ARM_TTE_BLOCK_L2_MASK);
++				for (i = 0; i <= (ARM_TT_L3_INDEX_MASK >> ARM_TT_L3_SHIFT); i++) {
++					ppte[i] = attrs | (block_pa + ((pmap_paddr_t)i << ARM_PGSHIFT)) | ARM_PTE_TYPE_VALID;
++				}
++			}
+ 			ppte_phys = kvtophys((vm_offset_t)ppte);
+ 
+ 			*tte2 = pa_to_tte(ppte_phys) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;

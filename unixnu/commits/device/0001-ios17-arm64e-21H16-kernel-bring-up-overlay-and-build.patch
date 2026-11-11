@@ -1,0 +1,3293 @@
+From 1e90d671cc069db69cda1db8e960997f8c29126d Mon Sep 17 00:00:00 2001
+From: Kerfand <Kerfand@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 14:41:09 +0800
+Subject: [PATCH] ios17: arm64e 21H16 kernel bring-up overlay and build scripts
+ (checkpoint 1)
+
+Snapshot of the device-ios17 overlay (real files; symlinks listed), the kernel, LTO reference, LTO toolchain, DarwinBoot v2 and pack scripts, and the debugging tools behind the iPhone15,2 iOS 17.7 checkpoint 1 (root-device wait reached 2026-11-06). Source only; no images or kernelcaches.
+---
+ ios17/PROGRESS.md                             | 153 ++++
+ ios17/README.md                               |  26 +
+ ios17/overlay/SYMLINKS.txt                    | 173 ++++
+ ios17/overlay/board.toml                      | 207 +++++
+ .../configs/fuxi_ios17_kernel_defconfig       |  38 +
+ ios17/overlay/scripts/build-arm-driver.py     | 136 +++
+ .../build-fileset-release-reference.py        | 192 ++++
+ ios17/overlay/scripts/build-fuxi-usb-debug.py | 103 +++
+ ios17/overlay/scripts/build-ios17-stubs.py    |  50 ++
+ .../scripts/data/ios17-kernel-stubs.json      | 314 +++++++
+ ios17/overlay/scripts/fuxi-kernel-baseline.sh | 830 ++++++++++++++++++
+ ios17/scripts/build-darwinboot-fv.sh          |  33 +
+ ios17/scripts/build-ios17-iig-chain.sh        |  10 +
+ ios17/scripts/build-ios17-kernel.sh           |  29 +
+ ios17/scripts/build-ios17-probe-chain.sh      |  19 +
+ ios17/scripts/build-ios17-reference.sh        |  34 +
+ ios17/scripts/build-lto-toolchain.sh          |  74 ++
+ .../make-t32-darwinboot-v2-template.py        |  33 +
+ ios17/scripts/pack-ios17-fastboot30.py        | 123 +++
+ ios17/scripts/pack-ios17-iig-pac.py           | 123 +++
+ ios17/scripts/pack-ios17-kernel-test.py       | 123 +++
+ ios17/scripts/pack-ios17-nohint.py            | 123 +++
+ ios17/tools/fix-iig-pac-214357.py             |  21 +
+ ios17/tools/fix-sandbox-210443.py             |  19 +
+ ios17/tools/implement-fastboot30.py           |  67 ++
+ ios17/tools/probe-sandbox-210443.py           |  15 +
+ 26 files changed, 3068 insertions(+)
+ create mode 100755 ios17/PROGRESS.md
+ create mode 100644 ios17/README.md
+ create mode 100644 ios17/overlay/SYMLINKS.txt
+ create mode 100644 ios17/overlay/board.toml
+ create mode 100644 ios17/overlay/configs/fuxi_ios17_kernel_defconfig
+ create mode 100755 ios17/overlay/scripts/build-arm-driver.py
+ create mode 100755 ios17/overlay/scripts/build-fileset-release-reference.py
+ create mode 100644 ios17/overlay/scripts/build-fuxi-usb-debug.py
+ create mode 100644 ios17/overlay/scripts/build-ios17-stubs.py
+ create mode 100644 ios17/overlay/scripts/data/ios17-kernel-stubs.json
+ create mode 100644 ios17/overlay/scripts/fuxi-kernel-baseline.sh
+ create mode 100644 ios17/scripts/build-darwinboot-fv.sh
+ create mode 100644 ios17/scripts/build-ios17-iig-chain.sh
+ create mode 100644 ios17/scripts/build-ios17-kernel.sh
+ create mode 100644 ios17/scripts/build-ios17-probe-chain.sh
+ create mode 100644 ios17/scripts/build-ios17-reference.sh
+ create mode 100644 ios17/scripts/build-lto-toolchain.sh
+ create mode 100644 ios17/scripts/make-t32-darwinboot-v2-template.py
+ create mode 100644 ios17/scripts/pack-ios17-fastboot30.py
+ create mode 100644 ios17/scripts/pack-ios17-iig-pac.py
+ create mode 100644 ios17/scripts/pack-ios17-kernel-test.py
+ create mode 100644 ios17/scripts/pack-ios17-nohint.py
+ create mode 100644 ios17/tools/fix-iig-pac-214357.py
+ create mode 100644 ios17/tools/fix-sandbox-210443.py
+ create mode 100644 ios17/tools/implement-fastboot30.py
+ create mode 100644 ios17/tools/probe-sandbox-210443.py
+
+diff --git a/ios17/PROGRESS.md b/ios17/PROGRESS.md
+new file mode 100755
+index 0000000..023f87c
+--- /dev/null
++++ b/ios17/PROGRESS.md
+@@ -0,0 +1,153 @@
++# fuxi（小米 13）iOS 17 arm64e 移植进度 — 2026-11-05 21:00
++
++## 1. 目标与范围
++
++- 设备：小米 13（fuxi，SM8550）。系统：iPhone15,2 iOS 17.7（21H16）的 kernelcache。
++- 内核：xnu-10063.141.1，按 arm64e 编译（BCM2837 机型配置，4K 页）。用预链接把我们的内核和苹果原 kernelcache 里保留的 kext 拼成一个 MH_FILESET。
++- **检查点 1（进行中）**：只做内核的 boot.img，用 `fastboot boot` 临时启动，不刷 userdata。目标是走到等待根设备那一步。
++- 和 iPadOS 21H461 路线完全隔离：iOS 17 用独立的设备覆盖层 `device-ios17/` 和输出目录 `UniXNU/out-ios17/`，iPadOS 的构建不受影响。
++
++## 2. 当前状态一览
++
++| 项目 | 当前值 |
++|---|---|
++| 最新 boot.img | `F:\UniXNU-FUXI-work\outputs\sadnut-fuxi-ios17-arm64e-kernel-20261105\boot.img` |
++| boot.img sha256 | `a65c8a895aafb96e27ba9a9a70c8eef76b3e90eb70af58694fb7a3ef8179e226` |
++| kernel sha256 | `0e7f16a639193646a611312631aa52ce2257deafe19e71ef865cd8a55044ed06` |
++| 菜单项 | `FUXI IOS17 ARM64E KERNEL TEST 20261105` |
++| 启动参数 | `serial=3 debug=0x14e -v kt_fixed_zones=120 qcom-usb-debug=1 sheng-log=1 armcpu-spi-ipi=1 sheng-smp=1 -no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1` |
++| 参考内核 | RELEASE + **LTO**，sha256 `8409b883…` |
++| 已配对函数 | 13348（非 LTO 参考时只有 7414） |
++| 被打桩的目标 / 调用点 | 471 / 2178（最初是 1355 / 12442） |
++| 缺失数据目标 / 调用点 | 47 / 49（最初是 294 / 513） |
++| 人工确认的身份（fixture） | 29 个函数、34 个数据项 |
++| 保留的 kext（闭包） | 26 个，含 corecrypto、AppleImage4、AMFI、Sandbox、apfs、IOStorageFamily、IOHIDFamily、ApplePMGR、AppleARMPlatform 等 |
++| 启动阶段 | 在 `PE_init_iokit` 里启动 kext，**还没进 `bsd_init`** |
++
++## 3. 编译与上机指令
++
++所有构建都在 WSL（`Ubuntu-26.04`）里跑，工作目录是 `/home/xiaomi/sadnut-fuxi-local-20261103`。默认 8 线程、增量编译。
++
++### 3.1 一次性准备（已完成，正常不用再跑）
++
++```bash
++# Linux 上带 LTO 支持的 ld64：libLTO 取自与 clang 相同的 llvm 提交（58c46bae…），
++# 再编 cctools-port 1030.6.3-ld64-956.6，装到 /home/xiaomi/lto-toolchain（源码和构建目录保留，可增量）
++bash build-lto-toolchain.sh
++
++# 把 DarwinBoot v2（支持 arm64e 和 MH_FILESET）替换进 UEFI 固件卷，生成 boot.img 模板
++bash build-darwinboot-fv.sh
++python3 make-t32-darwinboot-v2-template.py
++```
++
++### 3.2 每次迭代（常用）
++
++```bash
++# 一条命令完成：内核增量编译 → 预链接 → 打包 boot.img。默认复用已有的 LTO 参考内核
++bash build-ios17-probe-chain.sh            # 日志：/tmp/ios17-build.log，最后一行是 CHAIN_DONE
++```
++
++从 Windows 后台启动（不受终端超时影响）：
++
++```powershell
++wsl -d Ubuntu-26.04 -- bash -c "cd /home/xiaomi/sadnut-fuxi-local-20261103 && (setsid nohup bash ./build-ios17-probe-chain.sh >/dev/null 2>&1 < /dev/null &)"
++```
++
++需要单独执行某一步时：
++
++```bash
++bash build-ios17-kernel.sh                  # arm64e 内核 + 预链接（JOBS=8）
++python3 pack-ios17-kernel-test.py           # 生成 ADT、写入 payload、打包 boot.img
++REBUILD_REFERENCE=1 bash build-ios17-probe-chain.sh   # 只在需要重做匹配时用：会完整重编 LTO 参考内核
++bash build-ios17-reference.sh --lto         # 单独编 LTO 参考内核（链接时强制使用支持 LTO 的 ld）
++```
++
++查看实时日志：
++
++```bash
++tail -F /tmp/ios17-build.log
++```
++
++### 3.3 上机
++
++```bash
++fastboot boot "F:\UniXNU-FUXI-work\outputs\sadnut-fuxi-ios17-arm64e-kernel-20261105\boot.img"
++```
++
++在菜单里选 `FUXI IOS17 ARM64E KERNEL TEST 20261105`。日志由 USB 抓取工具保存到 `E:\桌面\FUXI_IOS\builds\fuxi-usb-log-v2\logs\`。
++
++### 3.4 探针
++
++启动参数 `unixnu-unmapped=1` 打开后，kext 每次调用一个没配对的内核函数时，日志里会出现一行
++`fileset: unmapped call #N from <调用点> (x0..x3, x16); returning 0`，然后**返回 0 继续运行**，到第 64 次才 panic。
++返回 0 只是为了收集证据，本身不是修复。后续出现的 NULL 解引用、PAC 失败，常常是这个返回 0 造成的连带结果。
++
++## 4. 已通过的阶段（按时间顺序）
++
++| # | 阶段 | 原来的问题 | 根因 | 修复 |
++|---|---|---|---|---|
++| 1 | 编出 arm64e 内核 | 编译和链接报错 | PAC 密钥配置、上游 clang 的 `__ptrauth` 写法、arm64e 下不能有未定义的弱符号等 | `native-pac-keys`、`upstream-clang-auth-null`、`arm64e-threaded-starts` 补丁和 stub 库 |
++| 2 | 预链接成 fileset | 段放不进、fixups 对不上 | xnu-10063 要求内核代码排在最前；需要 chained fixups 和 split-seg 信息 | `UNIXNU_FILESET_KERNEL_FIRST`、`XNU_KERNEL_CHAINED_FIXUPS=1`，缩小 QUD 缓冲区，最小闭包 |
++| 3 | DarwinBoot 能加载 | `Unsupported` | 固件里的旧 DarwinBoot 不认识 arm64e/fileset，载荷里的驱动又被安全启动拒绝 | 把 DarwinBoot v2 换进固件卷 FV |
++| 4 | 通过 DarwinBoot 校验 | `Load Error` | KC 头的 cpusubtype（0x2）和内核的（0x80000002）不一致 | 预链接时把 KC 头的 subtype 改成和内核一致 |
++| 5 | 通过 ADT 检查 | `Compromised Data` | payload 里残留旧的 ramdisk 和 gpuaddon，ADT 里没有对应占位 | 打包时去掉 initrd、gpuaddon、scratch-data |
++| 6 | 内核起来，过 VM 初始化 | PAC/数据异常（读 kext 头） | 4K 页内核拆分 2MB 块映射时，把块里其他部分清空了 | `split-block-keeps-mapping.patch` |
++| 7 | corecrypto 自检 | 调到未映射函数 | 非 LTO 参考内核导致匹配器认不出常用内核函数 | fixture 加入 `PE_parse_boot_argn`、`mach_absolute_time`、`clock_timebase_info`、`panic_active`、`IOMallocData`；加入探针 |
++| 8 | corecrypto 注册 / PRNG | PAC 失败（PRNG 上下文为空） | `register_crypto_functions`、`register_and_init_prng` 没配对 | 加进 fixture |
++| 9 | corecrypto 加锁 | `lck_mtx_lock` 收到空锁 | `lck_mtx_alloc_init`、`lck_mtx_try_lock` 没配对 | 加进 fixture |
++| 10 | IOKit 启动、NVRAM | `postModLoad` 崩溃 | `IOCommand`、`OSObject` 等 `gMetaClass` 数据缺失，父类链读到乱数据 | 加入 13 个元类数据身份 |
++| 11 | AppleImage4 加载、注册策略 | `/chosen` 没找到、kalloc 返回 NULL | `fromPath`、`code_signing_configuration`、`strprefix`、`kalloc_type_impl_external` 等没配对 | 加进 fixture，并补上一批常用锁函数 |
++| 12 | AppleImage4 读环境变量 | `OSDynamicCast` 失败 | `safeMetaCast` 和 19 个 `Class::metaClass` 常量缺失 | 加进 fixture（依据：同位引用和元类构造） |
++| 13 | IOStorageFamily | 写 NULL | `IOMallocTypeImpl`、`lck_mtx_gate_close` 没配对 | 加进 fixture |
++| 14 | **改用 LTO 参考内核** | 每轮只能清掉 1～3 个问题 | Linux 上的 ld64 不支持 LTO | 编出 LTO 工具链；配对数 7414 → 13348 |
++| 15 | **AMFI 加载并注册策略** | PAC 失败（IA 密钥） | UniXNU 的早期安全初始化用整数地址直接调用函数，arm64e 下没有签名 | `early-security-init-sign.patch`（编译结果是一条普通的 `blr`，已反汇编确认） |
++| 16 | Sandbox 开始初始化 | 读到错误的 `vm_map` | 数据 `kernel_map` 缺失 | 加入 `kernel_map`、`NDR_record`（依据：同位引用，19 票和 8 票） |
++| 17 | Sandbox 继续初始化 | 一轮内触发 64 次未映射调用 | `strcasecmp`、`OSDictionary::withCapacity` 等 libkern 容器函数没配对 | 一次补了 7 个（依据：PAC 判别符签名逐个匹配） |
++
++## 5. 当前卡点
++
++1. **在等新镜像（`a65c8a89…`）上机后的日志。** 上一次日志停在 Sandbox 的 `mpo_policy_init`（探针在 64 次时 panic）。这次已经补上 `strcasecmp`、`OSDictionary/OSArray/OSSet::withCapacity`、`OSNumber::withNumber`、`OSMetaClass` 的析构和实例计数。
++2. **离 `bsd_init` 还有：** Sandbox 剩下的初始化，然后是 apfs、IOHIDFamily、ApplePMGR、AppleARMPlatform 等 kext 的启动。`PE_init_iokit` 返回后才会进 `bsd_init`，之后挂根设备，最后停在等根设备（第一个检查点的终点）。
++
++## 6. 已知未解决的问题和风险
++
++- **AppleImage4 读 nonce magazine 时的 8 次未映射调用**（调用点 `0x…8da3a14`）。这些是 AppleImage4 内部的 thunk 经函数指针尾调用到内核函数，所以日志里看不出最终调的是哪个内核函数。探针里的 `x16` 在进入 stub 前已经被覆盖，没抓到。目前不阻塞启动，后面需要换一种探针。
++- **还有 471 个桩目标、47 个缺失数据项。** 已经按调用次数从高到低处理，但只有实际调用到的才会在日志里暴露。
++- **"按参考内核顺序"推出来的配对（约 1.08 万个）没有逐个核对。** 这是文档推荐的做法，但不排除个别配错。目前查过的可疑项都被证实是对的：`vm_map_page_mask` 没配错，问题出在参数 `kernel_map`。
++- **苹果 SoC 专用驱动的风险。** ApplePMGR、AppleARMPlatform 等是苹果芯片的驱动，在高通硬件上可能访问不存在的寄存器。如果遇到，需要换成自己的驱动，或者从闭包里移除。
++- **这个内核没有存储驱动**（关闭了 UFS），根设备 UUID 是故意填的一个不存在的值，所以检查点 1 的终点就是停在等根设备，不会继续往下走。
++
++## 7. 改动清单（都是源码，没有提交、没有上传）
++
++**工作目录** `/home/xiaomi/sadnut-fuxi-local-20261103/`
++
++- `build-ios17-kernel.sh`：内核和预链接（arm64e，fileset 内核排在最前，chained fixups，JOBS=8）
++- `build-ios17-reference.sh`：参考内核；加 `--lto` 时把支持 LTO 的 ld 同时放到 `XNU_TOOLCHAIN_BIN` 和 `PATH` 最前面
++- `build-ios17-probe-chain.sh`：内核 → 预链接 → 打包一条龙；只有 `REBUILD_REFERENCE=1` 时才重编参考内核
++- `build-lto-toolchain.sh`：LTO 工具链（libLTO 加 ld64，下载失败会自动重试）
++- `build-darwinboot-fv.sh`、`make-t32-darwinboot-v2-template.py`：DarwinBoot v2 换进固件卷
++- `pack-ios17-kernel-test.py`：生成 ADT、写 payload、打 boot.img（不带 initrd，带探针启动参数）
++- `device-ios17/`：iOS 17 设备覆盖层（board.toml、defconfig、`scripts/fuxi-kernel-baseline.sh` 等）
++
++**UniXNU 仓库** `UniXNU/`
++
++- `patches/xnu-10063-arm64e/`（新增目录）：
++  - `native-pac-keys.patch`
++  - `arm64e-threaded-starts.patch`
++  - `upstream-clang-auth-null.patch`
++  - `fileset-unmapped-call.patch`（含探针）
++  - `split-block-keeps-mapping.patch`
++  - `early-security-init-sign.patch`
++- `kits/XnuPrelink/`：
++  - `fileset_layout.py`（内核排在最前）
++  - `fileset_segmented.py`（`__fips_hmacs` 改为可选，KC 头 subtype 和内核一致）
++  - `fixtures/fileset-21H16-symbols.json`（29 个函数、34 个数据项，每项都记了原始摘要和证据）
++- `scripts/unixnu/kernel.py`、`scripts/linux/prepare-xnu.py`：支持 arm64e
++
++**工具链** `/home/xiaomi/lto-toolchain/`：llvm-project 源码、llvm-build（libLTO）、cctools-port，`ld-only/ld`
++
++**状态**：上面这些改动都还没提交。`git status` 显示 `patches/xnu-10063-arm64e/` 是未跟踪目录，`kits/XnuPrelink` 有修改。按之前说好的，上传时**只传源码，不传产物**（boot.img、kernelcache、out-ios17 都不上传）。
++
++## 8. 调试流程约定
++
++按顺序来：先查官方文档（unixnu.com），再在内核里加探针收集证据，确认根因后才修。每个身份都必须有可复核的依据，比如函数体、相邻已配对函数、PAC 判别符签名、同位引用。证据不足的项不加入 fixture。
+diff --git a/ios17/README.md b/ios17/README.md
+new file mode 100644
+index 0000000..de9b669
+--- /dev/null
++++ b/ios17/README.md
+@@ -0,0 +1,26 @@
++# fuxi on iPhone15,2 iOS 17.7 (21H16) — arm64e kernel bring-up
++
++**Status (2026-11-06): checkpoint 1 reached.** A kernel-only boot.img (`fastboot boot`, nothing flashed) boots
++the arm64e xnu-10063 kernel prelinked with the original 21H16 fileset kexts through IOKit kext start (corecrypto,
++AppleImage4, AMFI, Sandbox, apfs) and `bsd_init`, and ends at the root-device wait for the placeholder UUID
++`D73A0000-0000-4000-8000-000000000000`. See PROGRESS.md (written just before the last fixes) for the history.
++
++This directory is a snapshot of the local bring-up files; the build runs from the working directory
++`/home/xiaomi/sadnut-fuxi-local-20261103` (paths in the scripts are absolute to it).
++
++- `overlay/` — the real files of the device overlay `device-ios17/`: board.toml (21H16 ipsw, minimal prelink
++  roots, early security init), `configs/fuxi_ios17_kernel_defconfig`, and the overlay scripts
++  (`fuxi-kernel-baseline.sh` applies `UniXNU/patches/xnu-10063-arm64e` and unwinds
++  `early-security-init-sign.patch` before the shared patch loop). Everything else in `device-ios17/` is a
++  symlink into `device/`; `overlay/SYMLINKS.txt` lists them.
++- `scripts/` — `build-ios17-iig-chain.sh` (kernel + prelink, incremental, then `pack-ios17-iig-pac.py`), the
++  kernel / RELEASE-LTO reference builds, `build-lto-toolchain.sh` (libLTO from the clang's own llvm commit and an
++  LTO-capable cctools-port ld64 in /home/xiaomi/lto-toolchain), DarwinBoot v2 into the firmware volume, and the
++  pack scripts.
++- `tools/` — one-off generators and probes used while debugging (IIG handler patch, fastboot-after-panic, sandbox).
++
++Related source commits: UniXNU branch `fuxi/ios17-arm64e-checkpoint1` (patches/xnu-10063-arm64e, arm64e build
++scripts) and XnuPrelink branch `fuxi-ios17-21h16` (21H16 fileset support and the reviewed identity fixture).
++No products (boot.img, kernelcache, out-ios17) are part of these commits.
++
++Next (checkpoint 2): storage (UFS), a real root volume, display, and the IOCPUInterruptController warning.
+diff --git a/ios17/overlay/SYMLINKS.txt b/ios17/overlay/SYMLINKS.txt
+new file mode 100644
+index 0000000..af7a2a7
+--- /dev/null
++++ b/ios17/overlay/SYMLINKS.txt
+@@ -0,0 +1,173 @@
++./.cache -> device/.cache
++./AGENTS.md -> device/AGENTS.md
++./BUILD-PROGRESS.md -> device/BUILD-PROGRESS.md
++./LICENSE -> device/LICENSE
++./README.md -> device/README.md
++./assets -> device/assets
++./build-boot-image.sh -> device/build-boot-image.sh
++./configs/fuxi_defconfig -> device/configs/fuxi_defconfig
++./configs/fuxi_full_defconfig -> device/configs/fuxi_full_defconfig
++./configs/sheng_defconfig -> device/configs/sheng_defconfig
++./drivers -> device/drivers
++./dts -> device/dts
++./etc -> device/etc
++./feeds.toml -> device/feeds.toml
++./kits -> device/kits
++./package -> device/package
++./patches -> device/patches
++./proprietary-files.txt -> device/proprietary-files.txt
++./scripts/__pycache__ -> device/scripts/__pycache__
++./scripts/add-fuxi-wallpaper-to-addon.py -> device/scripts/add-fuxi-wallpaper-to-addon.py
++./scripts/analyze-sheng-frame-timing.py -> device/scripts/analyze-sheng-frame-timing.py
++./scripts/audit-air-nir-ios.py -> device/scripts/audit-air-nir-ios.py
++./scripts/audit-amfi-pmgr-contract.py -> device/scripts/audit-amfi-pmgr-contract.py
++./scripts/audit-mobile-graphics-legacy.py -> device/scripts/audit-mobile-graphics-legacy.py
++./scripts/audit-quartzcore-metal-calls.py -> device/scripts/audit-quartzcore-metal-calls.py
++./scripts/audit-quartzcore-wait-callers.py -> device/scripts/audit-quartzcore-wait-callers.py
++./scripts/build-adreno-compiler-host.py -> device/scripts/build-adreno-compiler-host.py
++./scripts/build-adreno-firmware-probe.py -> device/scripts/build-adreno-firmware-probe.py
++./scripts/build-adreno-pm4-probe.py -> device/scripts/build-adreno-pm4-probe.py
++./scripts/build-adreno-vpc-native-tests.py -> device/scripts/build-adreno-vpc-native-tests.py
++./scripts/build-adreno740-kits.py -> device/scripts/build-adreno740-kits.py
++./scripts/build-air-library-native-tests.py -> device/scripts/build-air-library-native-tests.py
++./scripts/build-air-nir-diagnostic.py -> device/scripts/build-air-nir-diagnostic.py
++./scripts/build-ath12k-wifi.py -> device/scripts/build-ath12k-wifi.py
++./scripts/build-boot-log.py -> device/scripts/build-boot-log.py
++./scripts/build-boot-progress.py -> device/scripts/build-boot-progress.py
++./scripts/build-constant-uploads-probe.py -> device/scripts/build-constant-uploads-probe.py
++./scripts/build-display-environment-diagnostic.py -> device/scripts/build-display-environment-diagnostic.py
++./scripts/build-flash-image.sh -> device/scripts/build-flash-image.sh
++./scripts/build-fuxi-touch.py -> device/scripts/build-fuxi-touch.py
++./scripts/build-fuxi-verified-root-policy.py -> device/scripts/build-fuxi-verified-root-policy.py
++./scripts/build-legacy-stub.py -> device/scripts/build-legacy-stub.py
++./scripts/build-metal-runtime-diagnostic.py -> device/scripts/build-metal-runtime-diagnostic.py
++./scripts/build-native-accelerator-abi.py -> device/scripts/build-native-accelerator-abi.py
++./scripts/build-native-adreno-accelerator.py -> device/scripts/build-native-adreno-accelerator.py
++./scripts/build-native-adreno-kits.py -> device/scripts/build-native-adreno-kits.py
++./scripts/build-native-aes-bindings.py -> device/scripts/build-native-aes-bindings.py
++./scripts/build-native-hid-input.py -> device/scripts/build-native-hid-input.py
++./scripts/build-native-legacy-display.py -> device/scripts/build-native-legacy-display.py
++./scripts/build-native-mobile-display.py -> device/scripts/build-native-mobile-display.py
++./scripts/build-native-wifi.py -> device/scripts/build-native-wifi.py
++./scripts/build-offline-gpu-broker.py -> device/scripts/build-offline-gpu-broker.py
++./scripts/build-offline-gpu-transport.py -> device/scripts/build-offline-gpu-transport.py
++./scripts/build-offline-metal-api.py -> device/scripts/build-offline-metal-api.py
++./scripts/build-original-gpu-provider-probe.py -> device/scripts/build-original-gpu-provider-probe.py
++./scripts/build-preflight.sh -> device/scripts/build-preflight.sh
++./scripts/build-session-image.sh -> device/scripts/build-session-image.sh
++./scripts/build-sheng-payload.py -> device/scripts/build-sheng-payload.py
++./scripts/build-sheng-platform-power.py -> device/scripts/build-sheng-platform-power.py
++./scripts/build-smmu4k-probe.py -> device/scripts/build-smmu4k-probe.py
++./scripts/build-turnip-ios-compiler-peer.py -> device/scripts/build-turnip-ios-compiler-peer.py
++./scripts/build-uefi-sheng.sh -> device/scripts/build-uefi-sheng.sh
++./scripts/build-userdata-root-image.py -> device/scripts/build-userdata-root-image.py
++./scripts/build-xnu-4k-baseline.sh -> device/scripts/build-xnu-4k-baseline.sh
++./scripts/check-a740-observed-identity.py -> device/scripts/check-a740-observed-identity.py
++./scripts/check-adreno-vpc-native.py -> device/scripts/check-adreno-vpc-native.py
++./scripts/check-adreno-vpc.py -> device/scripts/check-adreno-vpc.py
++./scripts/check-air-library-native-tests.py -> device/scripts/check-air-library-native-tests.py
++./scripts/check-air-library-native.py -> device/scripts/check-air-library-native.py
++./scripts/check-air-nir-native.py -> device/scripts/check-air-nir-native.py
++./scripts/check-boot-diag-resume.py -> device/scripts/check-boot-diag-resume.py
++./scripts/check-boot-fault-probe.py -> device/scripts/check-boot-fault-probe.py
++./scripts/check-boot-lifecycle.py -> device/scripts/check-boot-lifecycle.py
++./scripts/check-boot-monitor-isolation.py -> device/scripts/check-boot-monitor-isolation.py
++./scripts/check-boot-process-probe.py -> device/scripts/check-boot-process-probe.py
++./scripts/check-boot-progress-evidence.py -> device/scripts/check-boot-progress-evidence.py
++./scripts/check-boot-progress-host.py -> device/scripts/check-boot-progress-host.py
++./scripts/check-boot-pulse.py -> device/scripts/check-boot-pulse.py
++./scripts/check-boot-ui-layout.py -> device/scripts/check-boot-ui-layout.py
++./scripts/check-boot-ui-trace-reference.py -> device/scripts/check-boot-ui-trace-reference.py
++./scripts/check-boot-ui-trace.py -> device/scripts/check-boot-ui-trace.py
++./scripts/check-boot-watchdog-policy.py -> device/scripts/check-boot-watchdog-policy.py
++./scripts/check-console-bind-observer.py -> device/scripts/check-console-bind-observer.py
++./scripts/check-display-environment-diagnostic.py -> device/scripts/check-display-environment-diagnostic.py
++./scripts/check-fuxi.py -> device/scripts/check-fuxi.py
++./scripts/check-gpu-power-host.py -> device/scripts/check-gpu-power-host.py
++./scripts/check-host-metal-originals.py -> device/scripts/check-host-metal-originals.py
++./scripts/check-host-metal-sessions.py -> device/scripts/check-host-metal-sessions.py
++./scripts/check-metal-runtime-native.py -> device/scripts/check-metal-runtime-native.py
++./scripts/check-native-adreno-memory.py -> device/scripts/check-native-adreno-memory.py
++./scripts/check-native-gpu-client-policy.py -> device/scripts/check-native-gpu-client-policy.py
++./scripts/check-native-legacy-swap-validation.py -> device/scripts/check-native-legacy-swap-validation.py
++./scripts/check-native-metal-shared-events.py -> device/scripts/check-native-metal-shared-events.py
++./scripts/check-offline-gop-presentation.py -> device/scripts/check-offline-gop-presentation.py
++./scripts/check-offline-gpu-transport.py -> device/scripts/check-offline-gpu-transport.py
++./scripts/check-offline-metal-api.py -> device/scripts/check-offline-metal-api.py
++./scripts/check-offline-metal-processes.py -> device/scripts/check-offline-metal-processes.py
++./scripts/check-original-framebuffer-power.py -> device/scripts/check-original-framebuffer-power.py
++./scripts/check-original-framebuffer-protocol.py -> device/scripts/check-original-framebuffer-protocol.py
++./scripts/check-original-metal-async.py -> device/scripts/check-original-metal-async.py
++./scripts/check-original-metal-fences.py -> device/scripts/check-original-metal-fences.py
++./scripts/check-original-metal-layer.py -> device/scripts/check-original-metal-layer.py
++./scripts/check-priming-ios-cache.py -> device/scripts/check-priming-ios-cache.py
++./scripts/check-quartzcore-blur-host.py -> device/scripts/check-quartzcore-blur-host.py
++./scripts/check-quartzcore-ios-compiler-cache.py -> device/scripts/check-quartzcore-ios-compiler-cache.py
++./scripts/check-quartzcore-turnip-cache-host.py -> device/scripts/check-quartzcore-turnip-cache-host.py
++./scripts/check-renderbox-presentation.py -> device/scripts/check-renderbox-presentation.py
++./scripts/check-sheng-dpu-observation.py -> device/scripts/check-sheng-dpu-observation.py
++./scripts/check-sheng-frame-timing.py -> device/scripts/check-sheng-frame-timing.py
++./scripts/check-sheng-fv.py -> device/scripts/check-sheng-fv.py
++./scripts/check-sheng-gmu-startup.py -> device/scripts/check-sheng-gmu-startup.py
++./scripts/check-sheng-gpu-smmu.py -> device/scripts/check-sheng-gpu-smmu.py
++./scripts/check-sheng-pmgr-observation.py -> device/scripts/check-sheng-pmgr-observation.py
++./scripts/check-sheng-readonly.py -> device/scripts/check-sheng-readonly.py
++./scripts/check-sheng-root-release.py -> device/scripts/check-sheng-root-release.py
++./scripts/check-sheng.py -> device/scripts/check-sheng.py
++./scripts/check-touch-host.py -> device/scripts/check-touch-host.py
++./scripts/check-turnip-ios-compiler-cache.py -> device/scripts/check-turnip-ios-compiler-cache.py
++./scripts/check-xnu-panic-screen.py -> device/scripts/check-xnu-panic-screen.py
++./scripts/data/fuxi-adreno-inputs.json -> device/scripts/data/fuxi-adreno-inputs.json
++./scripts/data/native-storage-original-bindings.S -> device/scripts/data/native-storage-original-bindings.S
++./scripts/data/observations -> device/scripts/data/observations
++./scripts/data/sheng-display-inputs.json -> device/scripts/data/sheng-display-inputs.json
++./scripts/data/sheng-readonly-inputs.json -> device/scripts/data/sheng-readonly-inputs.json
++./scripts/download-sheng-firmware.py -> device/scripts/download-sheng-firmware.py
++./scripts/extract-files.py -> device/scripts/extract-files.py
++./scripts/extract-sheng-firmware.py -> device/scripts/extract-sheng-firmware.py
++./scripts/fetch-sheng-dts.py -> device/scripts/fetch-sheng-dts.py
++./scripts/fuxi-usb-boot-progress.py -> device/scripts/fuxi-usb-boot-progress.py
++./scripts/fuxi-usb-exact-stream.patch -> device/scripts/fuxi-usb-exact-stream.patch
++./scripts/fuxi_adreno_common.py -> device/scripts/fuxi_adreno_common.py
++./scripts/fuxi_legacy_metadata.py -> device/scripts/fuxi_legacy_metadata.py
++./scripts/gen-touch-firmware.py -> device/scripts/gen-touch-firmware.py
++./scripts/import-sheng-uefi.py -> device/scripts/import-sheng-uefi.py
++./scripts/ios_cache_evidence.py -> device/scripts/ios_cache_evidence.py
++./scripts/make-fuxi-adt.py -> device/scripts/make-fuxi-adt.py
++./scripts/make-fuxi-wallpaper-overlay.py -> device/scripts/make-fuxi-wallpaper-overlay.py
++./scripts/make-sheng-adt.py -> device/scripts/make-sheng-adt.py
++./scripts/package-sheng-boot-v4.py -> device/scripts/package-sheng-boot-v4.py
++./scripts/package-sheng-boot.py -> device/scripts/package-sheng-boot.py
++./scripts/package-sheng-probe.py -> device/scripts/package-sheng-probe.py
++./scripts/package-sheng-xnu-boot.py -> device/scripts/package-sheng-xnu-boot.py
++./scripts/patch-xnu-entry-probe.py -> device/scripts/patch-xnu-entry-probe.py
++./scripts/prepare-fuxi-command-db-oracle.py -> device/scripts/prepare-fuxi-command-db-oracle.py
++./scripts/prepare-fuxi-driver-compat.py -> device/scripts/prepare-fuxi-driver-compat.py
++./scripts/prepare-fuxi-gmu-votes.py -> device/scripts/prepare-fuxi-gmu-votes.py
++./scripts/prepare-fuxi-gmu.py -> device/scripts/prepare-fuxi-gmu.py
++./scripts/prepare-fuxi-usb-debug.py -> device/scripts/prepare-fuxi-usb-debug.py
++./scripts/prepare-sheng-command-db-oracle.py -> device/scripts/prepare-sheng-command-db-oracle.py
++./scripts/prepare-sheng-gmu-votes.py -> device/scripts/prepare-sheng-gmu-votes.py
++./scripts/prepare-sheng-gmu.py -> device/scripts/prepare-sheng-gmu.py
++./scripts/prepare-sheng-gpu-smmu.py -> device/scripts/prepare-sheng-gpu-smmu.py
++./scripts/probe-native-gpu-client-policy.py -> device/scripts/probe-native-gpu-client-policy.py
++./scripts/probe-native-metal-shared-events.py -> device/scripts/probe-native-metal-shared-events.py
++./scripts/probe-native-metal-vertex-inputs.py -> device/scripts/probe-native-metal-vertex-inputs.py
++./scripts/probe-original-metal-async.py -> device/scripts/probe-original-metal-async.py
++./scripts/probe-original-metal-fences.py -> device/scripts/probe-original-metal-fences.py
++./scripts/probe-original-metal-layer.py -> device/scripts/probe-original-metal-layer.py
++./scripts/probe-quartzcore-ios-compiler-cache.py -> device/scripts/probe-quartzcore-ios-compiler-cache.py
++./scripts/probe-renderbox-presentation.py -> device/scripts/probe-renderbox-presentation.py
++./scripts/probe-turnip-ios-compiler-cache.py -> device/scripts/probe-turnip-ios-compiler-cache.py
++./scripts/read-sheng-log.py -> device/scripts/read-sheng-log.py
++./scripts/reconcile-sheng-firmware.py -> device/scripts/reconcile-sheng-firmware.py
++./scripts/run-fuxi-usb-kernel.py -> device/scripts/run-fuxi-usb-kernel.py
++./scripts/run-sheng-unattended.sh -> device/scripts/run-sheng-unattended.sh
++./scripts/seed-data-skip-setup.py -> device/scripts/seed-data-skip-setup.py
++./scripts/sheng-abl-dtb.py -> device/scripts/sheng-abl-dtb.py
++./scripts/stage-priming-ios-cache.py -> device/scripts/stage-priming-ios-cache.py
++./scripts/stage-quartzcore-ios-cached-image.py -> device/scripts/stage-quartzcore-ios-cached-image.py
++./scripts/stage-quartzcore-ios-compiler-peer.py -> device/scripts/stage-quartzcore-ios-compiler-peer.py
++./scripts/stage-turnip-ios-compiler-peer.py -> device/scripts/stage-turnip-ios-compiler-peer.py
++./scripts/xnu-panic-screen.c -> device/scripts/xnu-panic-screen.c
++./tests -> device/tests
+diff --git a/ios17/overlay/board.toml b/ios17/overlay/board.toml
+new file mode 100644
+index 0000000..ec22715
+--- /dev/null
++++ b/ios17/overlay/board.toml
+@@ -0,0 +1,207 @@
++# Board description of the Xiaomi 13 (fuxi, SM8550), read by the unixnu build driver.
++
++[board]
++name = "fuxi"
++soc = "SM8550"
++description = "Xiaomi 13"
++# The archive builders inherited from sheng all address the device package as
++# kits/sheng (115 references), so keep that name: it is only the link name the
++# build tree uses for package/, not the board identity.
++kit = "sheng"
++
++# Checkpoint 1 of the iOS 17 move: the iPhone15,2 iOS 17.7 21H16 kernelcache, arm64e kernel, no userdata.
++# The target OS image (was the iPad7,1 iPadOS 17.7.11 restore image). Give --ipsw PATH to use a local file; without
++# it the remote url is read with range requests, only the members that are needed.
++[ipsw]
++url = "file:///mnt/c/Users/Xiaomi/Downloads/iPhone15,2_17.7_21H16_Restore.ipsw"
++product = "iPhone15,2"
++version = "17.7"
++build = "21H16"
++device_class = "d73ap"
++chip_id = 0x8120
++board_id = 12
++fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
++
++[ipsw.sha256]
++
++# The raw image for the userdata partition: the OS and SystemOS disk images of the IPSW behind a manifest.
++# first_lba and last_lba are the GPT entry "userdata" of LUN 0, read from the tablet.
++[userdata]
++first_lba = 0x2F7840
++last_lba = 0x76923FA
++lba_bytes = 4096
++windows = [
++  { name = "OS", component = "OS" },
++  { name = "SystemOS", component = "Cryptex1,SystemOS" },
++]
++
++[kernel]
++defconfig = "fuxi_ios17_kernel_defconfig"
++# Archive builders of the kernel step, in order. Each is a script of the build tree with its arguments.
++# NativeUfs publishes the UFS windows and its authentication callback. NativeVirtioBlock is compiled
++# with the verified multi-policy personality; both block transports use fuxi's pinned original
++# IOBlockStorageDevice bindings instead of the repository-external live storage capture.
++# VerifiedRootProbe supplies the signed OS/SystemOS policy bundle; run
++# scripts/build-fuxi-verified-root-policy.py once before this step so the
++# CONFIG_XNU_VERIFIED_ROOT_ARCHIVE output already exists (sheng supplies it the same way).
++archives = [
++  "build-corecrypto-14.py",
++  "build-corecrypto-14.py --namespace",
++  "build-arm-driver.py ArmDTPlatform",
++  "build-arm-driver.py ArmCpu",
++  "build-libpthread-kernel.py",
++  "build-boot-log.py",
++  "build-fuxi-usb-debug.py",
++  "build-ios17-stubs.py",
++]
++
++
++[kernel.prelink]
++tool = "kits/XnuPrelink/emit_prelink.py"
++kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
++kernelcache_sha256 = "9bd1028796b0baa12922ab44fda1805b11595981338288c7881c669238d352e5"
++slide = "-0x1000000"
++# _initializeAppleMobileFileIntegrity of 21H16 (pacibsp entry; same body as 21H461 0xfffffff005ab4ae0).
++early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff008f2c4c4"
++# Bring-up: match against the symbol-bearing RELEASE build of the same XNU source and send
++# unmatched calls to the reporting stub of fileset-unmapped-call.patch.
++extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--allow-missing"]
++# Checkpoint 1 (root wait): security, crypto, storage and filesystem kexts only. The iPad list's audio,
++# display, GPU and HDCP families are left out; they also keep the original kernel's holes too small.
++roots = [
++  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
++  "com.apple.driver.AppleMobileFileIntegrity",
++  "com.apple.filesystems.apfs",
++  "com.apple.iokit.IOStorageFamily",
++  "com.apple.kec.corecrypto",
++  "com.apple.kec.Libm",
++  "com.apple.kext.AppleMatch",
++  "com.apple.kext.CoreTrust",
++  "com.apple.security.AppleImage4",
++  "com.apple.security.sandbox",
++  "com.apple.iokit.IOHIDFamily",
++]
++
++[firmware]
++config = "fuxi"                   # Resources/Configs/sheng.toml in the Mu-Silicium checkout (--uefi)
++dsc = "Platforms/Xiaomi/fuxiPkg/fuxi.dsc"
++fd = "Build/fuxiPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
++preflight = ["scripts/check-fuxi.py"]
++submodules = ["Common/Mu", "Common/Mu_OEM_Sample", "Silicium-ACPI", "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
++patches = ["Resources/MuPatches/Gic-Spurious.patch"]
++packages = [
++  "{uefi}",
++  "{uefi}/Platforms/Xiaomi",
++  "{tree}/package",
++  "{tree}/drivers/DarwinBoot",
++  "{edk2}",
++  "{uefi}/Common/Mu",
++  "{uefi}/Common/Mu_OEM_Sample",
++  "{uefi}/Silicon/Qualcomm",
++  "{uefi}/Silicon/Silicium",
++  "{uefi}/Silicon/Samsung",
++  "{uefi}/Silicium-ACPI",
++  "{uefi}/Silicium-ACPI/Platforms/Xiaomi",
++  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
++]
++
++[firmware.defines]
++ENABLE_SECUREBOOT = "1"
++DEVICE_MODEL = "fuxi"
++MEMORY_PROTECTION = "TRUE"
++SHIP_MODE = "FALSE"
++BUILDID_STRING = "fuxi-research"
++
++# The ramdisk of the boot image: a FAT volume with the UniXNU config, the kernel, its device tree and
++# the optional trust cache and Data seed. The loader (DarwinBoot) is part of the firmware volume.
++[payload]
++volume = "FUXIESP"
++size_mib = 176
++loader = "firmware"
++tools = true                      # show the Tools menu (menu plugins, e.g. Advanced Logger)
++title = "fuxi first boot: source 4K XNU to console"
++dram_size = "0x80000000"             # SMEM RAM table observed on the device
++skip_setup_tool = "scripts/seed-data-skip-setup.py"   # used by --skip-setup
++panic_screen = true                  # patch panic() screen output into the payload copy of the kernel
++# The original static/System trust caches, and the owner trust bundle built around them.
++trust_cache_sha256 = [
++  "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
++  "8900d6a93d7a59ce1a872a5c081e559f4240a218f97e12d44d22dda46644d68f",
++]
++kernel_args = [
++  "serial=3",
++  "debug=0x14e",
++  "kt_fixed_zones=120",
++  "offline-apfs-load=1",
++  "-apfs_shared_datavolume",
++  "offline-key-events=1",
++  "offline-legacy-register=1",
++  "offline-legacy-gop=1",
++  "offline-legacy-unit-scale=2",
++  "offline-legacy-pm=1",
++  "offline-legacy-validate=1",
++  "offline-legacy-transfer=1",
++  "offline-legacy-cpu-present=1",
++  "offline-legacy-phase=4",
++  "offline-mobile-graphics-client=1",
++  "offline-mobile-graphics-load=1",
++  "boot-ui-focus4=SpringBoard",
++  "native-fuxi-ufs-root=1",
++  "sheng-log=1",
++  "sheng-pmgr=2",
++  "sheng-gpu-metal=1",
++  "sheng-gpu-addon=1",
++  "sheng-gpu-dcvs=1",
++  "sheng-fb-gpu=1",
++  "sheng-vsync=120",
++  "sheng-dpu=3",
++  "armcpu-spi-ipi=1",
++  "sheng-smp=1",
++  "sheng-cpufreq=4",
++  "sheng-aks=1",
++  "sheng-gpu-power=9",
++  "sheng-gpu-pause-us=100",
++  "sheng-disable-watchdogd=1",
++  "sheng-disable-jobs=com.apple.identityservicesd,com.apple.locationd,com.apple.CommCenter,com.apple.bluetoothd,com.apple.liveactivitiesd",
++  "sheng-lite=1",
++  "sheng-data-persist=2",
++  "qcom-usb-debug=1",
++  "-no_slto_panic",
++  "ml-timeout-lock-panic-scale=40",
++  "fuxi-touch=4",
++  "fuxi-touch-poll=1",
++  "fuxi-touch-hid=1",
++  "fuxi-buttons=1",
++  "fuxi-wifi=3",
++  "sheng-backlight=1",
++  "fuxi-backlight=dsi",
++]
++text_fixups = [
++  "dyld_shared_cache_arm64.43,384eda4,f85fbca9f65701a9,000080d2c0035fd6",
++  "dyld_shared_cache_arm64.13,afebd0,fd7bbfa9fd030091,000080d2c0035fd6",
++  "dyld_shared_cache_arm64.13,afec74,e923bd6df44f01a9,000080d2c0035fd6",
++  "BTAudioHALPlugin,38bec,ffc300d1f44f01a9,000080d2c0035fd6",
++]
++
++[payload.adt]
++tool = "scripts/make-fuxi-adt.py"
++chip_id = "207"
++# fuxiPkg/MemoryMapLib exposes the 6 GiB conventional bank at 0x980000000;
++# DarwinBoot places the window at the run start plus the kernel's 0x7C000 base
++# offset, so a 4.75 GiB request (sheng's value) fits with headroom. This is the
++# RAM XNU sees: the previous 320 MiB low window booted into launchd but left
++# only ~32 MiB free and jetsam kept killing SpringBoard/powerd.
++owned_memory_size = "0x130000000"
++root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
++cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
++packed_data_ramdisk = true
++persistent_data = true
++# Match the installed iPad7,1 iPadOS 17.7.11 system; no phone override.
++ipad_identity = true
++unique_chip_id = "required"          # the platform seed is not stored in any repository
++
++# Image parameters come from the Mu-Silicium device config; [bootimg.image] would override them.
++
++# fuxi.dtb already contains /reserved-memory/splash_region, so do not add it again.
++# The legacy `unixnu bootimg` node patch fails on that node with FDT_ERR_EXISTS;
++# `unixnu bootimage` packs the live tree as-is and tolerates nodes that already exist.
+diff --git a/ios17/overlay/configs/fuxi_ios17_kernel_defconfig b/ios17/overlay/configs/fuxi_ios17_kernel_defconfig
+new file mode 100644
+index 0000000..6a65c1c
+--- /dev/null
++++ b/ios17/overlay/configs/fuxi_ios17_kernel_defconfig
+@@ -0,0 +1,38 @@
++# iOS 17.7 21H16 (iPhone15,2) checkpoint 1: arm64e kernel and the original fileset kexts, up to the
++# root-device wait. Storage, owner root, display, GPU and touch are left out: their bindings are pinned
++# to the iPad 21H461 kernelcache. The kernel console uses the UEFI framebuffer (-v).
++CONFIG_XNU_BUILD_ARCHIVES=y
++CONFIG_XNU_BUILD_WERROR=n
++CONFIG_XNU_SOURCE_CORECRYPTO14=y
++CONFIG_XNU_SOURCE_PTHREAD=y
++CONFIG_XNU_ARM_DT_PLATFORM=y
++CONFIG_XNU_ARMCPU=y
++CONFIG_XNU_NATIVE_AES=n
++CONFIG_XNU_TRUST_CACHE_RUNTIME=y
++CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
++CONFIG_XNU_DT_PANIC_REGION=y
++CONFIG_XNU_NATIVE_ARCH_TIMER=y
++CONFIG_XNU_NATIVE_PAN=y
++CONFIG_XNU_NATIVE_UFS=n
++CONFIG_XNU_NATIVE_RAM_BLOCK=n
++CONFIG_XNU_NATIVE_VIRTIO_BLOCK=n
++CONFIG_XNU_VERIFIED_ROOT_PROBE=n
++CONFIG_XNU_OWNER_ROOT_AUDIT=n
++CONFIG_XNU_OWNER_ROOT_TRUST=n
++CONFIG_XNU_OWNER_CACHE_MOUNT=n
++CONFIG_XNU_OWNER_CACHE_STARTUP=n
++CONFIG_XNU_OWNER_CACHE_CARRIER=n
++CONFIG_XNU_OWNER_BOOT_MANIFEST=n
++CONFIG_XNU_OWNER_DATA_MOUNT=n
++CONFIG_XNU_OWNER_CRYPTEX_FILES=n
++CONFIG_XNU_OWNER_UNION_SYSTEMOS=n
++CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
++CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/boot-log/libBootLog.a {tree}/.cache/fuxi-qud-build/libQcomXnuUsbDebug.a -Wl,-force_load,{tree}/build/ios17-stubs/libIos17Stubs.a"
++CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
++CONFIG_XNU_ARMVIRT_PLATFORM=n
++CONFIG_XNU_BOOT_PROGRESS=n
++CONFIG_XNU_NATIVE_ADRENO=n
++CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
++CONFIG_XNU_SHENG_PMGR=n
++CONFIG_XNU_SOURCE_MOCKFS=n
++CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=n
+diff --git a/ios17/overlay/scripts/build-arm-driver.py b/ios17/overlay/scripts/build-arm-driver.py
+new file mode 100755
+index 0000000..2a1af33
+--- /dev/null
++++ b/ios17/overlay/scripts/build-arm-driver.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python3
++"""Compile the generic platform expert against the actual source-kernel ABI."""
++import argparse
++import hashlib
++import json
++import re
++from pathlib import Path
++import struct
++import sys
++import subprocess
++
++ROOT = Path(__file__).resolve().parents[1]
++parser = argparse.ArgumentParser(description=__doc__)
++parser.add_argument('component', choices=['ArmVirtPlatform', 'ArmDTPlatform', 'ArmCpu', 'NativeAES', 'NativeVirtioBlock', 'NativeRamBlock', 'NativeMobileDisplay', 'NativeVirtioConsole', 'NativeLegacyDisplay', 'NativeGOPPresenter', 'NativeOfflineGPU', 'NativeOfflineAccelerator', 'NativeIOGPUProviderProbe', 'NativeUfs', 'NativeHidInput', 'NativeKeyStoreEvents', 'NativeAdreno', 'Adreno740'])
++parser.add_argument('--negative-aes-kat', action='store_true', help='Isolated own-source wrong-answer refusal control; never changes original inputs')
++parser.add_argument('--verified-root', action='store_true', help='Authenticate all actual disk reads against an independently signed immutable policy')
++parser.add_argument('--verified-root-bundle', action='store_true', help='Select exactly one capacity-matching policy per device, then independently authenticate it')
++parser.add_argument('--negative-verified-block', action='store_true', help='Negative own-buffer control: corrupt only the completed DMA snapshot')
++args = parser.parse_args()
++if args.verified_root_bundle and not args.verified_root:
++    parser.error('A policy bundle requires verified block mode')
++if args.verified_root_bundle and args.negative_verified_block:
++    parser.error('Select either bundle policy qualification or the isolated DMA snapshot fault')
++if args.negative_verified_block and args.component != 'NativeVirtioBlock':
++    parser.error('The isolated DMA snapshot fault requires NativeVirtioBlock')
++if args.verified_root and args.component not in ('NativeVirtioBlock', 'NativeUfs'):
++    parser.error('Verified block mode requires NativeVirtioBlock or NativeUfs')
++if args.negative_verified_block and not args.verified_root:
++    parser.error('The isolated input fault requires verified block mode')
++component = args.component
++recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
++record = json.loads(recipe.read_text().strip().rstrip(','))
++source = ROOT / 'drivers' / ('GopFramebuffer' if component in ('NativeLegacyDisplay','NativeGOPPresenter') else 'NativeMetal' if component in ('NativeOfflineGPU','NativeOfflineAccelerator','NativeIOGPUProviderProbe') else component) / {'NativeAdreno':'NativeAdrenoService.cpp','Adreno740':'NativeAdrenoService.cpp'}.get(component, component + '.cpp')
++out = ROOT / 'build' / {'ArmVirtPlatform': 'armvirt-platform', 'ArmDTPlatform': 'armdt-platform', 'ArmCpu': 'armcpu', 'NativeAES': 'native-aes',
++                        'NativeVirtioBlock': 'native-virtio-block', 'NativeRamBlock': 'native-ram-block',
++                        'NativeMobileDisplay': 'native-mobile-display', 'NativeVirtioConsole': 'native-virtio-console', 'Adreno740': 'adreno740',
++                        'NativeLegacyDisplay': 'native-legacy-display', 'NativeGOPPresenter': 'native-gop-presenter', 'NativeOfflineGPU':'native-offline-gpu','NativeOfflineAccelerator':'native-offline-accelerator','NativeIOGPUProviderProbe':'native-original-provider', 'NativeUfs':'native-ufs', 'NativeHidInput':'native-hid-input', 'NativeKeyStoreEvents':'native-keystore-events', 'NativeAdreno':'native-adreno'}[component]
++if args.verified_root and component == 'NativeVirtioBlock':
++    out = ROOT / ('build/native-virtio-block-verified-fault' if args.negative_verified_block else 'build/native-virtio-block-verified')
++    if args.verified_root_bundle:
++        out = ROOT / 'build/native-virtio-block-verified-bundle'
++out.mkdir(parents=True, exist_ok=True)
++if args.negative_aes_kat:
++    if component != 'NativeAES':
++        parser.error('The own-source KAT control requires NativeAES')
++    out = ROOT / 'build/native-aes-kat-negative'
++    out.mkdir(parents=True, exist_ok=True)
++    text = source.read_text()
++    marker = '0x76,0x49,0xab,0xac'
++    if text.count(marker) != 1:
++        raise SystemExit('The exact own-source NIST answer was not uniquely identified')
++    (out / 'OriginalAESABI.h').write_bytes(source.with_name('OriginalAESABI.h').read_bytes())
++    source = out / 'NativeAES.cpp'
++    source.write_text(text.replace(marker, '0x77,0x49,0xab,0xac'))
++destination = out / (component + '.o')
++arguments = record['arguments']
++command = []
++index = 0
++while index < len(arguments):
++    value = arguments[index]
++    if value == record['file']:
++        command.append(str(source))
++    elif value == '-o':
++        command.extend(['-o', str(destination)])
++        index += 1
++    elif value == '-Xclang' and arguments[index + 1].startswith('-W'):
++        index += 1
++    elif not value.startswith('-W'):
++        command.append(value)
++    index += 1
++command.extend(['-Wall', '-Wextra', '-Werror', '-Wno-unknown-warning-option',
++                '-Wno-missing-designated-field-initializers',
++                '-Wno-unused-parameter',
++                '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-deprecated-enum-enum-conversion',
++                '-Wno-unnecessary-virtual-specifier', '-I', str(ROOT / '.cache/xnu-work/osfmk')])
++if component in ('NativeVirtioBlock', 'NativeRamBlock', 'NativeUfs'):
++    command += ['-I', str(ROOT / 'build/storage-abi/include')]
++    if args.verified_root:
++        command += ['-I', str(ROOT / 'kits/VerifiedRoot/include'), '-I', str(ROOT / 'drivers/NativeVirtioBlock'), '-DNATIVE_VERIFIED_BLOCK=1']
++    if args.negative_verified_block:
++        command += ['-DNATIVE_VERIFIED_BLOCK_INJECT_FAULT=1']
++    if args.verified_root_bundle:
++        command += ['-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1']
++if component == 'NativeUfs':
++    # The UFS transport publishes the SHNGROOT windows and, when NativeVirtioBlock
++    # is linked with its verified personality, provides native_ufs_block_authenticates.
++    command += ['-mgeneral-regs-only']
++if component=='NativeOfflineGPU':
++    command += ['-I',str(ROOT/'drivers/NativeVirtioConsole')]
++if component in ('NativeLegacyDisplay','NativeHidInput'):
++    command += ['-I', str(out)]
++if component in ('NativeAdreno', 'Adreno740'):
++    command += ['-I', str(ROOT / 'kits/ArmSmmu4K'), '-I', str(ROOT / 'kits/AdrenoPM4'),
++                '-I', str(ROOT / 'kits/sheng'), '-I', str(ROOT / 'kits/AdrenoFirmware'),
++                '-I', str(ROOT / 'build/fuxi-gmu')]
++(out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n')
++result = subprocess.run(command, cwd=record['directory'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++(out / 'compile.log').write_text(result.stdout)
++if result.returncode:
++    raise SystemExit(result.stdout[-3500:])
++data = destination.read_bytes()
++# The kernel slice (arm64 or arm64e) and deployment follow UNIXNU_XNU_ARCH / UNIXNU_IOS_VERSION.
++sys.path.insert(0, str(ROOT / 'scripts'))
++from kernel_target import check_object
++check_object(data, 'platform object')
++archive = out / ('lib' + component + '.a')
++archive.unlink(missing_ok=True)
++archive_objects = [destination]
++if component in ('NativeUfs', 'NativeVirtioBlock', 'NativeRamBlock'):
++    # fuxi has no repository-carried live storage capture. Link the pinned
++    # original IOStorageFamily imports from the unchanged iPadOS 17.7.11
++    # kernelcache instead of producing them from audit-storage-interface.py.
++    # Only NativeVirtioBlock carries the absolute-symbol object in its archive;
++    # NativeUfs and NativeRamBlock link those symbols from the force-loaded
++    # Virtio archive to avoid duplicate absolute symbols.
++    bindings_source = ROOT / 'scripts/data/native-storage-original-bindings.S'
++    text = bindings_source.read_text()
++    bindings = {}
++    for line in text.splitlines():
++        match = re.match(r'\.set\s+(\S+),\s*(0x[0-9a-fA-F]+)', line)
++        if match:
++            bindings[match.group(1)] = match.group(2)
++    if not bindings:
++        raise SystemExit('Pinned original storage bindings are empty')
++    (out / 'bindings.json').write_text(json.dumps(dict(
++        compiled_object_sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
++        bindings=bindings, original_code_modified=False,
++        live_capture=False), indent=2) + '\n')
++    if component == 'NativeVirtioBlock':
++        bindings_object = out / 'storage-original-bindings.o'
++        sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
++        subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk,
++                        '-Werror', '-Wno-incompatible-sysroot', '-c', bindings_source, '-o', bindings_object], check=True)
++        archive_objects.append(bindings_object)
++subprocess.run(['xcrun', 'ar', 'rcs', archive, *archive_objects], check=True)
++print(f'{component}: -Werror build and actual ARM64/iOS 17 object audit passed')
+diff --git a/ios17/overlay/scripts/build-fileset-release-reference.py b/ios17/overlay/scripts/build-fileset-release-reference.py
+new file mode 100755
+index 0000000..7ef65a6
+--- /dev/null
++++ b/ios17/overlay/scripts/build-fileset-release-reference.py
+@@ -0,0 +1,192 @@
++#!/usr/bin/env python3
++"""Build a symbol-bearing RELEASE comparison kernel in an isolated output tree."""
++import json
++import os
++import re
++import shutil
++import hashlib
++import argparse
++import platform
++import fnmatch
++from pathlib import Path
++import subprocess
++
++
++def file_hash(path):
++    with path.open('rb') as stream:
++        return hashlib.file_digest(stream, 'sha256').hexdigest()
++
++
++def tree_hash(path):
++    """Hash inputs by content; follow SDK header-directory links as the compiler does."""
++    if not path.is_dir():
++        raise FileNotFoundError(path)
++    digest = hashlib.sha256()
++    for directory, dirs, files in os.walk(path, followlinks=True):
++        dirs[:] = sorted(d for d in dirs if d != '.git')
++        for name in sorted(files):
++            item = Path(directory) / name
++            digest.update(str(item.relative_to(path)).encode() + b'\0')
++            digest.update(file_hash(item).encode() + b'\0')
++    return digest.hexdigest()
++
++
++def reusable(final, record, inputs):
++    try:
++        saved = json.loads(record.read_text())
++        return saved['inputs'] == inputs and saved['sha256'] == file_hash(final)
++    except (OSError, ValueError, KeyError):
++        return False
++
++
++def linked_objects(directory, lto):
++    if lto:
++        # XNU splits the final link into non-LTO objects and the code generated
++        # by its intermediate LTO link. There is no link.filelist in this mode.
++        objects = (directory / 'nonltolink.filelist').read_text().splitlines()
++        generated = directory / 'justlto.o'
++        objects += [str(p) for p in sorted(generated.glob('*.o'))] if generated.is_dir() else [str(generated)]
++    else:
++        objects = (directory / 'link.filelist').read_text().splitlines()
++        objects += [str(directory / name) for name in
++                    ('version.o', 'lastkerneldataconst.o', 'lastkernelconstructor.o')
++                    if (directory / name).is_file()]
++    return [str(Path(name) if Path(name).is_absolute() else directory / name)
++            for name in objects if name.strip()]
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--tree', required=True, type=Path, help='prepared XNU build tree of the OS profile')
++    parser.add_argument('--lto', action='store_true', help='enable the RELEASE default link-time optimization')
++    options = parser.parse_args()
++    mode = 'lto' if options.lto else 'snapshot'
++    root = options.tree.resolve()
++    build_root = root / 'build/xnu/fileset-reference'
++    final = build_root / 'mach.release.bcm2837.unstripped.noctf'
++    cache_record = final.with_suffix('.json')
++    sdk = root / '.cache/fakeroot'
++    archives = [root/'build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a']
++    forced = [root/f'build/{folder}/{name}' for folder,name in (
++        ('libpthread-kernel','libpthread_kernel.a'),('armdt-platform','libArmDTPlatform.a'),('armcpu','libArmCpu.a'))]
++    inputs = {
++        'mode': mode,
++        'script': file_hash(Path(__file__)),
++        'source': tree_hash(root / '.cache/xnu-work'),
++        'sdk': tree_hash(sdk),
++        'archives': {str(p.relative_to(root)): file_hash(p) for p in archives + forced},
++        'versions': {name: os.environ.get(name, default) for name, default in (
++            ('UNIXNU_IOS_VERSION', '26.0'), ('UNIXNU_XNU_DARWIN', '25.5.0'),
++            ('UNIXNU_XNU_VERSION', '12377.121.6'))},
++        'compiler': subprocess.check_output(['xcrun', 'clang', '--version'], text=True),
++        'environment': {name: value for name, value in os.environ.items()
++                        if name.startswith(('XNU_', 'RC_', 'CCC_')) or name in ('CC', 'CXX', 'LD')},
++    }
++    if reusable(final, cache_record, inputs):
++        print(f'reference inputs and digest match ({mode}): {final}')
++        return
++    # Separate workspaces prevent non-LTO objects and stale patched sources from
++    # being reused after a mode, source, SDK, archive or compiler change.
++    key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
++    output = build_root / f'{mode}-{key[:16]}'
++    output.mkdir(parents=True, exist_ok=True)
++    (output / 'inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
++    source = output / 'source'
++    if not source.exists():
++        shutil.copytree(root/'.cache/xnu-work', source, symlinks=True,
++                        ignore=shutil.ignore_patterns('.git'))
++        # The shared tree currently has this observation hook at file scope. The
++        # reference build disables observation hooks; repair only its private copy.
++        sleh = source / 'osfmk/arm64/sleh.c'
++        text = sleh.read_text()
++        misplaced = '\n\tboot_progress_user_breakpoint(state, esr);\n#if __has_feature(ptrauth_calls)'
++        if misplaced in text:
++            sleh.write_text(text.replace(misplaced, '\n#if __has_feature(ptrauth_calls)', 1))
++        manifest = {str(p.relative_to(source)): hashlib.sha256(p.read_bytes()).hexdigest()
++                    for p in source.rglob('*') if p.is_file()}
++        (output/'source-sha256.json').write_text(json.dumps(manifest,indent=2)+'\n')
++    env = dict(os.environ, KERNEL_SDKROOT=str(sdk),
++               XNU_AVAILABILITY_PL=str(sdk/'usr/local/libexec/availability.pl'))
++    flags = '-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding -DXNU_NATIVE_PAN=1 -DXNU_SOURCE_CORECRYPTO14=1 -DXNU_BOOT_PROGRESS=0'
++    args = ['make','-C',str(source),'build','SDKROOT=iphoneos',
++        'ARCH_CONFIGS=ARM64','MACHINE_CONFIGS=BCM2837','KERNEL_CONFIGS=RELEASE',
++        'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64e','LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY',
++        'ARM64_LINK_ADDR=0xfffffff007004000','ARM64_PLKSEG_ADDR=0xfffffff004004000',
++        f'DEPLOYMENT_TARGET_FLAGS=-miphoneos-version-min={os.environ.get("UNIXNU_IOS_VERSION", "26.0")} -DXNU_TARGET_OS_IOS',
++        f'DEPLOYMENT_LINKER_FLAGS=-Wl,-ios_version_min,{os.environ.get("UNIXNU_IOS_VERSION", "26.0")}',
++        f'RC_DARWIN_KERNEL_VERSION={os.environ.get("UNIXNU_XNU_DARWIN", "25.5.0")}',
++        f'RC_ProjectSourceVersion={os.environ.get("UNIXNU_XNU_VERSION", "12377.121.6")}',
++        f'BUILD_LTO={int(options.lto)}','BOUND_CHECKS=0','BUILD_WERROR=0',f'MAKEJOBS=-j{os.environ.get("JOBS", "6")}',
++        f'LDFLAGS_KERNEL_LTO=-miphoneos-version-min={inputs["versions"]["UNIXNU_IOS_VERSION"]} -Wl,-mllvm,-inline-threshold=100',
++        f'CFLAGS_EXTRA={flags}',
++        'copyio.o_CFLAGS_ADD=-march=armv8.1-a','pcb.o_CFLAGS_ADD=-march=armv8.1-a',
++        'LD_KERNEL_ARCHIVES='+' '.join([f'-L{sdk}/usr/local/lib/kernel','-lfirehose_kernel',
++                                        *map(str,archives),*(f'-Wl,-force_load,{p}' for p in forced)]),
++        'XNU_EXTERNAL_KERNEL_ARCHIVES='+' '.join(map(str,archives+forced)),
++        f'OBJROOT={output}/{mode}-obj',f'SYMROOT={output}/{mode}-sym',f'DSTROOT={output}/{mode}-dst']
++    if platform.system() == 'Linux':
++        # What a Mac provides itself (scripts/linux): host compiler, mig, memory and CPU counts, no dSYM.
++        clt = os.environ['CLT_PREFIX']
++        env.update(PLATFORM='iPhoneOS', HOST_CC=f'{clt}/bin/xnu-host-cc', MIGCOM=f'{clt}/libexec/migcom')
++        args += ['TIGHTBEAMC=tightbeamc-not-supported', 'BUILD_DSYM=0',
++                 f'MEMORY_SIZE={os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")}',
++                 f'SYSCTL_HW_PHYSICALCPU={os.cpu_count()}', f'SYSCTL_HW_LOGICALCPU={os.cpu_count()}',
++                 f'LD_KERNEL_LIBS={sdk}/usr/local/lib/kernel/libcc_kext.a']
++    (output/f'{mode}-command.json').write_text(json.dumps(args,indent=2)+'\n')
++    with (output/f'{mode}-build.log').open('w') as log:
++        result = subprocess.run(args,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT)
++    print('RELEASE reference exit',result.returncode,'log',output/f'{mode}-build.log',flush=True)
++    # The bring-up patch calls native hooks from the kernel core behind weak_import declarations; on arm64e
++    # the authenticated pointer of an undefined weak symbol fails the link. The private copy stubs them: this
++    # comparison kernel never runs, the prelink step reads its layout.
++    build_log = (output / f'{mode}-build.log').read_text()
++    # fuxi: every symbol the last link left undefined (device archives the comparison kernel does not link,
++    # C++ instantiations), named through asm labels so mangled names work too.
++    blocks = build_log.split('Undefined symbols for architecture')
++    stub_names = sorted(set(re.findall(r'^\s+"(_[^"]+)", referenced from', blocks[-1], re.M))) if len(blocks) > 1 else []
++    if stub_names:
++        (output / 'native-stubs.c').write_text(''.join(f'long unixnu_ref_stub_{i} __asm__("{name}");\n'
++                                                       for i, name in enumerate(stub_names)))
++        iphoneos = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
++        subprocess.run(['xcrun', 'clang', '-arch', 'arm64e', '-mkernel', '-isysroot', iphoneos, '-c',
++                        '-o', str(output / 'native-stubs.o'), str(output / 'native-stubs.c')], check=True)
++        at = next(i for i, a in enumerate(args) if a.startswith('LD_KERNEL_ARCHIVES='))
++        args[at] += f' -Wl,-force_load,{output}/native-stubs.o'
++    # Forced exports the built objects cannot provide: remove them from this private copy and link again
++    # (the symbols are absent from the comparison kernel either way; the first link can stop exactly there,
++    # and its file list is what names the objects that were built).
++    objects = linked_objects(output / f'{mode}-obj/RELEASE_ARM64_BCM2837', options.lto)
++    objects += list(map(str, archives + forced))
++    names = set()
++    for i in range(0, len(objects), 100):
++        listed = subprocess.run(['xcrun', 'nm', '-gUj', *objects[i:i + 100]], capture_output=True, text=True, check=True)
++        names.update(symbol for symbol in listed.stdout.splitlines() if symbol.startswith('_') and ' ' not in symbol)
++    removed = []
++    for filename in ('Private.exports', 'Private.arm64.exports'):
++        path = output / 'source/config' / filename
++        lines = path.read_text().splitlines(keepends=True)
++        rejected = {line.strip() for line in lines
++                    if line.strip().startswith('_') and ':' not in line and not any(fnmatch.fnmatchcase(n, line.strip()) for n in names)}
++        removed.extend(sorted(rejected))
++        path.write_text(''.join(line for line in lines if line.strip() not in rejected))
++    import json as _json
++    record = output / 'omitted-unavailable-forced-exports.json'
++    previous = _json.loads(record.read_text()) if record.exists() else []
++    record.write_text(_json.dumps(sorted(set(previous + removed)), indent=2) + chr(10))
++    print('removed', len(removed), 'unavailable forced exports; linking again')
++    with (output / f'{mode}-build.log').open('a') as log:
++        result = subprocess.run(args, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
++    print('RELEASE reference exit', result.returncode, 'log', output / f'{mode}-build.log', flush=True)
++    if result.returncode:
++        raise SystemExit(result.returncode)
++    built = output / f'{mode}-obj/RELEASE_ARM64_BCM2837/mach.release.bcm2837.unstripped'
++    temporary = final.with_suffix('.tmp')
++    shutil.copyfile(built, temporary)
++    os.replace(temporary, final)
++    cache_record.write_text(json.dumps({'inputs': inputs, 'sha256': file_hash(final),
++                                  'build': str(output)}, indent=2) + '\n')
++    print('reference', final)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ios17/overlay/scripts/build-fuxi-usb-debug.py b/ios17/overlay/scripts/build-fuxi-usb-debug.py
+new file mode 100644
+index 0000000..25cdc6d
+--- /dev/null
++++ b/ios17/overlay/scripts/build-fuxi-usb-debug.py
+@@ -0,0 +1,103 @@
++#!/usr/bin/env python3
++"""Build and qualify the selected fuxi USB archive using actual XNU records."""
++import json
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import time
++
++root = Path(__file__).resolve().parents[1]
++module = root / '.cache/fuxi-qud-module'
++# A restored link-only reference already has compile records, so the framework
++# may skip its bootstrap recipe. Stage/apply USB before this archive as well.
++subprocess.run([sys.executable, root / 'scripts/prepare-fuxi-usb-debug.py',
++                '--module', root / 'drivers/QcomXnuUsbDebug', '--xnu', root / 'refer/xnu',
++                '--output', module], check=True)
++# iOS 17 fileset: the kernel __DATA has to fit ahead of the retained kext data of the original
++# collection (0x171070 bytes on 21H16), so the 4 MiB log ring and the 16 MiB screenshot buffer shrink.
++for relative, old, new in (('kernel/QcomUsbBuffer.h', '#define SOC_USB_LOG_BUFFER_BYTES (4u * 1024u * 1024u)',
++                            '#define SOC_USB_LOG_BUFFER_BYTES (192u * 1024u)'),
++                           ('include/QcomUsbScreenshot.h', '#define QUD_SCREENSHOT_MAX_BYTES (16u * 1024u * 1024u)',
++                            '#define QUD_SCREENSHOT_MAX_BYTES (16u * 1024u)'),
++                           ('tests/test_usb_buffer.c', 'ring.used == 4u * 1024u * 1024u',
++                            'ring.used == SOC_USB_LOG_BUFFER_BYTES')):
++    header = module / relative
++    text = header.read_text()
++    if old in text:
++        header.write_text(text.replace(old, new, 1))
++    elif new not in text:
++        raise SystemExit(f'{relative}: buffer size anchor changed')
++# Only the iOS 17 fuxi archive opts into the post-drain hook.
++shutil.copy2(root / 'kits/sheng/BootResetCore.h', module / 'kernel/BootResetCore.h')
++board_header = module / 'soc/FuxiSm8550.h'
++if 'FUXI_PANIC_FASTBOOT' not in board_header.read_text():
++    with board_header.open('a') as stream:
++        stream.write('\n#define FUXI_PANIC_FASTBOOT 1\n')
++if 'fuxi_panic_fastboot(void)' not in (module / 'kernel/QcomXnuUsbDebug.c').read_text():
++    subprocess.run(['patch','-p1','--batch'],cwd=module,input='--- a/kernel/QcomXnuUsbDebug.c\n+++ b/kernel/QcomXnuUsbDebug.c\n@@ -102,6 +102,44 @@\n #endif\n     for (;;) __asm__ volatile("wfe" ::: "memory");\n }\n+\n+#ifdef FUXI_PANIC_FASTBOOT\n+/* Prepare mappings in normal context. No allocation or thread services after panic. */\n+#include "BootResetCore.h"\n+static struct br_arbiter reset_arb;\n+static volatile uint32_t *reset_obs, *reset_chn;\n+static void fuxi_prepare_fastboot(void)\n+{\n+    int seconds = 0;\n+    struct br_found f;\n+    if (!PE_parse_boot_argn("fuxi-panic-fastboot", &seconds, sizeof(seconds)) || seconds != 30)\n+        return;\n+    reset_arb.core = (void *)ml_io_map(0xc400000, 0x3000);\n+    reset_arb.cnfg = (void *)ml_io_map(0xc42d000, 0x4000);\n+    if (!reset_arb.core || !reset_arb.cnfg || br_find(&reset_arb, &f) || f.owner != 0)\n+        return;\n+    unsigned off = BR_OBS_APID_STRIDE * (unsigned)f.apid;\n+    vm_offset_t obs = ml_io_map(0xc440000 + (off & ~4095u), 4096);\n+    if (!obs) return;\n+    reset_obs = (void *)(obs + (off & 4095u));\n+    reset_chn = (void *)ml_io_map(0xc500000 + BR_CHNL_APID_STRIDE * (unsigned)f.apid, 4096);\n+}\n+static void fuxi_panic_fastboot(void)\n+{\n+    uint8_t before, after;\n+    uint64_t hz = native.status.counter_frequency;\n+    if (!reset_obs || !reset_chn || !hz || hz > COUNTER_MAX_FREQUENCY) return;\n+    uint64_t start = counter();\n+    while (counter() - start < 30 * hz) __asm__ volatile("yield" ::: "memory");\n+    /* Both pointers already select this APID, EE0, so channel offset is zero. */\n+    if (br_set_bootloader(reset_obs, reset_chn, &reset_arb, 0, &before, &after)) return;\n+    __asm__ volatile("movz w0, #9\\nmovk w0, #0x8400, lsl #16\\n"\n+                     "mov x1, xzr\\nmov x2, xzr\\nmov x3, xzr\\ndsb sy\\nsmc #0"\n+                     ::: "x0","x1","x2","x3","x4","x5","x6","x7","x8","x9",\n+                         "x10","x11","x12","x13","x14","x15","x16","x17","memory","cc");\n+}\n+#endif\n+\n static int qcom_usb_control_halt_restart(unsigned int type)\n {\n     if (type == CONTROL_PE_RESTART_CPU &&\n@@ -808,6 +846,9 @@\n     usb_diag_polling = 0;\n     if (usb_diag_mode >= 201u && usb_diag_mode <= 203u) diag_reset(12);\n     diag_checkpoint(QCOM_USB_DEBUG_DIAG_ENUM_DONE);\n+#ifdef FUXI_PANIC_FASTBOOT\n+    fuxi_prepare_fastboot();\n+#endif\n     native.status.phase = QCOM_USB_DEBUG_ACTIVE;\n     ret = 1;\n out:\n@@ -1270,6 +1311,9 @@\n     static const char end[] = "\\nQCOM PANIC END\\n";\n     uint64_t flags, now;\n     unsigned int iterations = 200000u, marker_queued = 0, announced = 0;\n+#ifdef FUXI_PANIC_FASTBOOT\n+    int finished = 0;\n+#endif\n     char announcement[192];\n     size_t announcement_bytes;\n     if (usb_diag_enabled && (native.status.phase == QCOM_USB_DEBUG_PREPARING ||\n@@ -1307,7 +1351,12 @@\n         }\n         if (!poll_owned()) break;\n         if (marker_queued && dwc3_queued(native.core) == 0 &&\n-            soc_usb_buffer_pending(&usb_log_buffer) == 0) break;\n+            soc_usb_buffer_pending(&usb_log_buffer) == 0) {\n+#ifdef FUXI_PANIC_FASTBOOT\n+            finished = 1;\n+#endif\n+            break;\n+        }\n         delay_us(0, 10);\n     }\n     native.deadline_active = 0;\n@@ -1318,6 +1367,9 @@\n out:\n     buffer_status_owned();\n     release(flags);\n+#ifdef FUXI_PANIC_FASTBOOT\n+    if (finished) fuxi_panic_fastboot();\n+#endif\n     if (usb_diag_enabled) diag_reset(10);\n }\n int qcom_usb_debug_stop(void)\n',text=True,check=True)
++
++patcher = module / 'scripts/xnu_patches.py'
++state = json.loads(subprocess.check_output([sys.executable, patcher, 'status',
++                   '--xnu', root / '.cache/xnu-work', '--profile', 'darwin23-fuxi'], text=True))
++if state['state_before'] == 'ready':
++    subprocess.run([sys.executable, patcher, 'apply', '--xnu', root / '.cache/xnu-work',
++                    '--profile', 'darwin23-fuxi'], check=True)
++elif state['state_before'] != 'applied':
++    raise SystemExit('USB source integration is not ready: '+str(state))
++out = root / '.cache/fuxi-qud-build'
++records = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
++llvm = Path('/opt/homebrew/opt/llvm/bin')
++if not llvm.is_dir():
++    # Linux host: the framework's toolchain provides llvm-config. Its clang is the host
++    # compiler the kit's tests must use, and /usr/bin has to come before the cross tools
++    # so the host link gets the ELF linker rather than cctools' Mach-O ld.
++    llvm = Path(subprocess.check_output(['llvm-config', '--bindir'], text=True).strip())
++    os.environ['PATH'] = (str(llvm) + os.pathsep + '/usr/bin' + os.pathsep
++                          + os.environ.get('PATH', ''))
++    # check.py builds its host tests with -std=c11, which hides posix_memalign behind
++    # glibc's feature-test macros; Apple's headers always declare it.
++    staged_check = module / 'tests/check.py'
++    if staged_check.is_file():
++        source = staged_check.read_text()
++        if '-D_POSIX_C_SOURCE' not in source and "'-std=c11'," in source:
++            staged_check.write_text(source.replace("'-std=c11',",
++                                                 "'-std=c11', '-D_POSIX_C_SOURCE=200809L',", 1))
++def run(arguments, host=False):
++    command = [str(v) for v in arguments]
++    env = os.environ.copy()
++    if host:
++        env.pop('CCC_OVERRIDE_OPTIONS', None)
++    result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
++    print(result.stdout, end='')
++    if result.returncode:
++        print(result.stderr, end='')
++        for base in (out, root / '.cache/fuxi-qud-xnu-check'):
++            if base.is_dir():
++                for log in base.glob('*.log'):
++                    content = log.read_text(errors='replace')
++                    if 'error:' in content:
++                        print(log.name, content[-6500:])
++        raise SystemExit(result.returncode)
++
++# The upstream checks require a new output directory on every run.
++for previous in (root / '.cache/fuxi-qud-model-check', out, root / '.cache/fuxi-qud-xnu-check'):
++    if previous.exists():
++        previous.rename(previous.with_name(previous.name + '.previous-' + str(time.time_ns())))
++
++run([sys.executable, module / 'tests/check.py', '--target-clang', llvm / 'clang',
++     '--output', root / '.cache/fuxi-qud-model-check'], host=True)
++matches = list(records.glob('**/pe_kprintf.o.json'))
++if len(matches) != 1:
++    raise SystemExit('missing or ambiguous actual PE compile record')
++run([sys.executable, module / 'scripts/build.py', '--compile-record', matches[0],
++     '--soc', 'soc/FuxiSm8550.h', '--ar', llvm / 'llvm-ar', '--nm', llvm / 'llvm-nm', '--output', out])
++run([sys.executable, module / 'tests/check_xnu.py', '--xnu', root / '.cache/xnu-work',
++     '--records', records, '--archive', out / 'libQcomXnuUsbDebug.a', '--nm', llvm / 'llvm-nm',
++     '--output', root / '.cache/fuxi-qud-xnu-check'])
++for name in ('check-report.json', 'xnu-check-report.json'):
++    directory = root / ('.cache/fuxi-qud-model-check' if name == 'check-report.json' else '.cache/fuxi-qud-xnu-check')
++    print((directory / name).read_text())
++print((out / 'build-report.json').read_text())
++print('PASS: fuxi QcomXnuUsbDebug archive, models and six-unit enabled/disabled XNU integration')
+diff --git a/ios17/overlay/scripts/build-ios17-stubs.py b/ios17/overlay/scripts/build-ios17-stubs.py
+new file mode 100644
+index 0000000..89f26a7
+--- /dev/null
++++ b/ios17/overlay/scripts/build-ios17-stubs.py
+@@ -0,0 +1,50 @@
++#!/usr/bin/env python3
++"""Absent-subsystem stubs for the iOS 17 checkpoint-1 kernel (arm64e).
++
++BootLog.c weakly imports the sheng/fuxi dashboard subsystems (display, Adreno, touch, UFS log window,
++boot progress). On arm64 an unresolved weak import links as NULL; on arm64e the linker cannot sign a
++pointer to an undefined symbol, so every one of them needs a definition. package/BootLogStubs.c and
++package/LegacyDisplayStub.c are the existing empty definitions; this adds the UFS log window and the
++touch probe, whose drivers this checkpoint leaves out. The UFS functions report failure, so BootLog
++keeps its RAM ring only.
++"""
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / 'scripts'))
++from kernel_target import TRIPLE, check_object
++
++out = ROOT / 'build/ios17-stubs'
++out.mkdir(parents=True, exist_ok=True)
++extra = out / 'Ios17AbsentStubs.c'
++extra.write_text('''#include <stdint.h>
++int native_ufs_log_open(uint64_t *first, uint64_t *count, const char **why) { if (why) *why = "no UFS (ios17 checkpoint)"; (void)first; (void)count; return -1; }
++int native_ufs_log_write(uint64_t lba, uint32_t blocks, const void *data) { (void)lba; (void)blocks; (void)data; return -1; }
++uint64_t native_ufs_export_blocks(void) { return 0; }
++int native_ufs_export_write(uint64_t lba, uint32_t blocks, const void *data) { (void)lba; (void)blocks; (void)data; return -1; }
++int native_ufs_log_sync(void) { return -1; }
++unsigned native_ufs_store_gpt_check(void) { return 0; }
++volatile uint32_t native_data_persist_state, native_data_persist_header, native_data_persist_gpt, native_data_persist_gpt_after;
++volatile uint64_t native_data_persist_pages, native_data_persist_loaded, native_data_persist_writes, native_data_persist_syncs,
++    native_data_persist_errors, native_data_persist_first_lba, native_data_persist_present;
++volatile uint32_t native_process_wait_port[10];
++volatile int32_t fuxi_buttons_stats[10];
++void native_touch_probe(void) {}
++''')
++# The device package (the tree's package/ is the framework's); the build driver exports UNIXNU_DEVICE.
++package = Path(os.environ['UNIXNU_DEVICE']) / 'package' if os.environ.get('UNIXNU_DEVICE') else ROOT / 'kits/sheng'
++sources = [package / 'BootLogStubs.c', package / 'LegacyDisplayStub.c', extra]
++objects = []
++for source in sources:
++    obj = out / (source.stem + '.o')
++    subprocess.run(['xcrun', 'clang', '-target', TRIPLE, '-mkernel', '-ffreestanding', '-O2', '-Wno-everything',
++                    '-c', str(source), '-o', str(obj)], check=True)
++    check_object(obj.read_bytes(), source.name)
++    objects.append(obj)
++archive = out / 'libIos17Stubs.a'
++archive.unlink(missing_ok=True)
++subprocess.run(['xcrun', 'libtool', '-static', '-o', str(archive), *map(str, objects)], check=True)
++print(archive)
+diff --git a/ios17/overlay/scripts/data/ios17-kernel-stubs.json b/ios17/overlay/scripts/data/ios17-kernel-stubs.json
+new file mode 100644
+index 0000000..18e9726
+--- /dev/null
++++ b/ios17/overlay/scripts/data/ios17-kernel-stubs.json
+@@ -0,0 +1,314 @@
++{
++ "boot_progress_banner_rows": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_progress_banner_text": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_progress_ext": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_progress_ext_wide": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_progress_page_text": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_progress_panic_text": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_progress_profile_rows": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_progress_tag": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_reset_bootloader": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_reset_probe": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_ui_trace_hot_rows": {
++  "kind": "data",
++  "decl": ""
++ },
++ "boot_ui_trace_role_rows": {
++  "kind": "data",
++  "decl": ""
++ },
++ "fuxi_buttons_stats": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_cache_stats": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_cached_read32": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_client_log": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_coherent_skips": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_dram_read32": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_export_stats": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_fence_phys": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_fence_wait": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_ib_log": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_ib_log_count": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_import_diag": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_import_fail_offset": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_import_fail_pa": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_import_stage": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_io_coherent": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_map_fail": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_metal_askers": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_metal_rows": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_method_stats": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_reassert_ticks": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_ring_log": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_ring_log_count": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_stall": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_stall_mem": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_view_diag": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_vm_phase_us": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_wait_outer": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_adreno_wc_audit": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_cpufreq_row": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_errors": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_first_lba": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_gpt": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_gpt_after": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_header": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_loaded": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_pages": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_present": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_state": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_syncs": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_data_persist_writes": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_dpu_more": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_dpu_pipes": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_dpu_stats": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_gop_wait_stats": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_gpu_coherence_row": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_gpu_idle_sleeps": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_gpu_idle_spins": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_gpu_perf_vote": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_legacy_clients_dump": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_legacy_display_probe": {
++  "kind": "function",
++  "decl": "extern void native_legacy_display_probe(void);"
++ },
++ "native_legacy_prepare_report": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_legacy_properties_now": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_legacy_state_words": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_legacy_swap_timeline": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_process_wait_port": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_touch_extent": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_touch_probe": {
++  "kind": "function",
++  "decl": "extern void native_touch_probe(void);"
++ },
++ "native_touch_stroke_count": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_touch_strokes": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_ufs_export_blocks": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_ufs_export_write": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_ufs_log_open": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_ufs_log_sync": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_ufs_log_write": {
++  "kind": "data",
++  "decl": ""
++ },
++ "native_ufs_store_gpt_check": {
++  "kind": "data",
++  "decl": ""
++ }
++}
+diff --git a/ios17/overlay/scripts/fuxi-kernel-baseline.sh b/ios17/overlay/scripts/fuxi-kernel-baseline.sh
+new file mode 100644
+index 0000000..1e9db00
+--- /dev/null
++++ b/ios17/overlay/scripts/fuxi-kernel-baseline.sh
+@@ -0,0 +1,830 @@
++#!/usr/bin/env bash
++set -euo pipefail
++# Many checks are bare `test -f`; name the one that stops the build.
++trap 'echo "build-xnu-4k-baseline.sh: line $LINENO: $BASH_COMMAND failed" >&2' ERR
++ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
++cd "$ROOT"
++# Source versions come from feeds.toml through the unixnu driver; the defaults are the qualified ones.
++XNU_TAG=${UNIXNU_XNU_TAG:-xnu-10063.141.1}
++XNU_COMMIT=${UNIXNU_XNU_COMMIT:-d8b80295118ef25ac3a784134bcf95cd8e88109f}
++XNU_DARWIN=${UNIXNU_XNU_DARWIN:-23.6.0}
++XNU_VERSION=${UNIXNU_XNU_VERSION:-10063.141.1}
++LIBPLATFORM_TAG=${UNIXNU_LIBPLATFORM_TAG:-libplatform-316.100.10}
++LIBDISPATCH_TAG=${UNIXNU_LIBDISPATCH_TAG:-libdispatch-1477.100.9}
++AVAILABILITY_TAG=${UNIXNU_AVAILABILITYVERSIONS_TAG:-AvailabilityVersions-141.1}
++if [ ! -d refer/xnu/.git ]; then
++  git clone --depth 1 --branch "$XNU_TAG" https://github.com/apple-oss-distributions/xnu.git refer/xnu
++fi
++if [ "$(git -C refer/xnu rev-parse HEAD)" != "$XNU_COMMIT" ]; then
++  echo 'error: unexpected XNU reference revision' >&2
++  exit 1
++fi
++if [ ! -d .cache/xnu-work/.git ]; then
++  git clone --shared refer/xnu .cache/xnu-work
++fi
++if [ ! -x .cache/fakeroot/usr/local/libexec/availability.pl ]; then
++  if [ ! -d refer/AvailabilityVersions/.git ]; then
++    git clone --depth 1 --branch "$AVAILABILITY_TAG" https://github.com/apple-oss-distributions/AvailabilityVersions.git refer/AvailabilityVersions
++  fi
++  mkdir -p .cache/fakeroot
++  make -C refer/AvailabilityVersions install -j"${JOBS:-4}" \
++    OBJROOT="$ROOT/build/availability" SYMROOT="$ROOT/build/availability" \
++    DSTROOT="$ROOT/.cache/fakeroot" CMAKE="$(command -v cmake)" NINJA="$(command -v ninja)"
++fi
++# Format 2 prepares its ordered patch series through the shared resolver.
++if [ -z "${UNIXNU_PATCH_LIST:-}" ]; then
++# The optional observation hooks overlap existing root/exec patch context.
++# Remove them first so earlier independent patches retain their idempotent checks.
++# The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
++# inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
++# The fuxi patch set adds zzzc-boot-log, which overlaps the boot-progress hunk; it must unwind first.
++for LATE_PATCH in "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
++    "$ROOT/patches/xnu/zzyb-native-cryptex-os-view.patch" \
++    "$ROOT/patches/xnu/zzy-staged-system-apps.patch" "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch" \
++    "$ROOT/patches/xnu/zzyc-owner-skip-launch-constraints.patch"; do
++  if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
++    git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
++  fi
++done
++# arm64e: early-security-init-sign.patch edits the call that the XnuPrelink security-init patch adds. Unwind it
++# first so that patch keeps its idempotent check; the arm64e loop below applies it again.
++if [ "${UNIXNU_XNU_ARCH:-arm64}" = arm64e ]; then
++  LATE_PATCH="$ROOT/patches/xnu-10063-arm64e/early-security-init-sign.patch"
++  if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
++    git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
++  fi
++fi
++for PATCH in "$ROOT"/patches/xnu/*.patch "$ROOT"/kits/XnuPrelink/patches/*.patch; do
++  if ! git -C .cache/xnu-work apply --reverse --check "$PATCH" >/dev/null 2>&1; then
++    git -C .cache/xnu-work apply --check "$PATCH"
++    git -C .cache/xnu-work apply "$PATCH"
++  fi
++done
++fi
++# arm64e on xnu-10063 (iOS 17 iPhone kernelcaches): native PAC keys, threaded starts, the fileset stub
++# target and the upstream clang __ptrauth form (UniXNU/patches/xnu-10063-arm64e).
++if [ "${UNIXNU_XNU_ARCH:-arm64}" = arm64e ]; then
++  for PATCH in "$ROOT"/patches/xnu-10063-arm64e/*.patch; do
++    if ! git -C .cache/xnu-work apply --reverse --check "$PATCH" >/dev/null 2>&1; then
++      git -C .cache/xnu-work apply --check "$PATCH"
++      git -C .cache/xnu-work apply "$PATCH"
++    fi
++  done
++fi
++export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
++python3 scripts/prepare-xnu-source.py
++# A Linux host builds with upstream clang and GNU tools (scripts/linux): rewrite the few sources that assume
++# Apple's, and pass xnu's make what a Mac provides itself (host compiler, mig, memory and CPU counts).
++XNU_HOST_MAKE_ARGS=()
++if [ "$(uname -s)" = Linux ]; then
++  python3 scripts/linux/prepare-xnu.py source
++  export PLATFORM=iPhoneOS HOST_CC="$CLT_PREFIX/bin/xnu-host-cc" MIGCOM="$CLT_PREFIX/libexec/migcom"
++  XNU_HOST_MAKE_ARGS=(TIGHTBEAMC=tightbeamc-not-supported BUILD_DSYM=0
++    MEMORY_SIZE="$(( $(getconf _PHYS_PAGES) * $(getconf PAGE_SIZE) ))"
++    SYSCTL_HW_PHYSICALCPU="$(nproc)" SYSCTL_HW_LOGICALCPU="$(nproc)"
++    LD_KERNEL_LIBS="$ROOT/.cache/fakeroot/usr/local/lib/kernel/libcc_kext.a")
++fi
++# The first pass of a new tree (XNU_BOOTSTRAP=1, set by the unixnu driver) only has to leave the compile records and
++# link.filelist for the archive builders that run after it, so it links without their archives.
++BOOTSTRAP=${XNU_BOOTSTRAP:-0}
++if [ "$BOOTSTRAP" != 0 ] && [ "$BOOTSTRAP" != 1 ]; then
++  echo 'XNU_BOOTSTRAP must be 0 or 1' >&2
++  exit 1
++fi
++BOOT_PROGRESS=${XNU_BOOT_PROGRESS:-0}
++if [ "$BOOT_PROGRESS" != 0 ] && [ "$BOOT_PROGRESS" != 1 ]; then
++  echo 'XNU_BOOT_PROGRESS must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$BOOT_PROGRESS" = 1 ]; then
++  if [ "${XNU_NATIVE_UFS:-0}" != 1 ] || [ "${XNU_OWNER_ROOT_AUDIT:-0}" != 1 ] || \
++     [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" != 1 ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++    echo 'Boot progress requires the audited UFS/owner-root, Virtio and source-corecrypto build' >&2
++    exit 1
++  fi
++  python3 scripts/build-boot-progress.py
++fi
++python3 - "$BOOT_PROGRESS" <<'PY'
++from pathlib import Path
++import hashlib, sys
++mode = sys.argv[1]
++out = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
++stamp = out / '.boot-progress-mode'
++identity = mode + ':' + (hashlib.sha256(Path('build/boot-progress/libBootProgress.a').read_bytes()).hexdigest() if mode == '1' else 'disabled')
++if not stamp.exists() or stamp.read_text() != identity:
++    for directory, names in [('osfmk', ['arm_init','startup','video_console','serial_console','sleh']),
++                             ('bsd', ['bsd_init','kern_exec','kern_exit']), ('pexpert', ['pe_kprintf'])]:
++        for name in names:
++            (out / directory / 'DEVELOPMENT' / (name + '.o')).unlink(missing_ok=True)
++    (out / 'mach.development.bcm2837.unstripped.noctf').unlink(missing_ok=True)
++    out.mkdir(parents=True, exist_ok=True)
++    stamp.write_text(identity)
++PY
++if [ ! -d refer/libplatform/.git ]; then
++  git clone --depth 1 --branch "$LIBPLATFORM_TAG" https://github.com/apple-oss-distributions/libplatform.git refer/libplatform
++fi
++export KERNEL_SDKROOT=$ROOT/.cache/fakeroot
++mkdir -p "$KERNEL_SDKROOT/usr/local/include/kernel" "$ROOT/build/xnu/obj/EXPORT_HDRS/libsa"
++copy_tree() {
++  mkdir -p "$2"
++  cp -R "$1/." "$2/"
++}
++copy_tree refer/libplatform/include "$KERNEL_SDKROOT/usr/local/include"
++copy_tree refer/libplatform/private "$KERNEL_SDKROOT/usr/local/include"
++copy_tree refer/libplatform/private/platform "$KERNEL_SDKROOT/System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/platform"
++if [ ! -d refer/libdispatch/.git ]; then
++  git clone --depth 1 --branch "$LIBDISPATCH_TAG" https://github.com/apple-oss-distributions/libdispatch.git refer/libdispatch
++fi
++python3 - <<'PY'
++from pathlib import Path
++import subprocess
++output = Path('.cache/fakeroot/usr/local/include/os')
++output.mkdir(parents=True, exist_ok=True)
++for header in Path('refer/libdispatch/os').glob('*.h'):
++    result = subprocess.run(['unifdef', '-DKERNEL=1', '-DOS_FIREHOSE_SPI=1',
++                             '-DOS_VOUCHER_ACTIVITY_SPI_TYPES=1',
++                             '-UOS_VOUCHER_ACTIVITY_SPI', str(header)], capture_output=True)
++    if result.returncode not in (0, 1):
++        raise SystemExit(result.stderr.decode())
++    target = output / header.name
++    if not target.exists() or target.read_bytes() != result.stdout:
++        target.write_bytes(result.stdout)
++PY
++if [ ! -f "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers" ]; then
++  make -C .cache/xnu-work installhdrs SDKROOT=macosx ARCH_CONFIGS=ARM64 \
++    MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
++    RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
++    MAKEJOBS=-j"${JOBS:-4}" OBJROOT="$ROOT/build/xnu/obj" \
++    SYMROOT="$ROOT/build/xnu/sym" DSTROOT="$KERNEL_SDKROOT" \
++    ${XNU_HOST_MAKE_ARGS[@]+"${XNU_HOST_MAKE_ARGS[@]}"}
++  touch "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers"
++fi
++if [ ! -f "$KERNEL_SDKROOT/usr/local/lib/kernel/libfirehose_kernel.a" ]; then
++  bash scripts/build-firehose.sh
++fi
++if [ "$(uname -s)" = Linux ]; then
++  python3 scripts/linux/prepare-xnu.py libs
++fi
++# The baseline builds the kernel; `all` also checks the Apple kext export ABI.
++EXTRA_MAKE_ARGS=()
++ARM_DT_PLATFORM=${XNU_ARM_DT_PLATFORM:-0}
++if [ "$ARM_DT_PLATFORM" != 0 ] && [ "$ARM_DT_PLATFORM" != 1 ]; then
++  echo 'XNU_ARM_DT_PLATFORM must be 0 or 1' >&2
++  exit 1
++fi
++if [ "${XNU_ARMCPU:-0}" = 1 ] && { [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ] || \
++     { [ "${XNU_ARMVIRT_PLATFORM:-0}" != 1 ] && [ "$ARM_DT_PLATFORM" != 1 ]; }; }; then
++  echo 'ArmCpu bring-up requires the real source provider and a real platform driver' >&2
++  exit 1
++fi
++if [ "${XNU_SOURCE_PTHREAD:-0}" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++  echo 'The current pthread source-link recipe requires XNU_SOURCE_CORECRYPTO14=1' >&2
++  exit 1
++fi
++CRYPTO_BOOTSTRAP_MODE=${XNU_CRYPTO_BOOTSTRAP:-source}
++if [ "$CRYPTO_BOOTSTRAP_MODE" != source ] && [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ]; then
++  echo 'XNU_CRYPTO_BOOTSTRAP must be source or prelinked' >&2
++  exit 1
++fi
++CRYPTO_OBJECT_DIR=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT
++if [ -d "$CRYPTO_OBJECT_DIR" ]; then
++  if [ "$(cat "$CRYPTO_OBJECT_DIR/.crypto-bootstrap-mode" 2>/dev/null || echo source)" != "$CRYPTO_BOOTSTRAP_MODE" ]; then
++    rm -f "$CRYPTO_OBJECT_DIR/prng_random.o"
++  fi
++  printf '%s\n' "$CRYPTO_BOOTSTRAP_MODE" > "$CRYPTO_OBJECT_DIR/.crypto-bootstrap-mode"
++fi
++if [ "$CRYPTO_BOOTSTRAP_MODE" = prelinked ]; then
++  # The original component must initialize through real OSKext startup.
++  # Only this source-provider entry is omitted; no POST or missing-provider
++  # failure is suppressed, and no replacement crypto callbacks are supplied.
++  EXTRA_MAKE_ARGS+=("prng_random.o_CFLAGS_ADD=-UXNU_SOURCE_CORECRYPTO14")
++else
++  EXTRA_MAKE_ARGS+=("prng_random.o_CFLAGS_ADD=")
++fi
++if [ "${XNU_NATIVE_AES:-0}" = 1 ]; then
++  if [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++    echo 'NativeAES currently requires the qualified original AES/crypto prelink closure' >&2
++    exit 1
++  fi
++  PERSONALITY_CFLAGS=-DXNU_NATIVE_AES=1
++else
++  PERSONALITY_CFLAGS=
++fi
++if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
++  if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then
++    echo 'NativeVirtioBlock currently requires the qualified NativeAES/original-storage prelink baseline' >&2
++    exit 1
++  fi
++  PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_NATIVE_VIRTIO_BLOCK=1"
++fi
++NATIVE_RAM_BLOCK=${XNU_NATIVE_RAM_BLOCK:-0}
++if [ "$NATIVE_RAM_BLOCK" != 0 ] && [ "$NATIVE_RAM_BLOCK" != 1 ]; then
++  echo 'XNU_NATIVE_RAM_BLOCK must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$NATIVE_RAM_BLOCK" = 1 ]; then
++  if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then
++    echo 'NativeRamBlock requires the qualified original storage/AES prelink closure' >&2
++    exit 1
++  fi
++  PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_NATIVE_RAM_BLOCK=1"
++fi
++if [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
++  PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_NATIVE_UFS=1"
++fi
++NATIVE_VIRTIO_CONSOLE=${XNU_NATIVE_VIRTIO_CONSOLE:-0}
++if [ "$NATIVE_VIRTIO_CONSOLE" != 0 ] && [ "$NATIVE_VIRTIO_CONSOLE" != 1 ]; then
++  echo 'XNU_NATIVE_VIRTIO_CONSOLE must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$NATIVE_VIRTIO_CONSOLE" = 1 ]; then
++  PERSONALITY_CFLAGS="$PERSONALITY_CFLAGS -DXNU_NATIVE_VIRTIO_CONSOLE=1"
++fi
++EXTRA_MAKE_ARGS+=("KernelConfigTables.cpo_CFLAGS_ADD=$PERSONALITY_CFLAGS")
++TRUST_CACHE_MODE=${XNU_TRUST_CACHE_RUNTIME:-0}
++if [ "$TRUST_CACHE_MODE" != 0 ] && [ "$TRUST_CACHE_MODE" != 1 ]; then
++  echo 'XNU_TRUST_CACHE_RUNTIME must be 0 or 1' >&2
++  exit 1
++fi
++if [ -d "$CRYPTO_OBJECT_DIR" ]; then
++  if [ "$(cat "$CRYPTO_OBJECT_DIR/.trust-cache-mode" 2>/dev/null || echo 0)" != "$TRUST_CACHE_MODE" ]; then
++    rm -f "$CRYPTO_OBJECT_DIR/startup.o"
++  fi
++  printf '%s\n' "$TRUST_CACHE_MODE" > "$CRYPTO_OBJECT_DIR/.trust-cache-mode"
++fi
++EXTRA_MAKE_ARGS+=("startup.o_CFLAGS_ADD=-DXNU_NATIVE_TRUST_CACHE=$TRUST_CACHE_MODE")
++MOCKFS_MODE=${XNU_SOURCE_MOCKFS:-0}
++if [ "$MOCKFS_MODE" != 0 ] && [ "$MOCKFS_MODE" != 1 ]; then
++  echo 'XNU_SOURCE_MOCKFS must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$MOCKFS_MODE" = 1 ] && { [ "${XNU_ARMCPU:-0}" != 1 ] || [ "${XNU_SOURCE_PTHREAD:-0}" != 1 ]; }; then
++  echo 'The offline executable-root fixture requires the real CPU/pthread components' >&2
++  exit 1
++fi
++MOCKFS_OBJECT_DIR=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT
++if [ -d "$MOCKFS_OBJECT_DIR" ]; then
++  if [ "$(cat "$MOCKFS_OBJECT_DIR/.source-mockfs-mode" 2>/dev/null || echo 0)" != "$MOCKFS_MODE" ]; then
++    rm -f "$MOCKFS_OBJECT_DIR/vfs_conf.o"
++  fi
++  printf '%s\n' "$MOCKFS_MODE" > "$MOCKFS_OBJECT_DIR/.source-mockfs-mode"
++fi
++EXTRA_MAKE_ARGS+=("vfs_conf.o_CFLAGS_ADD=-DMOCKFS=$MOCKFS_MODE")
++CS_HASH_CACHE_MODE=${XNU_NATIVE_CS_HASH_CACHE:-0}
++if [ "$CS_HASH_CACHE_MODE" != 0 ] && [ "$CS_HASH_CACHE_MODE" != 1 ]; then
++  echo 'XNU_NATIVE_CS_HASH_CACHE must be 0 or 1' >&2
++  exit 1
++fi
++if [ -d "$MOCKFS_OBJECT_DIR" ]; then
++  if [ "$(cat "$MOCKFS_OBJECT_DIR/.native-cs-hash-cache-mode" 2>/dev/null || echo 0)" != "$CS_HASH_CACHE_MODE" ]; then
++    rm -f "$MOCKFS_OBJECT_DIR/ubc_subr.o"
++  fi
++  printf '%s\n' "$CS_HASH_CACHE_MODE" > "$MOCKFS_OBJECT_DIR/.native-cs-hash-cache-mode"
++fi
++EXTRA_MAKE_ARGS+=("ubc_subr.o_CFLAGS_ADD=-DXNU_NATIVE_CS_HASH_CACHE=$CS_HASH_CACHE_MODE")
++EXTRA_CFLAGS=${XNU_EXTRA_CFLAGS:--Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding}
++OWNER_ROOT_PROBE=${XNU_VERIFIED_ROOT_PROBE:-0}
++if [ "$OWNER_ROOT_PROBE" != 0 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then
++  echo 'XNU_VERIFIED_ROOT_PROBE must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_ROOT_PROBE" = 1 ] && { [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ] || [ "${XNU_CRYPTO_BOOTSTRAP:-source}" != prelinked ]; }; then
++  echo 'The owner crypto probe requires the qualified original prelinked crypto provider' >&2
++  exit 1
++fi
++OWNER_ROOT_AUDIT=${XNU_OWNER_ROOT_AUDIT:-0}
++if [ "$OWNER_ROOT_AUDIT" != 0 ] && [ "$OWNER_ROOT_AUDIT" != 1 ]; then
++  echo 'XNU_OWNER_ROOT_AUDIT must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then
++  echo 'The root-binding audit requires real owner-verified block crypto' >&2
++  exit 1
++fi
++OWNER_ROOT_TRUST=${XNU_OWNER_ROOT_TRUST:-0}
++if [ "$OWNER_ROOT_TRUST" != 0 ] && [ "$OWNER_ROOT_TRUST" != 1 ]; then
++  echo 'XNU_OWNER_ROOT_TRUST must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_ROOT_TRUST" = 1 ] && { [ "$OWNER_ROOT_AUDIT" != 1 ] || [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" != 1 ]; }; then
++  echo 'Owner root acceptance requires actual mounted-media binding and verified block storage' >&2
++  exit 1
++fi
++ADRENO_FIRMWARE_PROBE=${XNU_ADRENO_FIRMWARE_PROBE:-0}
++if [ "$ADRENO_FIRMWARE_PROBE" != 0 ] && [ "$ADRENO_FIRMWARE_PROBE" != 1 ]; then
++  echo 'XNU_ADRENO_FIRMWARE_PROBE must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$ADRENO_FIRMWARE_PROBE" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++  echo 'The offline Adreno planner probe requires the qualified crypto build' >&2
++  exit 1
++fi
++ADRENO_PM4_PROBE=${XNU_ADRENO_PM4_PROBE:-0}
++if [ "$ADRENO_PM4_PROBE" != 0 ] && [ "$ADRENO_PM4_PROBE" != 1 ]; then
++  echo 'XNU_ADRENO_PM4_PROBE must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$ADRENO_PM4_PROBE" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++  echo 'The offline PM4 fixture requires the qualified native kernel configuration' >&2
++  exit 1
++fi
++SMMU4K_PROBE=${XNU_SMMU4K_PROBE:-0}
++if [ "$SMMU4K_PROBE" != 0 ] && [ "$SMMU4K_PROBE" != 1 ]; then
++  echo 'XNU_SMMU4K_PROBE must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$SMMU4K_PROBE" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++  echo 'The offline native-table fixture requires the qualified kernel configuration' >&2
++  exit 1
++fi
++CONSTANT_UPLOADS_PROBE=${XNU_CONSTANT_UPLOADS_PROBE:-0}
++if [ "$CONSTANT_UPLOADS_PROBE" != 0 ] && [ "$CONSTANT_UPLOADS_PROBE" != 1 ]; then
++  echo 'XNU_CONSTANT_UPLOADS_PROBE must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$CONSTANT_UPLOADS_PROBE" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++  echo 'The offline constant upload fixture requires the qualified kernel configuration' >&2
++  exit 1
++fi
++NATIVE_OFFLINE_GPU=${XNU_NATIVE_OFFLINE_GPU:-0}
++if [ "$NATIVE_OFFLINE_GPU" != 0 ] && [ "$NATIVE_OFFLINE_GPU" != 1 ]; then
++  echo 'XNU_NATIVE_OFFLINE_GPU must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$NATIVE_OFFLINE_GPU" = 1 ] && [ "$NATIVE_VIRTIO_CONSOLE" != 1 ]; then
++  echo 'The private offline GPU broker requires the actual byte transport' >&2
++  exit 1
++fi
++SHENG_PMGR=${XNU_SHENG_PMGR:-0}
++if [ "$SHENG_PMGR" != 0 ] && [ "$SHENG_PMGR" != 1 ]; then
++  echo 'XNU_SHENG_PMGR must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$SHENG_PMGR" = 1 ] && [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++  echo 'The sheng PMGR instrument requires the original-component kernel configuration' >&2
++  exit 1
++fi
++SHENG_PMGR_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.sheng-pmgr-mode
++if [ "$(cat "$SHENG_PMGR_STAMP" 2>/dev/null || echo 0)" != "$SHENG_PMGR" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o"
++  printf '%s\n' "$SHENG_PMGR" > "$SHENG_PMGR_STAMP"
++fi
++EXTRA_MAKE_ARGS+=("bsd_init.o_CFLAGS_ADD=-DXNU_SHENG_PMGR=$SHENG_PMGR -DXNU_VERIFIED_ROOT_PROBE=$OWNER_ROOT_PROBE -DXNU_OWNER_ROOT_AUDIT=$OWNER_ROOT_AUDIT -DXNU_OWNER_ROOT_TRUST=$OWNER_ROOT_TRUST -DXNU_ADRENO_FIRMWARE_PROBE=$ADRENO_FIRMWARE_PROBE -DXNU_ADRENO_PM4_PROBE=$ADRENO_PM4_PROBE -DXNU_SMMU4K_PROBE=$SMMU4K_PROBE -DXNU_CONSTANT_UPLOADS_PROBE=$CONSTANT_UPLOADS_PROBE -DXNU_NATIVE_LEGACY_DISPLAY=${XNU_NATIVE_LEGACY_DISPLAY:-0} -DXNU_NATIVE_OFFLINE_GPU=$NATIVE_OFFLINE_GPU")
++NATIVE_MOBILE_DISPLAY=${XNU_NATIVE_MOBILE_DISPLAY:-0}
++if [ "$NATIVE_MOBILE_DISPLAY" != 0 ] && [ "$NATIVE_MOBILE_DISPLAY" != 1 ]; then
++  echo 'XNU_NATIVE_MOBILE_DISPLAY must be 0 or 1' >&2
++  exit 1
++fi
++NATIVE_LEGACY_DISPLAY=${XNU_NATIVE_LEGACY_DISPLAY:-0}
++if [ "$NATIVE_LEGACY_DISPLAY" != 0 ] && [ "$NATIVE_LEGACY_DISPLAY" != 1 ]; then
++  echo 'XNU_NATIVE_LEGACY_DISPLAY must be 0 or 1' >&2
++  exit 1
++fi
++EXTRA_MAKE_ARGS+=("IOUserClient.cpo_CFLAGS_ADD=-DXNU_NATIVE_MOBILE_DISPLAY=$NATIVE_MOBILE_DISPLAY -DXNU_NATIVE_LEGACY_DISPLAY=$NATIVE_LEGACY_DISPLAY")
++MOBILE_DISPLAY_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.native-mobile-display-mode
++if [ "$(cat "$MOBILE_DISPLAY_STAMP" 2>/dev/null || echo 0)" != "$NATIVE_MOBILE_DISPLAY:$NATIVE_LEGACY_DISPLAY" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOUserClient.cpo"
++  printf '%s\n' "$NATIVE_MOBILE_DISPLAY:$NATIVE_LEGACY_DISPLAY" > "$MOBILE_DISPLAY_STAMP"
++fi
++OWNER_ROOT_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-root-probe-mode
++if [ "$(cat "$OWNER_ROOT_STAMP" 2>/dev/null || echo 0:0:0:0:0:0)" != "$OWNER_ROOT_PROBE:$OWNER_ROOT_AUDIT:$OWNER_ROOT_TRUST:$ADRENO_FIRMWARE_PROBE:$ADRENO_PM4_PROBE:$SMMU4K_PROBE:$CONSTANT_UPLOADS_PROBE:$NATIVE_LEGACY_DISPLAY:$NATIVE_OFFLINE_GPU" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o"
++  printf '%s\n' "$OWNER_ROOT_PROBE:$OWNER_ROOT_AUDIT:$OWNER_ROOT_TRUST:$ADRENO_FIRMWARE_PROBE:$ADRENO_PM4_PROBE:$SMMU4K_PROBE:$CONSTANT_UPLOADS_PROBE:$NATIVE_LEGACY_DISPLAY:$NATIVE_OFFLINE_GPU" > "$OWNER_ROOT_STAMP"
++fi
++OWNER_CACHE_MOUNT=${XNU_OWNER_CACHE_MOUNT:-0}
++if [ "$OWNER_CACHE_MOUNT" != 0 ] && [ "$OWNER_CACHE_MOUNT" != 1 ]; then
++  echo 'XNU_OWNER_CACHE_MOUNT must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_CACHE_MOUNT" = 1 ] && [ "$OWNER_ROOT_TRUST" != 1 ]; then
++  echo 'The offline SystemOS mount requires real independent owner root enforcement' >&2
++  exit 1
++fi
++OWNER_CACHE_STARTUP=${XNU_OWNER_CACHE_STARTUP:-0}
++if [ "$OWNER_CACHE_STARTUP" != 0 ] && [ "$OWNER_CACHE_STARTUP" != 1 ]; then
++  echo 'XNU_OWNER_CACHE_STARTUP must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_CACHE_STARTUP" = 1 ] && [ "$OWNER_CACHE_MOUNT" != 1 ]; then
++  echo 'Owner dyld startup selection requires authenticated actual cache mounting' >&2
++  exit 1
++fi
++OWNER_BOOT_MANIFEST=${XNU_OWNER_BOOT_MANIFEST:-0}
++if [ "$OWNER_BOOT_MANIFEST" != 0 ] && [ "$OWNER_BOOT_MANIFEST" != 1 ]; then
++  echo 'XNU_OWNER_BOOT_MANIFEST must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_BOOT_MANIFEST" = 1 ] && [ "$OWNER_CACHE_STARTUP" != 1 ]; then
++  echo 'Owner boot metadata requires real authenticated owner root/cache startup' >&2
++  exit 1
++fi
++EXTRA_MAKE_ARGS+=("IOKitBSDInit.cpo_CFLAGS_ADD=-DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST")
++OWNER_MANIFEST_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-boot-manifest-mode
++if [ "$(cat "$OWNER_MANIFEST_STAMP" 2>/dev/null || echo 0)" != "$OWNER_BOOT_MANIFEST" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOKitBSDInit.cpo"
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
++  printf '%s\n' "$OWNER_BOOT_MANIFEST" > "$OWNER_MANIFEST_STAMP"
++fi
++OWNER_DATA_MOUNT=${XNU_OWNER_DATA_MOUNT:-0}
++if [ "$OWNER_DATA_MOUNT" != 0 ] && [ "$OWNER_DATA_MOUNT" != 1 ]; then
++  echo 'XNU_OWNER_DATA_MOUNT must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_DATA_MOUNT" = 1 ] && [ "$OWNER_BOOT_MANIFEST" != 1 ]; then
++  echo 'Scratch Data requires authenticated original OS/owner metadata startup' >&2
++  exit 1
++fi
++OWNER_DATA_HEADER=$ROOT/build/xnu/owner-data-volume.h
++python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" <<'PY_DATA_UUID'
++from pathlib import Path
++import sys
++import uuid
++path = Path(sys.argv[1])
++text = '/* Scratch Data IOKit selection disabled. */\n'
++if sys.argv[2:4] == ['1', '1']:
++    try:
++        value = str(uuid.UUID(sys.argv[4])).upper()
++    except ValueError:
++        raise SystemExit('Set XNU_OWNER_DATA_VOLUME_UUID to the actual observed scratch APFS volume UUID')
++    text = '#define XNU_OWNER_DATA_VOLUME_UUID "' + value + '"\n'
++# The SystemOS cryptex volume of this image; the sheng value stays the default of the patch.
++cache = '8846FE78-2910-4297-AF97-D59BB6F8FC16'
++if len(sys.argv) > 5 and sys.argv[5]:
++    try:
++        cache = str(uuid.UUID(sys.argv[5])).upper()
++    except ValueError:
++        raise SystemExit('Set XNU_OWNER_CACHE_VOLUME_UUID to the SystemOS volume UUID of the signed policy')
++text += '#define XNU_OWNER_CACHE_VOLUME_UUID "' + cache + '"\n'
++path.parent.mkdir(parents=True, exist_ok=True)
++if not path.exists() or path.read_text() != text:
++    path.write_text(text)
++PY_DATA_UUID
++OWNER_DATA_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-data-mount-mode
++if [ "$(cat "$OWNER_DATA_STAMP" 2>/dev/null || echo 0)" != "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:${XNU_OWNER_CACHE_VOLUME_UUID:-}" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
++  printf '%s\n' "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:${XNU_OWNER_CACHE_VOLUME_UUID:-}" > "$OWNER_DATA_STAMP"
++fi
++OWNER_CRYPTEX_FILES=${XNU_OWNER_CRYPTEX_FILES:-0}
++if [ "$OWNER_CRYPTEX_FILES" != 0 ] && [ "$OWNER_CRYPTEX_FILES" != 1 ]; then
++  echo 'XNU_OWNER_CRYPTEX_FILES must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_CRYPTEX_FILES" = 1 ] && [ "$OWNER_CACHE_STARTUP" != 1 ]; then
++  echo 'Owner Cryptex file lookup requires authenticated mounted SystemOS startup' >&2
++  exit 1
++fi
++OWNER_CRYPTEX_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cryptex-files-mode
++if [ "$(cat "$OWNER_CRYPTEX_STAMP" 2>/dev/null || echo 0)" != "$OWNER_CRYPTEX_FILES" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
++  printf '%s\n' "$OWNER_CRYPTEX_FILES" > "$OWNER_CRYPTEX_STAMP"
++fi
++OWNER_UNION_SYSTEMOS=${XNU_OWNER_UNION_SYSTEMOS:-0}
++if [ "$OWNER_UNION_SYSTEMOS" != 0 ] && [ "$OWNER_UNION_SYSTEMOS" != 1 ]; then
++  echo 'XNU_OWNER_UNION_SYSTEMOS must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$OWNER_UNION_SYSTEMOS" = 1 ] && { [ "$OWNER_CACHE_STARTUP" != 1 ] || [ "$OWNER_CRYPTEX_FILES" != 0 ]; }; then
++  echo 'Owner union composition requires authenticated startup and no fallback-path experiment' >&2
++  exit 1
++fi
++OWNER_UNION_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-union-systemos-mode
++if [ "$(cat "$OWNER_UNION_STAMP" 2>/dev/null || echo 0)" != "$OWNER_UNION_SYSTEMOS" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
++  printf '%s\n' "$OWNER_UNION_SYSTEMOS" > "$OWNER_UNION_STAMP"
++fi
++NATIVE_AIR_INIT=${XNU_NATIVE_AIR_INIT:-0}
++if [ "$NATIVE_AIR_INIT" != 0 ] && [ "$NATIVE_AIR_INIT" != 1 ]; then
++  echo 'XNU_NATIVE_AIR_INIT must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$NATIVE_AIR_INIT" = 1 ] && { [ "$OWNER_CACHE_MOUNT" != 1 ] || [ "$OWNER_DATA_MOUNT" != 1 ] || [ "$OWNER_ROOT_TRUST" != 1 ]; }; then
++  echo 'Offline AIR init requires the actual owner root, SystemOS and scratch Data path' >&2
++  exit 1
++fi
++NATIVE_AIR_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.native-air-init-mode
++if [ "$(cat "$NATIVE_AIR_STAMP" 2>/dev/null || echo 0)" != "$NATIVE_AIR_INIT" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
++  printf '%s\n' "$NATIVE_AIR_INIT" > "$NATIVE_AIR_STAMP"
++fi
++EXTRA_MAKE_ARGS+=("kern_exec.o_CFLAGS_ADD=-DXNU_NATIVE_AIR_INIT=$NATIVE_AIR_INIT -DXNU_OWNER_CACHE_MOUNT=$OWNER_CACHE_MOUNT -DXNU_OWNER_CACHE_STARTUP=$OWNER_CACHE_STARTUP -DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_OWNER_DATA_MOUNT=$OWNER_DATA_MOUNT -DXNU_NATIVE_RAM_BLOCK=$NATIVE_RAM_BLOCK -DXNU_OWNER_CRYPTEX_FILES=$OWNER_CRYPTEX_FILES -DXNU_OWNER_UNION_SYSTEMOS=$OWNER_UNION_SYSTEMOS -include $OWNER_DATA_HEADER")
++OWNER_CACHE_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cache-mount-mode
++if [ "$(cat "$OWNER_CACHE_STAMP" 2>/dev/null || echo 0:0)" != "$OWNER_CACHE_MOUNT:$OWNER_CACHE_STARTUP" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
++  printf '%s\n' "$OWNER_CACHE_MOUNT:$OWNER_CACHE_STARTUP" > "$OWNER_CACHE_STAMP"
++fi
++OWNER_CACHE_CARRIER=${XNU_OWNER_CACHE_CARRIER:-0}
++OWNER_CACHE_CARRIER_WRONG_UUID=${XNU_OWNER_CACHE_CARRIER_WRONG_UUID:-0}
++if { [ "$OWNER_CACHE_CARRIER" != 0 ] && [ "$OWNER_CACHE_CARRIER" != 1 ]; } ||
++   { [ "$OWNER_CACHE_CARRIER_WRONG_UUID" != 0 ] && [ "$OWNER_CACHE_CARRIER_WRONG_UUID" != 1 ]; }; then
++  echo 'Owner cache carrier selectors must be 0 or 1' >&2
++  exit 1
++fi
++if { [ "$OWNER_CACHE_CARRIER" = 1 ] && [ "$OWNER_CACHE_STARTUP" != 1 ]; } ||
++   { [ "$OWNER_CACHE_CARRIER_WRONG_UUID" = 1 ] && [ "$OWNER_CACHE_CARRIER" != 1 ]; }; then
++  echo 'Owner carrier policy requires authenticated owner startup; wrong UUID is an isolated negative control' >&2
++  exit 1
++fi
++EXTRA_MAKE_ARGS+=("vm_unix.o_CFLAGS_ADD=-DXNU_OWNER_CACHE_CARRIER=$OWNER_CACHE_CARRIER -DXNU_OWNER_CACHE_CARRIER_WRONG_UUID=$OWNER_CACHE_CARRIER_WRONG_UUID")
++OWNER_CARRIER_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cache-carrier-mode
++if [ "$(cat "$OWNER_CARRIER_STAMP" 2>/dev/null || echo 0:0)" != "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/vm_unix.o"
++  printf '%s\n' "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID" > "$OWNER_CARRIER_STAMP"
++fi
++DT_PANIC_REGION=${XNU_DT_PANIC_REGION:-0}
++if [ "$DT_PANIC_REGION" != 0 ] && [ "$DT_PANIC_REGION" != 1 ]; then
++  echo 'XNU_DT_PANIC_REGION must be 0 or 1' >&2
++  exit 1
++fi
++EXTRA_MAKE_ARGS+=("pe_init.o_CFLAGS_ADD=-DXNU_DT_PANIC_REGION=$DT_PANIC_REGION")
++DT_PANIC_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.dt-panic-region-mode
++if [ "$(cat "$DT_PANIC_STAMP" 2>/dev/null || echo 0)" != "$DT_PANIC_REGION" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/pexpert/DEVELOPMENT/pe_init.o"
++  printf '%s\n' "$DT_PANIC_REGION" > "$DT_PANIC_STAMP"
++fi
++ZONE_PGZ_PROBE=${XNU_ZONE_PGZ_ALIGNMENT_PROBE:-0}
++if [ "$ZONE_PGZ_PROBE" != 0 ] && [ "$ZONE_PGZ_PROBE" != 1 ]; then
++  echo 'XNU_ZONE_PGZ_ALIGNMENT_PROBE must be 0 or 1' >&2
++  exit 1
++fi
++EXTRA_MAKE_ARGS+=("zalloc.o_CFLAGS_ADD=-DXNU_ZONE_PGZ_ALIGNMENT_PROBE=$ZONE_PGZ_PROBE")
++ZONE_PGZ_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.zone-pgz-probe-mode
++if [ "$(cat "$ZONE_PGZ_STAMP" 2>/dev/null || echo 0)" != "$ZONE_PGZ_PROBE" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/zalloc.o"
++  printf '%s\n' "$ZONE_PGZ_PROBE" > "$ZONE_PGZ_STAMP"
++fi
++NATIVE_ARCH_TIMER=${XNU_NATIVE_ARCH_TIMER:-${XNU_ARMCPU:-0}}
++if [ "$NATIVE_ARCH_TIMER" != 0 ] && [ "$NATIVE_ARCH_TIMER" != 1 ]; then
++  echo 'XNU_NATIVE_ARCH_TIMER must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$NATIVE_ARCH_TIMER" = 1 ] && [ "${XNU_ARMCPU:-0}" != 1 ]; then
++  echo 'Architectural timer entry requires the actual ArmCpu interrupt provider' >&2
++  exit 1
++fi
++EXTRA_MAKE_ARGS+=("start.o_SFLAGS_ADD=-DXNU_NATIVE_ARCH_TIMER=$NATIVE_ARCH_TIMER")
++NATIVE_TIMER_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.native-arch-timer-mode
++if [ "$(cat "$NATIVE_TIMER_STAMP" 2>/dev/null || echo 0)" != "$NATIVE_ARCH_TIMER" ]; then
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/start.o"
++  printf '%s\n' "$NATIVE_ARCH_TIMER" > "$NATIVE_TIMER_STAMP"
++fi
++NATIVE_PAN=${XNU_NATIVE_PAN:-0}
++if [ "$NATIVE_PAN" != 0 ] && [ "$NATIVE_PAN" != 1 ]; then
++  echo 'XNU_NATIVE_PAN must be 0 or 1' >&2
++  exit 1
++fi
++EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_NATIVE_PAN=$NATIVE_PAN"
++if [ "$NATIVE_PAN" = 1 ]; then
++  EXTRA_MAKE_ARGS+=("copyio.o_CFLAGS_ADD=-march=armv8.1-a")
++  EXTRA_MAKE_ARGS+=("pcb.o_CFLAGS_ADD=-march=armv8.1-a")
++  EXTRA_MAKE_ARGS+=("platform_tests.o_CFLAGS_ADD=-march=armv8.1-a")
++else
++  EXTRA_MAKE_ARGS+=("copyio.o_CFLAGS_ADD=")
++  EXTRA_MAKE_ARGS+=("pcb.o_CFLAGS_ADD=")
++  EXTRA_MAKE_ARGS+=("platform_tests.o_CFLAGS_ADD=")
++fi
++if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ]; then
++  EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_SOURCE_CORECRYPTO14=1"
++fi
++if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
++  CRYPTO_ARCHIVE=$ROOT/build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a
++  test -f "$CRYPTO_ARCHIVE"
++  KERNEL_EXTRA_ARCHIVES="-L$KERNEL_SDKROOT/usr/local/lib/kernel -lfirehose_kernel $CRYPTO_ARCHIVE"
++  KERNEL_ARCHIVE_DEPENDENCIES=$CRYPTO_ARCHIVE
++  if [ "$ADRENO_FIRMWARE_PROBE" = 1 ]; then
++    ADRENO_PROBE_ARCHIVE=$ROOT/build/adreno-firmware-probe/libAdrenoFirmwareProbe.a
++    test -f "$ADRENO_PROBE_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ADRENO_PROBE_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO_PROBE_ARCHIVE"
++  fi
++  if [ "$ADRENO_PM4_PROBE" = 1 ]; then
++    PM4_PROBE_ARCHIVE=$ROOT/build/adreno-pm4-probe/libAdrenoPM4Probe.a
++    test -f "$PM4_PROBE_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$PM4_PROBE_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $PM4_PROBE_ARCHIVE"
++  fi
++  if [ "$SMMU4K_PROBE" = 1 ]; then
++    SMMU4K_PROBE_ARCHIVE=$ROOT/build/smmu4k-probe/libArmSmmu4KProbe.a
++    test -f "$SMMU4K_PROBE_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$SMMU4K_PROBE_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $SMMU4K_PROBE_ARCHIVE"
++  fi
++  if [ "$CONSTANT_UPLOADS_PROBE" = 1 ]; then
++    CONSTANT_UPLOADS_ARCHIVE=$ROOT/build/constant-uploads-probe/libConstantUploadsProbe.a
++    test -f "$CONSTANT_UPLOADS_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$CONSTANT_UPLOADS_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $CONSTANT_UPLOADS_ARCHIVE"
++  fi
++  if [ "${XNU_ARMVIRT_PLATFORM:-0}" = 1 ]; then
++    ARMVIRT_ARCHIVE=$ROOT/build/armvirt-platform/libArmVirtPlatform.a
++    test -f "$ARMVIRT_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ARMVIRT_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ARMVIRT_ARCHIVE"
++  fi
++  if [ "$ARM_DT_PLATFORM" = 1 ]; then
++    ARM_DT_ARCHIVE=$ROOT/build/armdt-platform/libArmDTPlatform.a
++    test -f "$ARM_DT_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ARM_DT_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ARM_DT_ARCHIVE"
++  fi
++  if [ "${XNU_ARMCPU:-0}" = 1 ]; then
++    ARMCPU_ARCHIVE=$ROOT/build/armcpu/libArmCpu.a
++    test -f "$ARMCPU_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ARMCPU_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ARMCPU_ARCHIVE"
++  fi
++  if [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
++    UFS_ARCHIVE=${XNU_NATIVE_UFS_ARCHIVE:-$ROOT/build/native-ufs/libNativeUfs.a}
++    test -f "$UFS_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$UFS_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $UFS_ARCHIVE"
++  fi
++  if [ "${XNU_NATIVE_ADRENO:-0}" = 1 ]; then
++    # NativeAdreno plus its kits (scripts/build-native-adreno-kits.py). No personality is installed: the
++    # board probe calls NativeAdrenoGmuContextBringup directly once it has powered the GPU CX domain.
++    ADRENO_ARCHIVE=$ROOT/build/adreno740/libAdreno740.a
++    test -f "$ADRENO_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ADRENO_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO_ARCHIVE"
++  fi
++  if [ "$NATIVE_MOBILE_DISPLAY" = 1 ]; then
++    MOBILE_DISPLAY_ARCHIVE=$ROOT/build/gop-framebuffer/libGopFramebuffer.late.a
++    test -f "$MOBILE_DISPLAY_ARCHIVE"
++    python3 - "$MOBILE_DISPLAY_ARCHIVE" <<'PY_MOBILE_DISPLAY'
++import hashlib, json, sys
++from pathlib import Path
++archive = Path(sys.argv[1])
++report = json.loads(archive.with_name('build-report.json').read_text())
++if hashlib.sha256(archive.read_bytes()).hexdigest() != report['archive_sha256']:
++    raise SystemExit('Rebuild and qualify the exact own display archive before linking')
++PY_MOBILE_DISPLAY
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$MOBILE_DISPLAY_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $MOBILE_DISPLAY_ARCHIVE"
++  fi
++  if [ "$NATIVE_LEGACY_DISPLAY" = 1 ]; then
++    LEGACY_DISPLAY_ARCHIVE=$ROOT/build/native-legacy-display/libNativeLegacyDisplay.late.a
++    test -f "$LEGACY_DISPLAY_ARCHIVE"
++    python3 - "$LEGACY_DISPLAY_ARCHIVE" "$ROOT" <<'PY_LEGACY_DISPLAY'
++import hashlib, json, sys
++from pathlib import Path
++archive=Path(sys.argv[1]);root=Path(sys.argv[2]);report=json.loads(archive.with_name('build-report.json').read_text())
++if hashlib.sha256(archive.read_bytes()).hexdigest()!=report['archive_sha256']:
++    raise SystemExit('Rebuild and qualify the exact owned Legacy archive before linking')
++for name,digest in report['source_sha256'].items():
++    if hashlib.sha256((root/name).read_bytes()).hexdigest()!=digest:
++        raise SystemExit('Rebuild the owned Legacy archive after changing '+name)
++PY_LEGACY_DISPLAY
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$LEGACY_DISPLAY_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $LEGACY_DISPLAY_ARCHIVE"
++  fi
++  if [ "${XNU_NATIVE_AES:-0}" = 1 ]; then
++    AES_ARCHIVE=${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/software-aes/libSoftwareAES.a}
++    test -f "$AES_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$AES_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $AES_ARCHIVE"
++  fi
++  if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
++    VIRTIO_ARCHIVE=${XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE:-$ROOT/build/virtio-mmio-block/libVirtioMmioBlock.a}
++    test -f "$VIRTIO_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$VIRTIO_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $VIRTIO_ARCHIVE"
++  fi
++  if [ "$NATIVE_OFFLINE_GPU" = 1 ]; then
++    GPU_BROKER_ARCHIVE=$ROOT/build/native-offline-gpu/libNativeOfflineGPU.late.a
++    test -f "$GPU_BROKER_ARCHIVE"
++    python3 - "$GPU_BROKER_ARCHIVE" "$ROOT" <<'PY_GPU_BROKER'
++import hashlib,json,sys
++from pathlib import Path
++archive=Path(sys.argv[1]);root=Path(sys.argv[2]);report=json.loads(archive.with_name('build-report.json').read_text())
++if hashlib.sha256(archive.read_bytes()).hexdigest()!=report['archive_sha256']:
++    raise SystemExit('Rebuild the exact private GPU broker archive')
++for name,digest in report['source_sha256'].items():
++    if hashlib.sha256((root/name).read_bytes()).hexdigest()!=digest:
++        raise SystemExit('Rebuild the GPU broker after changing '+name)
++if hashlib.sha256((root/'build/virtio-mmio-console/libVirtioMmioConsole.a').read_bytes()).hexdigest()!=report['console_archive_sha256']:
++    raise SystemExit('Rebuild the GPU broker against the actual byte-transport archive')
++PY_GPU_BROKER
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$GPU_BROKER_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $GPU_BROKER_ARCHIVE"
++  fi
++  if [ "$NATIVE_VIRTIO_CONSOLE" = 1 ]; then
++    CONSOLE_ARCHIVE=$ROOT/build/virtio-mmio-console/libVirtioMmioConsole.a
++    test -f "$CONSOLE_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$CONSOLE_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $CONSOLE_ARCHIVE"
++  fi
++  if [ "$NATIVE_RAM_BLOCK" = 1 ]; then
++    RAM_BLOCK_ARCHIVE=$ROOT/build/native-ram-block/libNativeRamBlock.a
++    test -f "$RAM_BLOCK_ARCHIVE"
++    if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
++      # Both transports import the same original class. Keep one exact alias
++      # definition; link the real RAM transport object, not duplicate aliases.
++      python3 - "$VIRTIO_ARCHIVE" "$RAM_BLOCK_ARCHIVE" <<'PY_BINDINGS'
++import json
++from pathlib import Path
++import sys
++import hashlib
++records = [json.loads(Path(p).with_name('bindings.json').read_text()) for p in sys.argv[1:]]
++for archive, record in zip(sys.argv[1:], records):
++    path = Path(archive)
++    obj = path.with_name(path.stem.removeprefix('lib') + '.o')
++    if hashlib.sha256(obj.read_bytes()).hexdigest() != record['compiled_object_sha256']:
++        raise SystemExit('Re-audit the actual compiled storage object before linking')
++first, second = [record['bindings'] for record in records]
++if any(first.get(name) != value for name, value in second.items()):
++    raise SystemExit('RAM transport imports must match the already linked original storage bindings')
++PY_BINDINGS
++      RAM_BLOCK_OBJECT=$ROOT/build/native-ram-block/NativeRamBlock.o
++      test -f "$RAM_BLOCK_OBJECT"
++      KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES $RAM_BLOCK_OBJECT"
++    else
++      KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$RAM_BLOCK_ARCHIVE"
++    fi
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $RAM_BLOCK_ARCHIVE"
++  fi
++  if [ "${XNU_SOURCE_PTHREAD:-0}" = 1 ]; then
++    PTHREAD_ARCHIVE=$ROOT/build/libpthread-kernel/libpthread_kernel.a
++    PTHREAD_BOOTSTRAP=$ROOT/build/libpthread-kernel/source_pthread_bootstrap.o
++    test -f "$PTHREAD_ARCHIVE"
++    test -f "$PTHREAD_BOOTSTRAP"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$PTHREAD_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $PTHREAD_ARCHIVE"
++  fi
++  if [ "$OWNER_ROOT_PROBE" = 1 ]; then
++    VERIFIED_ROOT_ARCHIVE=${XNU_VERIFIED_ROOT_ARCHIVE:-$ROOT/build/verified-root-xnu/libVerifiedRootProbe.a}
++    test -f "$VERIFIED_ROOT_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$VERIFIED_ROOT_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $VERIFIED_ROOT_ARCHIVE"
++  fi
++  if [ "$MOCKFS_MODE" = 1 ]; then
++    MOCKFS_ARCHIVE=$ROOT/build/mockfs-fixture/libmockfs_fixture.a
++    test -f "$MOCKFS_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$MOCKFS_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $MOCKFS_ARCHIVE"
++  fi
++  if [ "$SHENG_PMGR" = 1 ]; then
++    PMGR_ARCHIVE=$ROOT/build/sheng-platform-power/libShengPlatformPower.a
++    test -f "$PMGR_ARCHIVE"
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$PMGR_ARCHIVE"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $PMGR_ARCHIVE"
++  fi
++  # Optional extra link inputs (e.g. a stub for an unselected offline probe hook).
++  if [ "$BOOT_PROGRESS" = 1 ]; then
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/boot-progress/libBootProgress.a"
++    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/boot-progress/libBootProgress.a"
++  fi
++  KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES ${XNU_EXTRA_LD_ARCHIVES:-}"
++  EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=$KERNEL_EXTRA_ARCHIVES")
++  EXTRA_MAKE_ARGS+=("XNU_EXTERNAL_KERNEL_ARCHIVES=$KERNEL_ARCHIVE_DEPENDENCIES")
++fi
++python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/software-aes/libSoftwareAES.a}" \
++  "${XNU_NATIVE_VIRTIO_BLOCK:-0}" "${XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE:-$ROOT/build/virtio-mmio-block/libVirtioMmioBlock.a}" \
++  "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:-$ROOT/build/verified-root-xnu/libVerifiedRootProbe.a}" \
++  "$NATIVE_RAM_BLOCK" "$ROOT/build/native-ram-block/libNativeRamBlock.a" \
++  "$ADRENO_FIRMWARE_PROBE" "$ROOT/build/adreno-firmware-probe/libAdrenoFirmwareProbe.a" \
++  "$ADRENO_PM4_PROBE" "$ROOT/build/adreno-pm4-probe/libAdrenoPM4Probe.a" \
++  "$SMMU4K_PROBE" "$ROOT/build/smmu4k-probe/libArmSmmu4KProbe.a" \
++  "$CONSTANT_UPLOADS_PROBE" "$ROOT/build/constant-uploads-probe/libConstantUploadsProbe.a" \
++  "$NATIVE_VIRTIO_CONSOLE" "$ROOT/build/virtio-mmio-console/libVirtioMmioConsole.a" \
++  "$NATIVE_OFFLINE_GPU" "$ROOT/build/native-offline-gpu/libNativeOfflineGPU.late.a" \
++  "$SHENG_PMGR" "$ROOT/build/sheng-platform-power/libShengPlatformPower.a" \
++  "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/adreno740/libAdreno740.a" <<'PY'
++import hashlib
++from pathlib import Path
++import sys
++directory = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
++stamp = directory / '.native-aes-link-input'
++
++
++def state(mode, archive):
++    if mode != '1':
++        return 'disabled'
++    # The bootstrap pass of a new tree links before the archive builders have run.
++    path = Path(archive)
++    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else 'missing'
++
++
++identity = '|'.join(mode + ':' + state(mode, archive) for mode, archive in zip(sys.argv[1::2], sys.argv[2::2]))
++if not stamp.exists() or stamp.read_text() != identity:
++    # Make does not track selection of an older alternative external archive.
++    # Rebuild the conditional personality and relink when this input changes.
++    for relative in ('mach.development.bcm2837.unstripped.noctf',
++                     'iokit/DEVELOPMENT/KernelConfigTables.cpo'):
++        (directory / relative).unlink(missing_ok=True)
++    directory.mkdir(parents=True, exist_ok=True)
++    stamp.write_text(identity)
++PY
++EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS"
++make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
++  MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
++  ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG="${UNIXNU_XNU_ARCH:-arm64}" LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
++  ARM64_LINK_ADDR=0xfffffff007004000 ARM64_PLKSEG_ADDR=0xfffffff004004000 \
++  DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=17.0 -DXNU_TARGET_OS_IOS" \
++  DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,17.0" \
++  RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
++  BUILD_LTO=0 BOUND_CHECKS=0 BUILD_WERROR="${XNU_BUILD_WERROR:-0}" MAKEJOBS=-j"${JOBS:-4}" \
++  CFLAGS_EXTRA="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" ${XNU_HOST_MAKE_ARGS[@]+"${XNU_HOST_MAKE_ARGS[@]}"} \
++  OBJROOT="$ROOT/build/xnu/ios-obj" SYMROOT="$ROOT/build/xnu/ios-sym" DSTROOT="$ROOT/build/xnu/ios-dst"
++if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$CRYPTO_BOOTSTRAP_MODE" = source ]; then
++  python3 scripts/seal-source-crypto-kernel.py \
++    build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf
++fi
+diff --git a/ios17/scripts/build-darwinboot-fv.sh b/ios17/scripts/build-darwinboot-fv.sh
+new file mode 100644
+index 0000000..52cc21a
+--- /dev/null
++++ b/ios17/scripts/build-darwinboot-fv.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# Replace the firmware's DarwinBoot (arm64 MH_EXECUTE only) in the t32 UEFI with UniXNU drivers/DarwinBoot
++# 3c75734 (arm64e + MH_FILESET), unchanged and with its original FILE_GUID. Firmware-volume images are
++# trusted by the secure-boot image verification, which refuses a loose driver from the payload.
++set -euo pipefail
++BASE=/home/xiaomi/sadnut-fuxi-local-20261103
++W=$BASE/darwinboot-v2-fv
++P=$BASE/pack-work-ios17-kernel
++EDK2=/home/xiaomi/up/UniXNU/out/feeds/mu_basecore-89034cbb
++rm -rf "$W"; mkdir -p "$W"
++cp -r "$BASE/UniXNU/drivers/DarwinBoot" "$W/DarwinBoot"; rm -rf "$W/DarwinBoot/.git"
++sed -i '/Test\/Validation.inf/d' "$W/DarwinBoot/DarwinBootPkg/DarwinBoot.dsc"
++sed -i "s#OUTPUT_DIRECTORY = build/DarwinBoot#OUTPUT_DIRECTORY = $W/Build#" "$W/DarwinBoot/DarwinBootPkg/DarwinBoot.dsc"
++export WORKSPACE=$W PACKAGES_PATH=$W/DarwinBoot:$BASE/UniXNU/package:$EDK2 EDK_TOOLS_PATH=$EDK2/BaseTools
++export CONF_PATH=$W/Conf CLANG_BIN=/usr/bin/ PYTHON_COMMAND=python3
++mkdir -p "$CONF_PATH"; cp /home/xiaomi/up/UniXNU/out/fuxi/edk2-conf/*.txt "$CONF_PATH/"
++export PATH=$EDK_TOOLS_PATH/BinWrappers/PosixLike:$EDK_TOOLS_PATH/Source/C/bin:$PATH
++export PYTHONPATH=$EDK_TOOLS_PATH/Source/Python
++cd "$W"
++build -p DarwinBootPkg/DarwinBoot.dsc -a AARCH64 -b RELEASE -t CLANGPDB -n 6 > "$W/build.log" 2>&1 || { tail -30 "$W/build.log"; exit 1; }
++EFI=$(find "$W/Build" -path '*AARCH64*' -name DarwinBoot.efi | head -1)
++echo "efi $EFI $(stat -c %s "$EFI")"
++GenSec -s EFI_SECTION_PE32 -o "$W/pe32.sec" "$EFI"
++GenSec -s EFI_SECTION_USER_INTERFACE -n DarwinBoot -o "$W/ui.sec"
++GenFfs -t EFI_FV_FILETYPE_DRIVER -g 1B64AF87-8415-4B57-9B16-680D70913B9F -o "$W/DarwinBoot.ffs" -i "$W/pe32.sec" -i "$W/ui.sec"
++ls -la "$W/DarwinBoot.ffs" "$P/old-db/DarwinBoot.ffs"
++cd "$P"
++python3 "$EDK2/BaseTools/Source/Python/FMMT/FMMT.py" -r t32.fd FV1 DarwinBoot "$W/DarwinBoot.ffs" t32-darwinboot-v2.fd 2>&1 | tail -5
++ls -la t32-darwinboot-v2.fd
++python3 "$EDK2/BaseTools/Source/Python/FMMT/FMMT.py" -v t32-darwinboot-v2.fd 2>&1 | grep -E 'DarwinBoot|Free Volume|Total Volume' | head
++rm -rf new-db && mkdir new-db
++python3 "$EDK2/BaseTools/Source/Python/FMMT/FMMT.py" -e t32-darwinboot-v2.fd DarwinBoot new-db/DarwinBoot.ffs > /dev/null 2>&1
++cmp new-db/DarwinBoot.ffs "$W/DarwinBoot.ffs" && echo "REPLACED FFS VERIFIED"
+diff --git a/ios17/scripts/build-ios17-iig-chain.sh b/ios17/scripts/build-ios17-iig-chain.sh
+new file mode 100644
+index 0000000..8b01633
+--- /dev/null
++++ b/ios17/scripts/build-ios17-iig-chain.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++# Kernel + prelink (incremental, reuses the LTO reference) and pack with the user's pack-ios17-iig-pac.py
++# (boot-args use_contiguous_hint=0 fuxi-panic-fastboot=30, output sadnut-fuxi-ios17-arm64e-iig-pac-20261105).
++cd /home/xiaomi/sadnut-fuxi-local-20261103
++{
++  echo "=== $(date -Is) kernel build (LTO reference reused)"
++  bash ./build-ios17-kernel.sh; rc=$?; echo "BUILD_RC=$rc"
++  [ "$rc" = 0 ] && { python3 pack-ios17-iig-pac.py | tail -n 25; echo "PACK_RC=$?"; }
++  echo "=== $(date -Is) CHAIN_DONE"
++} > /tmp/ios17-build.log 2>&1
+diff --git a/ios17/scripts/build-ios17-kernel.sh b/ios17/scripts/build-ios17-kernel.sh
+new file mode 100644
+index 0000000..2f43972
+--- /dev/null
++++ b/ios17/scripts/build-ios17-kernel.sh
+@@ -0,0 +1,29 @@
++#!/usr/bin/env bash
++# Checkpoint 1 of the iOS 17 move: arm64e xnu-10063 kernel + fileset prelink against iPhone15,2 21H16.
++# Isolated from the iPadOS build: own out root (UniXNU/out-ios17) and device overlay (device-ios17).
++set -euo pipefail
++BASE=/home/xiaomi/sadnut-fuxi-local-20261103
++cd "$BASE/UniXNU"
++exec 9>"$BASE/ios17-build.lock"
++flock -n 9 || exit 75
++rm -f -- "$BASE/ios17-build.exit" "$BASE/ios17-build.finished"
++exec > >(tee -a "$BASE/ios17-build.log") 2>&1
++export UNIXNU_TOOLCHAIN=/home/xiaomi/unixnu-linux
++export PATH="$BASE/bin:$PATH"
++export PYTHONUNBUFFERED=1
++# 8 parallel jobs (user preference); the xnu make in fuxi-kernel-baseline.sh reads JOBS. Builds are incremental:
++# nothing here removes OBJROOT.
++export JOBS="${JOBS:-8}"
++export UNIXNU_OUT="$BASE/UniXNU/out-ios17"
++export UNIXNU_XNU_ARCH=arm64e
++export UNIXNU_FILESET_KERNEL_FIRST=1
++# The fileset prelink reads the native chained fixups (ld64 -kernel), not __thread_starts.
++export XNU_KERNEL_CHAINED_FIXUPS=1
++export UNIXNU_KERNELCACHE="$UNIXNU_OUT/ipsw/21H16/kernelcache.decompressed"
++trap 'result=$?; printf "%s\n" "$result" > "$BASE/ios17-build.exit"; date -Is > "$BASE/ios17-build.finished"' EXIT
++date -Is > "$BASE/ios17-build.started"
++mkdir -p "$UNIXNU_OUT/ipsw/21H16"
++[ -e "$UNIXNU_OUT/feeds" ] || ln -s "$BASE/UniXNU/out/feeds" "$UNIXNU_OUT/feeds"
++[ -f "$UNIXNU_OUT/ipsw/21H16/kernelcache.decompressed" ] || cp /home/xiaomi/ios17-21H16/kernelcache.decompressed "$UNIXNU_OUT/ipsw/21H16/"
++./unixnu defconfig fuxi_ios17_kernel_defconfig -D ../device-ios17
++./unixnu build kernel -D ../device-ios17 -j "$JOBS"
+diff --git a/ios17/scripts/build-ios17-probe-chain.sh b/ios17/scripts/build-ios17-probe-chain.sh
+new file mode 100644
+index 0000000..ada86ab
+--- /dev/null
++++ b/ios17/scripts/build-ios17-probe-chain.sh
+@@ -0,0 +1,19 @@
++#!/usr/bin/env bash
++# LTO comparison kernel (documented matching input), then the arm64e kernel + prelink with the unmapped-call probe.
++cd /home/xiaomi/sadnut-fuxi-local-20261103
++{
++  echo "=== $(date -Is) LTO reference build"
++  # RELEASE-LTO comparison kernel, linked with the LTO-capable ld64 from build-lto-toolchain.sh. Its cache key
++  # hashes the whole xnu source, so every xnu patch would force a full LTO rebuild; a patch that does not change
++  # what the matcher compares (e.g. one call site in OSKext::start) does not need one. Rebuild only on request.
++  if [ "${REBUILD_REFERENCE:-0}" = 1 ]; then
++    bash ./build-ios17-reference.sh --lto; rc=$?; echo "REF_RC=$rc"
++    [ "$rc" = 0 ] || { echo "=== reference failed, kernel not built"; echo "=== $(date -Is) CHAIN_DONE"; exit "$rc"; }
++  else
++    echo "=== reusing LTO reference $(sha256sum UniXNU/out-ios17/fuxi/tree/build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf | cut -c1-16)"
++  fi
++  echo "=== $(date -Is) kernel build with probe (LTO reference)"
++  bash ./build-ios17-kernel.sh; rc=$?; echo "BUILD_RC=$rc"
++  [ "$rc" = 0 ] && { python3 pack-ios17-kernel-test.py | tail -n 25; echo "PACK_RC=$?"; }
++  echo "=== $(date -Is) CHAIN_DONE"
++} > /tmp/ios17-build.log 2>&1
+diff --git a/ios17/scripts/build-ios17-reference.sh b/ios17/scripts/build-ios17-reference.sh
+new file mode 100644
+index 0000000..ca6d226
+--- /dev/null
++++ b/ios17/scripts/build-ios17-reference.sh
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++# RELEASE comparison kernel of the same patched xnu-10063 arm64e source, for the fileset prelink.
++set -euo pipefail
++BASE=/home/xiaomi/sadnut-fuxi-local-20261103
++T=$BASE/UniXNU/out-ios17/fuxi/tree
++TC=/home/xiaomi/unixnu-linux
++exec > >(tee -a "$BASE/ios17-reference.log") 2>&1
++export UNIXNU_XNU_ARCH=arm64e UNIXNU_IOS_VERSION=17.0 UNIXNU_XNU_DARWIN=23.6.0 UNIXNU_XNU_VERSION=10063.141.1
++export LC_ALL=C CLT_PREFIX=$TC/CommandLineTools/usr XCTOOLCHAIN_PREFIX=$TC/XcodeDefault.xctoolchain/usr
++export XNU_TOOLCHAIN_BIN="$CLT_PREFIX/bin $XCTOOLCHAIN_PREFIX/bin" UNIXNU_SDKROOT=$T/.cache/fakeroot UNIXNU_SDK_VERSION=17.0
++export UNIXNU_PLATFORM_PATH=$T/.cache/fakeroot/Platforms/iPhoneOS.platform CROSS_CLANG=$TC/llvm/bin/clang
++export DARWIN_TRIPLE=arm64e-apple-ios17.0
++export CROSS_EXTRA_FLAGS='-fptrauth-function-pointer-type-discrimination -mllvm -disable-atexit-based-global-dtor-lowering'
++export CCC_OVERRIDE_OPTIONS='# +-Wno-missing-designated-field-initializers +-Wno-unused-but-set-global +-Wno-unsafe-buffer-usage +-Wno-shadow-header'
++export PATH="$CLT_PREFIX/bin:$TC/bin:$BASE/bin:$PATH" JOBS=${JOBS:-8}
++# --lto needs an ld64 with LTO support (the toolchain's is built --disable-lto-support). build-lto-toolchain.sh
++# builds one against libLTO from the clang's own llvm-project commit; xcrun -find searches XNU_TOOLCHAIN_BIN in
++# order, so a directory holding only that ld goes first and every other tool stays the toolchain's.
++case " $* " in
++  *" --lto "*)
++    LTO_LD_DIR=/home/xiaomi/lto-toolchain/ld-only
++    mkdir -p "$LTO_LD_DIR" && ln -sf /home/xiaomi/lto-toolchain/bin/ld "$LTO_LD_DIR/ld"
++    "$LTO_LD_DIR/ld" -v 2>&1 | grep -q 'LTO support using' || { echo "no LTO-capable ld: run build-lto-toolchain.sh"; exit 1; }
++    export XNU_TOOLCHAIN_BIN="$LTO_LD_DIR $XNU_TOOLCHAIN_BIN"
++    # The kernel link runs through the clang driver, which finds ld on PATH (not through xcrun): put the same
++    # ld-only directory first there too.
++    export PATH="$LTO_LD_DIR:$PATH"
++    echo "LTO link with $(xcrun -find ld) / clang finds $("$CROSS_CLANG" -print-prog-name=ld): $("$LTO_LD_DIR/ld" -v 2>&1 | grep 'LTO support')" ;;
++esac
++date -Is
++cd "$T"
++# Pass --lto for the documented comparison input (unixnu.com/drivers/xnu-prelink: "Keep LTO enabled").
++python3 "$BASE/device-ios17/scripts/build-fileset-release-reference.py" --tree "$T" "$@"
++date -Is
+diff --git a/ios17/scripts/build-lto-toolchain.sh b/ios17/scripts/build-lto-toolchain.sh
+new file mode 100644
+index 0000000..fff9686
+--- /dev/null
++++ b/ios17/scripts/build-lto-toolchain.sh
+@@ -0,0 +1,74 @@
++#!/usr/bin/env bash
++# LTO-capable ld64 for the RELEASE-LTO fileset comparison kernel (unixnu.com/drivers/xnu-prelink: "Keep LTO
++# enabled for this comparison"). The installed toolchain's ld64 is built --disable-lto-support and its LLVM 24
++# build tree was removed, so this builds, beside it and without touching it:
++#   1. libLTO from the same llvm-project commit as the toolchain clang (bitcode must match), AArch64 only;
++#   2. cctools-port at the toolchain's ref with LTO support, linked against that libLTO.
++# Source and build trees are kept, so a rerun is incremental. JOBS defaults to 8; links run one at a time
++# (7 GB of RAM).
++set -euo pipefail
++LLVM_COMMIT=58c46bae21181fb4240cf964461bea738d96d50e
++CCTOOLS_PORT_REF=1030.6.3-ld64-956.6
++TC=/home/xiaomi/unixnu-linux
++ROOT=/home/xiaomi/lto-toolchain
++JOBS=${JOBS:-8}
++HOSTCC=/usr/lib/llvm-21/bin/clang
++HOSTCXX=/usr/lib/llvm-21/bin/clang++
++mkdir -p "$ROOT"
++step() { echo; echo "=== $(date -Is) $*"; }
++checkout() {   # dir url ref: one commit, no history
++  if [ ! -e "$1/.unixnu-checked-out" ]; then
++    mkdir -p "$1"; git init -q "$1"
++    # GitHub connections from this host time out now and then; retry before giving up.
++    for try in 1 2 3 4 5; do
++      git -C "$1" fetch --progress --depth 1 "$2" "$3" && break
++      [ "$try" = 5 ] && { echo "fetch of $2 failed 5 times"; exit 1; }
++      echo "fetch attempt $try failed; retrying in 20 s"; sleep 20
++    done
++    git -C "$1" checkout -q --force FETCH_HEAD
++    touch "$1/.unixnu-checked-out"
++  fi
++  echo "$1 at $(git -C "$1" rev-parse HEAD)"
++}
++
++step "llvm-project $LLVM_COMMIT"
++checkout "$ROOT/llvm-project" https://github.com/llvm/llvm-project "$LLVM_COMMIT"
++
++step "configure libLTO"
++LINKER=()
++command -v ld.lld >/dev/null && LINKER=(-DLLVM_USE_LINKER=lld)
++if [ ! -f "$ROOT/llvm-build/build.ninja" ]; then
++  cmake -G Ninja -S "$ROOT/llvm-project/llvm" -B "$ROOT/llvm-build" \
++    -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=OFF \
++    -DLLVM_TARGETS_TO_BUILD=AArch64 -DLLVM_ENABLE_PROJECTS= \
++    -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF \
++    -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
++    -DLLVM_PARALLEL_LINK_JOBS=1 "${LINKER[@]}" \
++    -DCMAKE_C_COMPILER="$HOSTCC" -DCMAKE_CXX_COMPILER="$HOSTCXX"
++fi
++
++step "build libLTO and llvm-config (-j$JOBS)"
++ninja -C "$ROOT/llvm-build" -j"$JOBS" LTO llvm-config
++ls -la "$ROOT"/llvm-build/lib/libLTO.so*
++"$ROOT/llvm-build/bin/llvm-config" --version
++
++step "cctools-port $CCTOOLS_PORT_REF"
++checkout "$ROOT/cctools-port" https://github.com/tpoechtrager/cctools-port.git "$CCTOOLS_PORT_REF"
++
++step "configure cctools with LTO support"
++cd "$ROOT/cctools-port/cctools"
++if [ ! -f Makefile ]; then
++  CC="$HOSTCC" CXX="$HOSTCXX" ./configure --prefix="$ROOT" --target=arm64-apple-darwin --program-prefix= \
++    --enable-lto-support --with-llvm-config="$ROOT/llvm-build/bin/llvm-config" \
++    --with-libdispatch="$TC/CommandLineTools/usr/libdispatch" \
++    --with-libblocksruntime="$TC/CommandLineTools/usr/libdispatch"
++fi
++grep -E '^#define (LTO_SUPPORT|LTO_LIBRARY|LLVM)' config.h 2>/dev/null || grep -rn 'LTO' config.log | tail -5
++
++step "build cctools (-j$JOBS)"
++make -j"$JOBS" PROGRAM_PREFIX=
++make install PROGRAM_PREFIX=
++
++step "check ld"
++"$ROOT/bin/ld" -v 2>&1 | head -5
++echo "LTO_TOOLCHAIN_DONE"
+diff --git a/ios17/scripts/make-t32-darwinboot-v2-template.py b/ios17/scripts/make-t32-darwinboot-v2-template.py
+new file mode 100644
+index 0000000..0a8d422
+--- /dev/null
++++ b/ios17/scripts/make-t32-darwinboot-v2-template.py
+@@ -0,0 +1,33 @@
++"""t32-bl-daily.img with its UEFI firmware volume's DarwinBoot replaced by DarwinBoot v2 (build-darwinboot-fv.sh).
++
++Everything else of the template stays byte-identical: BootShim, the rest of the FD, the FAT payload, the DTB
++and the Android ramdisk/trailer. The FD keeps its 3 MiB size, so BootShim's layout is unchanged.
++"""
++import gzip, hashlib, struct, zlib
++from pathlib import Path
++
++base = Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++template = Path('/mnt/c/Users/Xiaomi/Downloads/t32-bl-daily.img')
++fd_new = (base / 'pack-work-ios17-kernel/t32-darwinboot-v2.fd').read_bytes()
++fd_old = (base / 'pack-work-ios17-kernel/t32.fd').read_bytes()
++out = base / 'pack-work-ios17-kernel/t32-bl-daily-darwinboot-v2.img'
++aligned = lambda n: (n + 4095) & ~4095
++old = template.read_bytes()
++assert old[:8] == b'ANDROID!' and struct.unpack_from('<I', old, 40)[0] == 3
++size, android_ramdisk = struct.unpack_from('<II', old, 8)
++d = zlib.decompressobj(31)
++raw = d.decompress(old[4096:4096 + size]) + d.flush()
++tail = d.unused_data
++assert d.eof and tail[:4] == bytes.fromhex('d00dfeed')
++FD_AT, FD_SIZE = 0xc0, 0x300000
++assert raw[FD_AT:FD_AT + FD_SIZE] == fd_old and len(fd_new) == FD_SIZE and raw[FD_AT + 0x28:FD_AT + 0x2c] == b'_FVH'
++raw2 = raw[:FD_AT] + fd_new + raw[FD_AT + FD_SIZE:]
++kernel = gzip.compress(raw2, compresslevel=9, mtime=0) + tail
++old_end = 4096 + aligned(size)
++assert len(old) == old_end + aligned(android_ramdisk)
++header = bytearray(old[:4096]); struct.pack_into('<I', header, 8, len(kernel))
++result = bytes(header) + kernel + bytes(aligned(len(kernel)) - len(kernel)) + old[old_end:]
++check = zlib.decompressobj(31); back = check.decompress(result[4096:4096 + len(kernel)]) + check.flush()
++assert back == raw2 and check.unused_data == tail
++out.write_bytes(result)
++print(out, len(result), hashlib.sha256(result).hexdigest())
+diff --git a/ios17/scripts/pack-ios17-fastboot30.py b/ios17/scripts/pack-ios17-fastboot30.py
+new file mode 100644
+index 0000000..a3cd708
+--- /dev/null
++++ b/ios17/scripts/pack-ios17-fastboot30.py
+@@ -0,0 +1,123 @@
++"""iOS 17.7 21H16 checkpoint 1: kernel-only boot.img (arm64e xnu-10063 + original fileset kexts).
++
++For `fastboot boot` only: nothing is flashed and userdata is not touched. The kernel has no storage
++driver and the ADT asks for a root volume UUID that does not exist, so a good run ends at the
++root-device wait; an unmapped kext->kernel call ends in the unixnu_fileset_unmapped panic, which
++names the call site.
++"""
++from pathlib import Path
++import hashlib, json, re, shutil, struct, subprocess, time, tomllib, os
++
++base = Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++kernel_dir = base / 'UniXNU/out-ios17/fuxi/kernel'
++out = Path('/mnt/f/UniXNU-FUXI-work/outputs/sadnut-fuxi-ios17-arm64e-fastboot30-20261105')
++previous = Path('/mnt/f/UniXNU-FUXI-work/outputs/fuxi17-usb-local-20261102')
++work = base / 'pack-work-ios17-fastboot30'
++out.mkdir(parents=True, exist_ok=True)
++work.mkdir(exist_ok=True)
++sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
++TITLE = 'FUXI IOS17 ARM64E KERNEL TEST 20261105'
++NO_ROOT = 'D73A0000-0000-4000-8000-000000000000'   # no such volume: stop at the root-device wait
++
++
++def parse(data):
++    nodes = {}
++    def step(off, parent=None):
++        np_, nc = struct.unpack_from('<II', data, off); off += 8; props = {}
++        for _ in range(np_):
++            key, n = struct.unpack_from('<32sI', data, off); off += 36
++            props[key.split(b'\0')[0].decode()] = data[off:off + n]; off += (n + 3) & ~3
++        path = '/' if parent is None else parent.rstrip('/') + '/' + props['name'].rstrip(b'\0').decode()
++        nodes[path] = props
++        for _ in range(nc):
++            off = step(off, path)
++        return off
++    assert step(0) == len(data)
++    return nodes
++
++
++kernel = kernel_dir / 'kernel.macho'
++report = json.loads((kernel_dir / 'kernel.json').read_text())
++assert sha(kernel) == report['candidate_sha256']
++k = kernel.read_bytes()
++assert struct.unpack_from('<4I', k) [:4] == (0xfeedfacf, 0x100000c, struct.unpack_from('<I', k, 8)[0], 12), 'not a fileset'
++assert struct.unpack_from('<I', k, 8)[0] & 0xff == 2, 'not arm64e'
++assert len(k) <= 128 * 1024 * 1024, 'DarwinBoot rejects a kernel over 128 MiB'
++
++adt = work / 'kernel.macho.adt'
++subprocess.run(['python3', str(base / 'device/scripts/make-fuxi-adt.py'), '--output', str(adt),
++                '--dram-size', '0x80000000', '--owned-memory-size', '0x130000000',
++                '--root-match-volume-uuid', NO_ROOT, '--unique-chip-id', 'ce854c9ae043320b', '--chip-id', '207',
++                '--cpu-regs', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700',
++                '--phone-identity', '--phone-model', 'iPhone15,2', '--trust-cache'], check=True)
++nodes = parse(adt.read_bytes())
++assert nodes['/']['model'] == b'iPhone15,2\0', nodes['/']['model']
++assert 'text-fixups' not in nodes['/chosen'], 'no userland fixups in a kernel-only test'
++assert len([n for n in nodes if n.startswith('/cpus/')]) == 8
++
++args = ('serial=3 debug=0x14e -v kt_fixed_zones=120 qcom-usb-debug=1 sheng-log=1 armcpu-spi-ipi=1 sheng-smp=1 '
++        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0 fuxi-panic-fastboot=30')   # probe: log unmapped calls, return 0
++assert len(args.encode()) <= 1000
++template = (previous / 'pack-work/unixnu.toml').read_text()
++first = template.index('[[entry]]')
++reset = template.index('[[entry]]\nid = "reset"') if '[[entry]]\nid = "reset"' in template else None
++head = template[:first]
++head = re.sub(r'timeout = \d+', 'timeout = 8', head)
++head = re.sub(r'default = "[^"]*"', 'default = "xnu"', head)
++entry = ('[[entry]]\nid = "xnu"\ntitle = "%s"\ntype = "xnu"\npath = "Payloads/kernel.macho"\n'
++         'args = "%s"\n' % (TITLE, args))   # no initrd: this ADT has no RAMDisk placeholder (DarwinBoot.c:664)
++# The firmware's built-in DarwinBoot accepts only arm64 MH_EXECUTE kernels ("returned: Unsupported" on the
++# fileset), and secure boot refuses a loose driver from the payload. The template's firmware volume carries
++# DarwinBoot v2 instead (UniXNU drivers/DarwinBoot 3c75734: arm64e + MH_FILESET; build-darwinboot-fv.sh,
++# make-t32-darwinboot-v2-template.py).
++TEMPLATE = base / 'pack-work-ios17-kernel/t32-bl-daily-darwinboot-v2.img'
++assert TEMPLATE.is_file()
++drivers = ''
++config = head + drivers + entry + (template[reset:] if reset is not None else '')
++parsed = tomllib.loads(config)
++assert parsed['boot']['default'] == 'xnu' and parsed['entry'][0]['args'] == args
++assert 'driver' not in parsed and 'initrd' not in parsed['entry'][0]
++(work / 'unixnu.toml').write_text(config)
++
++payload = work / 'payload.img'
++shutil.copy2(previous / 'pack-work/payload.img', payload)
++env = dict(os.environ, MTOOLS_SKIP_CHECK='1')
++# Leftovers from the iPadOS payload: a GPU addon sidecar without a GpuAddon placeholder in this ADT is
++# rejected (DarwinBoot.c:694), and the scratch ramdisk is no longer referenced.
++for leftover in ['kernel.macho.gpuaddon', 'scratch-data.img']:
++    subprocess.run(['mdel', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + leftover], env=env)
++listing = subprocess.run(['mdir', '-b', '-i', str(payload), '::/EFI/UNIXNU/Payloads'], env=env,
++                         capture_output=True, text=True, check=True).stdout
++assert 'gpuaddon' not in listing and 'scratch-data' not in listing, listing
++for source, dest in [(kernel, '::/EFI/UNIXNU/Payloads/kernel.macho'), (adt, '::/EFI/UNIXNU/Payloads/kernel.macho.adt'),
++                     (work / 'unixnu.toml', '::/EFI/UNIXNU/unixnu.toml')]:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), str(source), dest], check=True, env=env)
++readback = work / ('readback-' + str(time.time_ns())); readback.mkdir()
++for name in ['kernel.macho', 'kernel.macho.adt']:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + name, str(readback / name)], check=True, env=env)
++subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/unixnu.toml', str(readback / 'unixnu.toml')], check=True, env=env)
++assert sha(readback / 'kernel.macho') == report['candidate_sha256']
++assert sha(readback / 'kernel.macho.adt') == sha(adt)
++assert (readback / 'unixnu.toml').read_text() == config
++
++(out / 'payload').mkdir(exist_ok=True)
++shutil.copy2(payload, out / 'payload/payload.img')
++shutil.copy2(adt, out / 'payload/kernel.macho.adt')
++shutil.copy2(kernel_dir / 'kernel.json', out / 'kernel.json')
++packer = work / 'uefi-fuxi/scripts/bootimage.py'; packer.parent.mkdir(parents=True, exist_ok=True)
++shutil.copy2(previous / 'pack-work/uefi-fuxi/scripts/bootimage.py', packer)
++subprocess.run(['python3', str(packer), '--template', str(TEMPLATE),
++                '--ramdisk', str(out / 'payload/payload.img'), '-o', str(out / 'boot.img')], check=True)
++boot = json.loads((out / 'bootimage.json').read_text())
++assert boot['header_version'] == 3 and boot['payload_sha256'] == sha(payload)
++missing = report['missing']; stubbed = report['stubbed']
++summary = dict(boot_img=str(out / 'boot.img'), boot_img_sha256=sha(out / 'boot.img'), kernel_sha256=report['candidate_sha256'],
++               kernel_bytes=len(k), arch='arm64e', xnu='10063.141.1', kernelcache='iPhone15,2 21H16',
++               adt_sha256=sha(adt), identity='iPhone15,2', template=str(TEMPLATE), template_sha256=sha(TEMPLATE), root_matching=NO_ROOT, kernel_args=args, menu_title=TITLE,
++               closure=report['closure'], early_security_init=report['early_security_init'],
++               stubbed_targets=sum(len(v) for v in stubbed.values()), stubbed_sites=sum(sum(v.values()) for v in stubbed.values()),
++               missing_targets=sum(len(v) for v in missing.values()), missing_sites=sum(sum(v.values()) for v in missing.values()),
++               flash='fastboot boot only; userdata untouched', hardware_tested=False)
++(out / 'pack.json').write_text(json.dumps(summary, indent=2) + '\n')
++print(json.dumps(summary, indent=2))
++print('PACK_COMPLETE: ' + str(out / 'boot.img'), flush=True)
+diff --git a/ios17/scripts/pack-ios17-iig-pac.py b/ios17/scripts/pack-ios17-iig-pac.py
+new file mode 100644
+index 0000000..a87b482
+--- /dev/null
++++ b/ios17/scripts/pack-ios17-iig-pac.py
+@@ -0,0 +1,123 @@
++"""iOS 17.7 21H16 checkpoint 1: kernel-only boot.img (arm64e xnu-10063 + original fileset kexts).
++
++For `fastboot boot` only: nothing is flashed and userdata is not touched. The kernel has no storage
++driver and the ADT asks for a root volume UUID that does not exist, so a good run ends at the
++root-device wait; an unmapped kext->kernel call ends in the unixnu_fileset_unmapped panic, which
++names the call site.
++"""
++from pathlib import Path
++import hashlib, json, re, shutil, struct, subprocess, time, tomllib, os
++
++base = Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++kernel_dir = base / 'UniXNU/out-ios17/fuxi/kernel'
++out = Path('/mnt/f/UniXNU-FUXI-work/outputs/sadnut-fuxi-ios17-arm64e-iig-pac-20261105')
++previous = Path('/mnt/f/UniXNU-FUXI-work/outputs/fuxi17-usb-local-20261102')
++work = base / 'pack-work-ios17-iig-pac'
++out.mkdir(parents=True, exist_ok=True)
++work.mkdir(exist_ok=True)
++sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
++TITLE = 'FUXI IOS17 ARM64E KERNEL TEST 20261105'
++NO_ROOT = 'D73A0000-0000-4000-8000-000000000000'   # no such volume: stop at the root-device wait
++
++
++def parse(data):
++    nodes = {}
++    def step(off, parent=None):
++        np_, nc = struct.unpack_from('<II', data, off); off += 8; props = {}
++        for _ in range(np_):
++            key, n = struct.unpack_from('<32sI', data, off); off += 36
++            props[key.split(b'\0')[0].decode()] = data[off:off + n]; off += (n + 3) & ~3
++        path = '/' if parent is None else parent.rstrip('/') + '/' + props['name'].rstrip(b'\0').decode()
++        nodes[path] = props
++        for _ in range(nc):
++            off = step(off, path)
++        return off
++    assert step(0) == len(data)
++    return nodes
++
++
++kernel = kernel_dir / 'kernel.macho'
++report = json.loads((kernel_dir / 'kernel.json').read_text())
++assert sha(kernel) == report['candidate_sha256']
++k = kernel.read_bytes()
++assert struct.unpack_from('<4I', k) [:4] == (0xfeedfacf, 0x100000c, struct.unpack_from('<I', k, 8)[0], 12), 'not a fileset'
++assert struct.unpack_from('<I', k, 8)[0] & 0xff == 2, 'not arm64e'
++assert len(k) <= 128 * 1024 * 1024, 'DarwinBoot rejects a kernel over 128 MiB'
++
++adt = work / 'kernel.macho.adt'
++subprocess.run(['python3', str(base / 'device/scripts/make-fuxi-adt.py'), '--output', str(adt),
++                '--dram-size', '0x80000000', '--owned-memory-size', '0x130000000',
++                '--root-match-volume-uuid', NO_ROOT, '--unique-chip-id', 'ce854c9ae043320b', '--chip-id', '207',
++                '--cpu-regs', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700',
++                '--phone-identity', '--phone-model', 'iPhone15,2', '--trust-cache'], check=True)
++nodes = parse(adt.read_bytes())
++assert nodes['/']['model'] == b'iPhone15,2\0', nodes['/']['model']
++assert 'text-fixups' not in nodes['/chosen'], 'no userland fixups in a kernel-only test'
++assert len([n for n in nodes if n.startswith('/cpus/')]) == 8
++
++args = ('serial=3 debug=0x14e -v kt_fixed_zones=120 qcom-usb-debug=1 sheng-log=1 armcpu-spi-ipi=1 sheng-smp=1 '
++        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0 fuxi-panic-fastboot=30')   # probe: log unmapped calls, return 0
++assert len(args.encode()) <= 1000
++template = (previous / 'pack-work/unixnu.toml').read_text()
++first = template.index('[[entry]]')
++reset = template.index('[[entry]]\nid = "reset"') if '[[entry]]\nid = "reset"' in template else None
++head = template[:first]
++head = re.sub(r'timeout = \d+', 'timeout = 8', head)
++head = re.sub(r'default = "[^"]*"', 'default = "xnu"', head)
++entry = ('[[entry]]\nid = "xnu"\ntitle = "%s"\ntype = "xnu"\npath = "Payloads/kernel.macho"\n'
++         'args = "%s"\n' % (TITLE, args))   # no initrd: this ADT has no RAMDisk placeholder (DarwinBoot.c:664)
++# The firmware's built-in DarwinBoot accepts only arm64 MH_EXECUTE kernels ("returned: Unsupported" on the
++# fileset), and secure boot refuses a loose driver from the payload. The template's firmware volume carries
++# DarwinBoot v2 instead (UniXNU drivers/DarwinBoot 3c75734: arm64e + MH_FILESET; build-darwinboot-fv.sh,
++# make-t32-darwinboot-v2-template.py).
++TEMPLATE = base / 'pack-work-ios17-kernel/t32-bl-daily-darwinboot-v2.img'
++assert TEMPLATE.is_file()
++drivers = ''
++config = head + drivers + entry + (template[reset:] if reset is not None else '')
++parsed = tomllib.loads(config)
++assert parsed['boot']['default'] == 'xnu' and parsed['entry'][0]['args'] == args
++assert 'driver' not in parsed and 'initrd' not in parsed['entry'][0]
++(work / 'unixnu.toml').write_text(config)
++
++payload = work / 'payload.img'
++shutil.copy2(previous / 'pack-work/payload.img', payload)
++env = dict(os.environ, MTOOLS_SKIP_CHECK='1')
++# Leftovers from the iPadOS payload: a GPU addon sidecar without a GpuAddon placeholder in this ADT is
++# rejected (DarwinBoot.c:694), and the scratch ramdisk is no longer referenced.
++for leftover in ['kernel.macho.gpuaddon', 'scratch-data.img']:
++    subprocess.run(['mdel', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + leftover], env=env)
++listing = subprocess.run(['mdir', '-b', '-i', str(payload), '::/EFI/UNIXNU/Payloads'], env=env,
++                         capture_output=True, text=True, check=True).stdout
++assert 'gpuaddon' not in listing and 'scratch-data' not in listing, listing
++for source, dest in [(kernel, '::/EFI/UNIXNU/Payloads/kernel.macho'), (adt, '::/EFI/UNIXNU/Payloads/kernel.macho.adt'),
++                     (work / 'unixnu.toml', '::/EFI/UNIXNU/unixnu.toml')]:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), str(source), dest], check=True, env=env)
++readback = work / ('readback-' + str(time.time_ns())); readback.mkdir()
++for name in ['kernel.macho', 'kernel.macho.adt']:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + name, str(readback / name)], check=True, env=env)
++subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/unixnu.toml', str(readback / 'unixnu.toml')], check=True, env=env)
++assert sha(readback / 'kernel.macho') == report['candidate_sha256']
++assert sha(readback / 'kernel.macho.adt') == sha(adt)
++assert (readback / 'unixnu.toml').read_text() == config
++
++(out / 'payload').mkdir(exist_ok=True)
++shutil.copy2(payload, out / 'payload/payload.img')
++shutil.copy2(adt, out / 'payload/kernel.macho.adt')
++shutil.copy2(kernel_dir / 'kernel.json', out / 'kernel.json')
++packer = work / 'uefi-fuxi/scripts/bootimage.py'; packer.parent.mkdir(parents=True, exist_ok=True)
++shutil.copy2(previous / 'pack-work/uefi-fuxi/scripts/bootimage.py', packer)
++subprocess.run(['python3', str(packer), '--template', str(TEMPLATE),
++                '--ramdisk', str(out / 'payload/payload.img'), '-o', str(out / 'boot.img')], check=True)
++boot = json.loads((out / 'bootimage.json').read_text())
++assert boot['header_version'] == 3 and boot['payload_sha256'] == sha(payload)
++missing = report['missing']; stubbed = report['stubbed']
++summary = dict(boot_img=str(out / 'boot.img'), boot_img_sha256=sha(out / 'boot.img'), kernel_sha256=report['candidate_sha256'],
++               kernel_bytes=len(k), arch='arm64e', xnu='10063.141.1', kernelcache='iPhone15,2 21H16',
++               adt_sha256=sha(adt), identity='iPhone15,2', template=str(TEMPLATE), template_sha256=sha(TEMPLATE), root_matching=NO_ROOT, kernel_args=args, menu_title=TITLE,
++               closure=report['closure'], early_security_init=report['early_security_init'],
++               stubbed_targets=sum(len(v) for v in stubbed.values()), stubbed_sites=sum(sum(v.values()) for v in stubbed.values()),
++               missing_targets=sum(len(v) for v in missing.values()), missing_sites=sum(sum(v.values()) for v in missing.values()),
++               flash='fastboot boot only; userdata untouched', hardware_tested=False)
++(out / 'pack.json').write_text(json.dumps(summary, indent=2) + '\n')
++print(json.dumps(summary, indent=2))
++print('PACK_COMPLETE: ' + str(out / 'boot.img'), flush=True)
+diff --git a/ios17/scripts/pack-ios17-kernel-test.py b/ios17/scripts/pack-ios17-kernel-test.py
+new file mode 100644
+index 0000000..60d00e9
+--- /dev/null
++++ b/ios17/scripts/pack-ios17-kernel-test.py
+@@ -0,0 +1,123 @@
++"""iOS 17.7 21H16 checkpoint 1: kernel-only boot.img (arm64e xnu-10063 + original fileset kexts).
++
++For `fastboot boot` only: nothing is flashed and userdata is not touched. The kernel has no storage
++driver and the ADT asks for a root volume UUID that does not exist, so a good run ends at the
++root-device wait; an unmapped kext->kernel call ends in the unixnu_fileset_unmapped panic, which
++names the call site.
++"""
++from pathlib import Path
++import hashlib, json, re, shutil, struct, subprocess, time, tomllib, os
++
++base = Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++kernel_dir = base / 'UniXNU/out-ios17/fuxi/kernel'
++out = Path('/mnt/f/UniXNU-FUXI-work/outputs/sadnut-fuxi-ios17-arm64e-kernel-20261105')
++previous = Path('/mnt/f/UniXNU-FUXI-work/outputs/fuxi17-usb-local-20261102')
++work = base / 'pack-work-ios17-kernel'
++out.mkdir(parents=True, exist_ok=True)
++work.mkdir(exist_ok=True)
++sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
++TITLE = 'FUXI IOS17 ARM64E KERNEL TEST 20261105'
++NO_ROOT = 'D73A0000-0000-4000-8000-000000000000'   # no such volume: stop at the root-device wait
++
++
++def parse(data):
++    nodes = {}
++    def step(off, parent=None):
++        np_, nc = struct.unpack_from('<II', data, off); off += 8; props = {}
++        for _ in range(np_):
++            key, n = struct.unpack_from('<32sI', data, off); off += 36
++            props[key.split(b'\0')[0].decode()] = data[off:off + n]; off += (n + 3) & ~3
++        path = '/' if parent is None else parent.rstrip('/') + '/' + props['name'].rstrip(b'\0').decode()
++        nodes[path] = props
++        for _ in range(nc):
++            off = step(off, path)
++        return off
++    assert step(0) == len(data)
++    return nodes
++
++
++kernel = kernel_dir / 'kernel.macho'
++report = json.loads((kernel_dir / 'kernel.json').read_text())
++assert sha(kernel) == report['candidate_sha256']
++k = kernel.read_bytes()
++assert struct.unpack_from('<4I', k) [:4] == (0xfeedfacf, 0x100000c, struct.unpack_from('<I', k, 8)[0], 12), 'not a fileset'
++assert struct.unpack_from('<I', k, 8)[0] & 0xff == 2, 'not arm64e'
++assert len(k) <= 128 * 1024 * 1024, 'DarwinBoot rejects a kernel over 128 MiB'
++
++adt = work / 'kernel.macho.adt'
++subprocess.run(['python3', str(base / 'device/scripts/make-fuxi-adt.py'), '--output', str(adt),
++                '--dram-size', '0x80000000', '--owned-memory-size', '0x130000000',
++                '--root-match-volume-uuid', NO_ROOT, '--unique-chip-id', 'ce854c9ae043320b', '--chip-id', '207',
++                '--cpu-regs', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700',
++                '--phone-identity', '--phone-model', 'iPhone15,2', '--trust-cache'], check=True)
++nodes = parse(adt.read_bytes())
++assert nodes['/']['model'] == b'iPhone15,2\0', nodes['/']['model']
++assert 'text-fixups' not in nodes['/chosen'], 'no userland fixups in a kernel-only test'
++assert len([n for n in nodes if n.startswith('/cpus/')]) == 8
++
++args = ('serial=3 debug=0x14e -v kt_fixed_zones=120 qcom-usb-debug=1 sheng-log=1 armcpu-spi-ipi=1 sheng-smp=1 '
++        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1')   # probe: log unmapped calls, return 0
++assert len(args.encode()) <= 1000
++template = (previous / 'pack-work/unixnu.toml').read_text()
++first = template.index('[[entry]]')
++reset = template.index('[[entry]]\nid = "reset"') if '[[entry]]\nid = "reset"' in template else None
++head = template[:first]
++head = re.sub(r'timeout = \d+', 'timeout = 8', head)
++head = re.sub(r'default = "[^"]*"', 'default = "xnu"', head)
++entry = ('[[entry]]\nid = "xnu"\ntitle = "%s"\ntype = "xnu"\npath = "Payloads/kernel.macho"\n'
++         'args = "%s"\n' % (TITLE, args))   # no initrd: this ADT has no RAMDisk placeholder (DarwinBoot.c:664)
++# The firmware's built-in DarwinBoot accepts only arm64 MH_EXECUTE kernels ("returned: Unsupported" on the
++# fileset), and secure boot refuses a loose driver from the payload. The template's firmware volume carries
++# DarwinBoot v2 instead (UniXNU drivers/DarwinBoot 3c75734: arm64e + MH_FILESET; build-darwinboot-fv.sh,
++# make-t32-darwinboot-v2-template.py).
++TEMPLATE = base / 'pack-work-ios17-kernel/t32-bl-daily-darwinboot-v2.img'
++assert TEMPLATE.is_file()
++drivers = ''
++config = head + drivers + entry + (template[reset:] if reset is not None else '')
++parsed = tomllib.loads(config)
++assert parsed['boot']['default'] == 'xnu' and parsed['entry'][0]['args'] == args
++assert 'driver' not in parsed and 'initrd' not in parsed['entry'][0]
++(work / 'unixnu.toml').write_text(config)
++
++payload = work / 'payload.img'
++shutil.copy2(previous / 'pack-work/payload.img', payload)
++env = dict(os.environ, MTOOLS_SKIP_CHECK='1')
++# Leftovers from the iPadOS payload: a GPU addon sidecar without a GpuAddon placeholder in this ADT is
++# rejected (DarwinBoot.c:694), and the scratch ramdisk is no longer referenced.
++for leftover in ['kernel.macho.gpuaddon', 'scratch-data.img']:
++    subprocess.run(['mdel', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + leftover], env=env)
++listing = subprocess.run(['mdir', '-b', '-i', str(payload), '::/EFI/UNIXNU/Payloads'], env=env,
++                         capture_output=True, text=True, check=True).stdout
++assert 'gpuaddon' not in listing and 'scratch-data' not in listing, listing
++for source, dest in [(kernel, '::/EFI/UNIXNU/Payloads/kernel.macho'), (adt, '::/EFI/UNIXNU/Payloads/kernel.macho.adt'),
++                     (work / 'unixnu.toml', '::/EFI/UNIXNU/unixnu.toml')]:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), str(source), dest], check=True, env=env)
++readback = work / ('readback-' + str(time.time_ns())); readback.mkdir()
++for name in ['kernel.macho', 'kernel.macho.adt']:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + name, str(readback / name)], check=True, env=env)
++subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/unixnu.toml', str(readback / 'unixnu.toml')], check=True, env=env)
++assert sha(readback / 'kernel.macho') == report['candidate_sha256']
++assert sha(readback / 'kernel.macho.adt') == sha(adt)
++assert (readback / 'unixnu.toml').read_text() == config
++
++(out / 'payload').mkdir(exist_ok=True)
++shutil.copy2(payload, out / 'payload/payload.img')
++shutil.copy2(adt, out / 'payload/kernel.macho.adt')
++shutil.copy2(kernel_dir / 'kernel.json', out / 'kernel.json')
++packer = work / 'uefi-fuxi/scripts/bootimage.py'; packer.parent.mkdir(parents=True, exist_ok=True)
++shutil.copy2(previous / 'pack-work/uefi-fuxi/scripts/bootimage.py', packer)
++subprocess.run(['python3', str(packer), '--template', str(TEMPLATE),
++                '--ramdisk', str(out / 'payload/payload.img'), '-o', str(out / 'boot.img')], check=True)
++boot = json.loads((out / 'bootimage.json').read_text())
++assert boot['header_version'] == 3 and boot['payload_sha256'] == sha(payload)
++missing = report['missing']; stubbed = report['stubbed']
++summary = dict(boot_img=str(out / 'boot.img'), boot_img_sha256=sha(out / 'boot.img'), kernel_sha256=report['candidate_sha256'],
++               kernel_bytes=len(k), arch='arm64e', xnu='10063.141.1', kernelcache='iPhone15,2 21H16',
++               adt_sha256=sha(adt), identity='iPhone15,2', template=str(TEMPLATE), template_sha256=sha(TEMPLATE), root_matching=NO_ROOT, kernel_args=args, menu_title=TITLE,
++               closure=report['closure'], early_security_init=report['early_security_init'],
++               stubbed_targets=sum(len(v) for v in stubbed.values()), stubbed_sites=sum(sum(v.values()) for v in stubbed.values()),
++               missing_targets=sum(len(v) for v in missing.values()), missing_sites=sum(sum(v.values()) for v in missing.values()),
++               flash='fastboot boot only; userdata untouched', hardware_tested=False)
++(out / 'pack.json').write_text(json.dumps(summary, indent=2) + '\n')
++print(json.dumps(summary, indent=2))
++print('PACK_COMPLETE: ' + str(out / 'boot.img'), flush=True)
+diff --git a/ios17/scripts/pack-ios17-nohint.py b/ios17/scripts/pack-ios17-nohint.py
+new file mode 100644
+index 0000000..1e1ab50
+--- /dev/null
++++ b/ios17/scripts/pack-ios17-nohint.py
+@@ -0,0 +1,123 @@
++"""iOS 17.7 21H16 checkpoint 1: kernel-only boot.img (arm64e xnu-10063 + original fileset kexts).
++
++For `fastboot boot` only: nothing is flashed and userdata is not touched. The kernel has no storage
++driver and the ADT asks for a root volume UUID that does not exist, so a good run ends at the
++root-device wait; an unmapped kext->kernel call ends in the unixnu_fileset_unmapped panic, which
++names the call site.
++"""
++from pathlib import Path
++import hashlib, json, re, shutil, struct, subprocess, time, tomllib, os
++
++base = Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++kernel_dir = base / 'UniXNU/out-ios17/fuxi/kernel'
++out = Path('/mnt/f/UniXNU-FUXI-work/outputs/sadnut-fuxi-ios17-arm64e-nohint-20261105')
++previous = Path('/mnt/f/UniXNU-FUXI-work/outputs/fuxi17-usb-local-20261102')
++work = base / 'pack-work-ios17-nohint'
++out.mkdir(parents=True, exist_ok=True)
++work.mkdir(exist_ok=True)
++sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
++TITLE = 'FUXI IOS17 ARM64E KERNEL TEST 20261105'
++NO_ROOT = 'D73A0000-0000-4000-8000-000000000000'   # no such volume: stop at the root-device wait
++
++
++def parse(data):
++    nodes = {}
++    def step(off, parent=None):
++        np_, nc = struct.unpack_from('<II', data, off); off += 8; props = {}
++        for _ in range(np_):
++            key, n = struct.unpack_from('<32sI', data, off); off += 36
++            props[key.split(b'\0')[0].decode()] = data[off:off + n]; off += (n + 3) & ~3
++        path = '/' if parent is None else parent.rstrip('/') + '/' + props['name'].rstrip(b'\0').decode()
++        nodes[path] = props
++        for _ in range(nc):
++            off = step(off, path)
++        return off
++    assert step(0) == len(data)
++    return nodes
++
++
++kernel = kernel_dir / 'kernel.macho'
++report = json.loads((kernel_dir / 'kernel.json').read_text())
++assert sha(kernel) == report['candidate_sha256']
++k = kernel.read_bytes()
++assert struct.unpack_from('<4I', k) [:4] == (0xfeedfacf, 0x100000c, struct.unpack_from('<I', k, 8)[0], 12), 'not a fileset'
++assert struct.unpack_from('<I', k, 8)[0] & 0xff == 2, 'not arm64e'
++assert len(k) <= 128 * 1024 * 1024, 'DarwinBoot rejects a kernel over 128 MiB'
++
++adt = work / 'kernel.macho.adt'
++subprocess.run(['python3', str(base / 'device/scripts/make-fuxi-adt.py'), '--output', str(adt),
++                '--dram-size', '0x80000000', '--owned-memory-size', '0x130000000',
++                '--root-match-volume-uuid', NO_ROOT, '--unique-chip-id', 'ce854c9ae043320b', '--chip-id', '207',
++                '--cpu-regs', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700',
++                '--phone-identity', '--phone-model', 'iPhone15,2', '--trust-cache'], check=True)
++nodes = parse(adt.read_bytes())
++assert nodes['/']['model'] == b'iPhone15,2\0', nodes['/']['model']
++assert 'text-fixups' not in nodes['/chosen'], 'no userland fixups in a kernel-only test'
++assert len([n for n in nodes if n.startswith('/cpus/')]) == 8
++
++args = ('serial=3 debug=0x14e -v kt_fixed_zones=120 qcom-usb-debug=1 sheng-log=1 armcpu-spi-ipi=1 sheng-smp=1 '
++        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0')   # probe: log unmapped calls, return 0
++assert len(args.encode()) <= 1000
++template = (previous / 'pack-work/unixnu.toml').read_text()
++first = template.index('[[entry]]')
++reset = template.index('[[entry]]\nid = "reset"') if '[[entry]]\nid = "reset"' in template else None
++head = template[:first]
++head = re.sub(r'timeout = \d+', 'timeout = 8', head)
++head = re.sub(r'default = "[^"]*"', 'default = "xnu"', head)
++entry = ('[[entry]]\nid = "xnu"\ntitle = "%s"\ntype = "xnu"\npath = "Payloads/kernel.macho"\n'
++         'args = "%s"\n' % (TITLE, args))   # no initrd: this ADT has no RAMDisk placeholder (DarwinBoot.c:664)
++# The firmware's built-in DarwinBoot accepts only arm64 MH_EXECUTE kernels ("returned: Unsupported" on the
++# fileset), and secure boot refuses a loose driver from the payload. The template's firmware volume carries
++# DarwinBoot v2 instead (UniXNU drivers/DarwinBoot 3c75734: arm64e + MH_FILESET; build-darwinboot-fv.sh,
++# make-t32-darwinboot-v2-template.py).
++TEMPLATE = base / 'pack-work-ios17-kernel/t32-bl-daily-darwinboot-v2.img'
++assert TEMPLATE.is_file()
++drivers = ''
++config = head + drivers + entry + (template[reset:] if reset is not None else '')
++parsed = tomllib.loads(config)
++assert parsed['boot']['default'] == 'xnu' and parsed['entry'][0]['args'] == args
++assert 'driver' not in parsed and 'initrd' not in parsed['entry'][0]
++(work / 'unixnu.toml').write_text(config)
++
++payload = work / 'payload.img'
++shutil.copy2(previous / 'pack-work/payload.img', payload)
++env = dict(os.environ, MTOOLS_SKIP_CHECK='1')
++# Leftovers from the iPadOS payload: a GPU addon sidecar without a GpuAddon placeholder in this ADT is
++# rejected (DarwinBoot.c:694), and the scratch ramdisk is no longer referenced.
++for leftover in ['kernel.macho.gpuaddon', 'scratch-data.img']:
++    subprocess.run(['mdel', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + leftover], env=env)
++listing = subprocess.run(['mdir', '-b', '-i', str(payload), '::/EFI/UNIXNU/Payloads'], env=env,
++                         capture_output=True, text=True, check=True).stdout
++assert 'gpuaddon' not in listing and 'scratch-data' not in listing, listing
++for source, dest in [(kernel, '::/EFI/UNIXNU/Payloads/kernel.macho'), (adt, '::/EFI/UNIXNU/Payloads/kernel.macho.adt'),
++                     (work / 'unixnu.toml', '::/EFI/UNIXNU/unixnu.toml')]:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), str(source), dest], check=True, env=env)
++readback = work / ('readback-' + str(time.time_ns())); readback.mkdir()
++for name in ['kernel.macho', 'kernel.macho.adt']:
++    subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/Payloads/' + name, str(readback / name)], check=True, env=env)
++subprocess.run(['mcopy', '-D', 'o', '-i', str(payload), '::/EFI/UNIXNU/unixnu.toml', str(readback / 'unixnu.toml')], check=True, env=env)
++assert sha(readback / 'kernel.macho') == report['candidate_sha256']
++assert sha(readback / 'kernel.macho.adt') == sha(adt)
++assert (readback / 'unixnu.toml').read_text() == config
++
++(out / 'payload').mkdir(exist_ok=True)
++shutil.copy2(payload, out / 'payload/payload.img')
++shutil.copy2(adt, out / 'payload/kernel.macho.adt')
++shutil.copy2(kernel_dir / 'kernel.json', out / 'kernel.json')
++packer = work / 'uefi-fuxi/scripts/bootimage.py'; packer.parent.mkdir(parents=True, exist_ok=True)
++shutil.copy2(previous / 'pack-work/uefi-fuxi/scripts/bootimage.py', packer)
++subprocess.run(['python3', str(packer), '--template', str(TEMPLATE),
++                '--ramdisk', str(out / 'payload/payload.img'), '-o', str(out / 'boot.img')], check=True)
++boot = json.loads((out / 'bootimage.json').read_text())
++assert boot['header_version'] == 3 and boot['payload_sha256'] == sha(payload)
++missing = report['missing']; stubbed = report['stubbed']
++summary = dict(boot_img=str(out / 'boot.img'), boot_img_sha256=sha(out / 'boot.img'), kernel_sha256=report['candidate_sha256'],
++               kernel_bytes=len(k), arch='arm64e', xnu='10063.141.1', kernelcache='iPhone15,2 21H16',
++               adt_sha256=sha(adt), identity='iPhone15,2', template=str(TEMPLATE), template_sha256=sha(TEMPLATE), root_matching=NO_ROOT, kernel_args=args, menu_title=TITLE,
++               closure=report['closure'], early_security_init=report['early_security_init'],
++               stubbed_targets=sum(len(v) for v in stubbed.values()), stubbed_sites=sum(sum(v.values()) for v in stubbed.values()),
++               missing_targets=sum(len(v) for v in missing.values()), missing_sites=sum(sum(v.values()) for v in missing.values()),
++               flash='fastboot boot only; userdata untouched', hardware_tested=False)
++(out / 'pack.json').write_text(json.dumps(summary, indent=2) + '\n')
++print(json.dumps(summary, indent=2))
++print('PACK_COMPLETE: ' + str(out / 'boot.img'), flush=True)
+diff --git a/ios17/tools/fix-iig-pac-214357.py b/ios17/tools/fix-iig-pac-214357.py
+new file mode 100644
+index 0000000..a9e6f69
+--- /dev/null
++++ b/ios17/tools/fix-iig-pac-214357.py
+@@ -0,0 +1,21 @@
++from pathlib import Path
++import difflib
++base=Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++u=base/'UniXNU'; t=u/'out-ios17/fuxi/tree'; src=t/'.cache/xnu-work'
++name='iokit/DriverKit/Makefile'
++original=(src/name).read_text()
++anchor=next(l for l in original.splitlines(True) if '$(IIG) --def' in l)
++old='SimpleMemberFunctionCast(IOService::StateNotificationItemCreate_Handler, *self, &IOService::StateNotificationItemCreate_Impl)'
++new='[](OSMetaClassBase *object, OSString *name, OSDictionary *schema) -> kern_return_t { return static_cast<IOService *>(object)->StateNotificationItemCreate_Impl(name, schema); }'
++cmd='ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),arm64e)\n\t@if [ "$(notdir $@)" = IOService.h ]; then '+"""python3 -c 'import sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); a=sys.argv[2]; assert s.count(a)==1; p.write_text(s.replace(a,sys.argv[3]))' "$(patsubst %.h,%.iig.cpp,$@)" """+"'"+old+"' '"+new+"'; fi\nendif\n"
++replacement=original.replace(anchor,anchor+cmd)
++patch=''.join(difflib.unified_diff(original.splitlines(True),replacement.splitlines(True),'a/'+name,'b/'+name))
++(u/'patches/xnu-10063-arm64e/iig-state-notification-handler.patch').write_text(patch)
++# Stage the rule in the warm worktree too; the baseline skips initial patches for a prepared tree.
++(src/name).write_text(replacement)
++(src/'iokit/DriverKit/IOService.iig').touch()
++# The incremental tree already contains generated RPC code; update only the faulty expression.
++p=t/'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DriverKit/IOService.iig.cpp'
++v=p.read_text(); assert v.count(old)==1;p.write_text(v.replace(old,new))
++txt=(base/'pack-ios17-fastboot30.py').read_text().replace('fastboot30-20261105','iig-pac-20261105').replace('pack-work-ios17-fastboot30','pack-work-ios17-iig-pac')
++(base/'pack-ios17-iig-pac.py').write_text(txt)
+\ No newline at end of file
+diff --git a/ios17/tools/fix-sandbox-210443.py b/ios17/tools/fix-sandbox-210443.py
+new file mode 100644
+index 0000000..ca76933
+--- /dev/null
++++ b/ios17/tools/fix-sandbox-210443.py
+@@ -0,0 +1,19 @@
++import struct as s,sys,pathlib,hashlib
++from capstone import *
++base=pathlib.Path('/home/xiaomi/sadnut-fuxi-local-20261103/UniXNU')
++d=(base/'out-ios17/ipsw/21H16/kernelcache.decompressed').read_bytes()
++def lc(o):
++ p=o+32
++ for _ in range(s.unpack_from('<I',d,o+16)[0]):
++  c,n=s.unpack_from('<II',d,p);yield c,p;p+=n
++o=next(s.unpack_from('<Q',d,p+16)[0] for c,p in lc(0) if c==0x80000035 and d[p+32:p+49].startswith(b'com.apple.kernel\0'))
++segs=[s.unpack_from('<QQQQ',d,p+24) for c,p in lc(o) if c==25]
++def rd(a,n):
++ for v,size,f,z in segs:
++  if v<=a<v+z:return d[f+a-v:f+a-v+n]
++a=0xfffffff0081c0640
++import json
++p=base/'kits/XnuPrelink/fixtures/fileset-21H16-symbols.json'
++j=json.loads(p.read_text());assert hashlib.sha256(d).hexdigest()==j['inputs']['kernelcache_sha256']
++row=dict(original=hex(a),original_size=156,original_sha256=hashlib.sha256(rd(a,156)).hexdigest(),native_symbol='_proc_set_syscall_filter_index',evidence='Sandbox BL at 0xfffffff009e974ec, observed with which=2 and ascending index. Original checks KOBJ=2 else EINVAL, probes 1031 MIG entries of stride 24, stores index at +4 and returns 0 or ENOENT; matches kern_proc.c proc_set_syscall_filter_index and inline ipc_kobject_set_kobjidx. Next entry BTI at +156.')
++assert not any(x['original']==hex(a) for x in j['functions']);j['functions'].append(row);p.write_text(json.dumps(j,indent=2,ensure_ascii=False)+'\n')
+\ No newline at end of file
+diff --git a/ios17/tools/implement-fastboot30.py b/ios17/tools/implement-fastboot30.py
+new file mode 100644
+index 0000000..01db923
+--- /dev/null
++++ b/ios17/tools/implement-fastboot30.py
+@@ -0,0 +1,67 @@
++from pathlib import Path
++import difflib
++base=Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++scripts=base/'device-ios17/scripts'
++mod=base/'UniXNU/out-ios17/fuxi/tree/.cache/fuxi-qud-module'
++p=Path('kernel/QcomXnuUsbDebug.c')
++orig=(mod/p).read_text()
++def sub(s,a,b):
++ assert s.count(a)==1,a
++ return s.replace(a,b)
++code=r"""
++#ifdef FUXI_PANIC_FASTBOOT
++/* Prepare mappings in normal context. No allocation or thread services after panic. */
++#include "BootResetCore.h"
++static struct br_arbiter reset_arb;
++static volatile uint32_t *reset_obs, *reset_chn;
++static void fuxi_prepare_fastboot(void)
++{
++    int seconds = 0;
++    struct br_found f;
++    if (!PE_parse_boot_argn("fuxi-panic-fastboot", &seconds, sizeof(seconds)) || seconds != 30)
++        return;
++    reset_arb.core = (void *)ml_io_map(0xc400000, 0x3000);
++    reset_arb.cnfg = (void *)ml_io_map(0xc42d000, 0x4000);
++    if (!reset_arb.core || !reset_arb.cnfg || br_find(&reset_arb, &f) || f.owner != 0)
++        return;
++    unsigned off = BR_OBS_APID_STRIDE * (unsigned)f.apid;
++    vm_offset_t obs = ml_io_map(0xc440000 + (off & ~4095u), 4096);
++    if (!obs) return;
++    reset_obs = (void *)(obs + (off & 4095u));
++    reset_chn = (void *)ml_io_map(0xc500000 + BR_CHNL_APID_STRIDE * (unsigned)f.apid, 4096);
++}
++static void fuxi_panic_fastboot(void)
++{
++    uint8_t before, after;
++    uint64_t hz = native.status.counter_frequency;
++    if (!reset_obs || !reset_chn || !hz || hz > COUNTER_MAX_FREQUENCY) return;
++    uint64_t start = counter();
++    while (counter() - start < 30 * hz) __asm__ volatile("yield" ::: "memory");
++    /* Both pointers already select this APID, EE0, so channel offset is zero. */
++    if (br_set_bootloader(reset_obs, reset_chn, &reset_arb, 0, &before, &after)) return;
++    __asm__ volatile("movz w0, #9\nmovk w0, #0x8400, lsl #16\n"
++                     "mov x1, xzr\nmov x2, xzr\nmov x3, xzr\ndsb sy\nsmc #0"
++                     ::: "x0","x1","x2","x3","x4","x5","x6","x7","x8","x9",
++                         "x10","x11","x12","x13","x14","x15","x16","x17","memory","cc");
++}
++#endif
++"""
++s=sub(orig,'static int qcom_usb_control_halt_restart(unsigned int type)\n{',code+'\nstatic int qcom_usb_control_halt_restart(unsigned int type)\n{')
++s=sub(s,'    native.status.phase = QCOM_USB_DEBUG_ACTIVE;', '#ifdef FUXI_PANIC_FASTBOOT\n    fuxi_prepare_fastboot();\n#endif\n    native.status.phase = QCOM_USB_DEBUG_ACTIVE;')
++s=sub(s,'    char announcement[192];','#ifdef FUXI_PANIC_FASTBOOT\n    int finished = 0;\n#endif\n    char announcement[192];')
++s=sub(s,'if (marker_queued && dwc3_queued(native.core) == 0 &&\n            soc_usb_buffer_pending(&usb_log_buffer) == 0) break;', 'if (marker_queued && dwc3_queued(native.core) == 0 &&\n            soc_usb_buffer_pending(&usb_log_buffer) == 0) {\n#ifdef FUXI_PANIC_FASTBOOT\n            finished = 1;\n#endif\n            break;\n        }')
++s=sub(s,'    if (usb_diag_enabled) diag_reset(10);','#ifdef FUXI_PANIC_FASTBOOT\n    if (finished) fuxi_panic_fastboot();\n#endif\n    if (usb_diag_enabled) diag_reset(10);')
++patch=''.join(difflib.unified_diff(orig.splitlines(True),s.splitlines(True),'a/'+str(p),'b/'+str(p)))
++builder=scripts/'build-fuxi-usb-debug.py'
++add="""# Only the iOS 17 fuxi archive opts into the post-drain hook.
++shutil.copy2(root / 'kits/sheng/BootResetCore.h', module / 'kernel/BootResetCore.h')
++board_header = module / 'soc/FuxiSm8550.h'
++if 'FUXI_PANIC_FASTBOOT' not in board_header.read_text():
++    with board_header.open('a') as stream:
++        stream.write('\\n#define FUXI_PANIC_FASTBOOT 1\\n')
++if 'fuxi_panic_fastboot(void)' not in (module / 'kernel/QcomXnuUsbDebug.c').read_text():
++    subprocess.run(['patch','-p1','--batch'],cwd=module,input=PATCH_BODY,text=True,check=True)
++""".replace('PATCH_BODY',repr(patch))
++builder.write_text(sub(builder.read_text(),"patcher = module / 'scripts/xnu_patches.py'",add+"\npatcher = module / 'scripts/xnu_patches.py'"))
++pack=(base/'pack-ios17-nohint.py').read_text().replace('use_contiguous_hint=0\'', 'use_contiguous_hint=0 fuxi-panic-fastboot=30\'').replace('nohint-20261105','fastboot30-20261105').replace('pack-work-ios17-nohint','pack-work-ios17-fastboot30')
++(base/'pack-ios17-fastboot30.py').write_text(pack)
+\ No newline at end of file
+diff --git a/ios17/tools/probe-sandbox-210443.py b/ios17/tools/probe-sandbox-210443.py
+new file mode 100644
+index 0000000..dd5998a
+--- /dev/null
++++ b/ios17/tools/probe-sandbox-210443.py
+@@ -0,0 +1,15 @@
++import struct as s,sys,pathlib,hashlib
++from capstone import *
++base=pathlib.Path('/home/xiaomi/sadnut-fuxi-local-20261103/UniXNU')
++d=(base/'out-ios17/ipsw/21H16/kernelcache.decompressed').read_bytes()
++def lc(o):
++ p=o+32
++ for _ in range(s.unpack_from('<I',d,o+16)[0]):
++  c,n=s.unpack_from('<II',d,p);yield c,p;p+=n
++o=next(s.unpack_from('<Q',d,p+16)[0] for c,p in lc(0) if c==0x80000035 and d[p+32:p+49].startswith(b'com.apple.kernel\0'))
++segs=[s.unpack_from('<QQQQ',d,p+24) for c,p in lc(o) if c==25]
++def rd(a,n):
++ for v,size,f,z in segs:
++  if v<=a<v+z:return d[f+a-v:f+a-v+n]
++a=0xfffffff0081c0640
++for i in Cs(CS_ARCH_ARM64,CS_MODE_LITTLE_ENDIAN).disasm(rd(a,280),a):print(hex(i.address),i.mnemonic,i.op_str)
+\ No newline at end of file
+-- 
+2.53.0
+

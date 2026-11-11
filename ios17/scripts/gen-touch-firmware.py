@@ -1,0 +1,1 @@
+../../device/scripts/gen-touch-firmware.py

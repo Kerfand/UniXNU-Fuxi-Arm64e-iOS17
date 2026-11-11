@@ -1,0 +1,376 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+// Default-off original HID observation; a separate explicit gate starts an
+// owned offline input source. No entitlement or original provider is replaced.
+#include <IOKit/IOService.h>
+#include <IOKit/IOLib.h>
+#include <IOKit/IOCatalogue.h>
+#include <libkern/c++/OSMetaClass.h>
+#include <libkern/c++/OSSymbol.h>
+#include <libkern/c++/OSIterator.h>
+#include <libkern/c++/OSCollectionIterator.h>
+#include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSKext.h>
+#include <pexpert/pexpert.h>
+#include <mach/kmod.h>
+#include <kern/thread.h>
+extern kmod_info_t g_kernel_kmod_info;
+extern "C" void native_hid_static_init(void) __asm__("__GLOBAL__sub_I_NativeHidInput.cpp");
+extern "C" IOService *native_hid_input_allocate(void);
+extern "C" IOService *native_hid_touch_allocate(void);
+// The diagnostic arrays are defined further down inside the extern "C" block, so they need a
+// matching C-linkage declaration ahead of the helpers that use them.
+extern "C" {
+extern volatile uint32_t native_hid_usrsvc[8];
+extern char native_hid_chain[320];
+}
+// T0 diagnostics: who is on the provider chain, and are the DriverKit pieces alive?
+// proc_iterate/proc_name_address follow the mapping GpuPowerProbe.cpp already uses.
+extern "C" int proc_iterate(unsigned flags, int (*callout)(void *, void *), void *arg,
+                            int (*filter)(void *, void *), void *filterarg);
+extern "C" const char *proc_name_address(void *p);
+static bool native_hid_name_has(const char *name, const char *needle) {
+    if (!name || !needle) return false;
+    for (const char *p = name; *p; ++p) {
+        const char *a = p, *b = needle;
+        while (*a && *b && *a == *b) { ++a; ++b; }
+        if (!*b) return true;
+    }
+    return false;
+}
+static int native_hid_process_callout(void *proc, void *) {
+    native_hid_usrsvc[3] = native_hid_usrsvc[3] + 1;
+    const char *name = proc_name_address(proc);
+    if (!name) return 0;
+    if (native_hid_name_has(name, "driverkitd")) native_hid_usrsvc[0] = native_hid_usrsvc[0] + 1;
+    if (native_hid_name_has(name, "AppleUserHID")) native_hid_usrsvc[1] = native_hid_usrsvc[1] + 1;
+    if (native_hid_name_has(name, "HIDDrivers")) native_hid_usrsvc[2] = native_hid_usrsvc[2] + 1;
+    return 0;
+}
+static void native_hid_diag(IORegistryEntry *entry) {
+    size_t at = 0;
+    native_hid_chain[0] = 0;
+    for (IORegistryEntry *e = entry; e && at + 32 < sizeof native_hid_chain;
+         e = e->getParentEntry(gIOServicePlane)) {
+        const OSMetaClass *meta = e->getMetaClass();
+        const char *cls = meta ? meta->getClassName() : nullptr;
+        at += snprintf(native_hid_chain + at, sizeof native_hid_chain - at, "%s/%x ",
+                       cls ? cls : "?", (unsigned)e->getRegistryEntryID());
+    }
+    native_hid_usrsvc[4] = (uint32_t)at;
+    proc_iterate(1 /* PROC_ALLPROCLIST */, native_hid_process_callout, nullptr, nullptr, nullptr);
+}
+extern "C" {
+extern kern_return_t OSKextLoadKextWithIdentifier(const char *);
+volatile uint32_t native_hid_stage,native_hid_resource_found;
+volatile int native_hid_load_status=-1;
+volatile int native_hid_matching_load_status=-1;
+volatile uint32_t native_hid_class_sizes[5];
+// T0: [0] driverkitd processes, [1] AppleUserHID* processes, [2] *HIDDrivers processes,
+// [3] total processes scanned, [4] provider-chain text length. Separate from events[] so the
+// existing report counters keep their meaning.
+volatile uint32_t native_hid_usrsvc[8];
+char native_hid_chain[320];
+volatile int native_hid_input_meta_status=-1;
+volatile uint64_t native_hid_input_object;
+volatile uint32_t native_hid_input_events[8];
+volatile int native_hid_input_results[8]={-1,-1,-1,-1,-1,-1,-1,-1};
+volatile uint32_t native_hid_input_command;
+char native_hid_input_registry[2048];
+char native_hid_input_props[1024];
+extern volatile uint32_t native_legacy_transfer_calls;
+// fuxi_touch_probe sets this before its thread starts, so the digitizer service can be created without a boot argument.
+extern "C" {extern volatile int native_fuxi_touch_enabled;}
+// Optional unattended Home presses for hardware, which has no external harness writing the mailbox:
+// offline-hid-auto-home=<seconds after the second presented frame>, offline-hid-auto-home-count (default 1)
+// and offline-hid-auto-home-interval (default 20 s). Disabled unless the first argument is set.
+static unsigned autoConfigured,autoFirst,autoCount,autoInterval,autoSent;
+static uint64_t autoNext,autoFrequency;
+static uint64_t counterNow(void){uint64_t v;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(v));return v;}
+bool native_hid_input_requested(void) {
+    if(native_legacy_transfer_calls<2)return false;
+    if(!autoConfigured) {
+        autoConfigured=1;autoFirst=0;autoCount=1;autoInterval=20;
+        PE_parse_boot_argn("offline-hid-auto-home",&autoFirst,sizeof(autoFirst));
+        PE_parse_boot_argn("offline-hid-auto-home-count",&autoCount,sizeof(autoCount));
+        PE_parse_boot_argn("offline-hid-auto-home-interval",&autoInterval,sizeof(autoInterval));
+        if(autoCount>8)autoCount=8;if(autoInterval<5)autoInterval=5;
+        __asm__ volatile("mrs %0, cntfrq_el0":"=r"(autoFrequency));
+        if(autoFirst && autoFrequency)autoNext=counterNow()+(uint64_t)autoFirst*autoFrequency;
+    }
+    if(autoFirst && autoFrequency && autoSent<autoCount && counterNow()>=autoNext) {
+        ++autoSent;autoNext+=(uint64_t)autoInterval*autoFrequency;return true;
+    }
+    if(native_hid_input_command!=1)return false;
+    native_hid_input_command=0;return true;
+}
+static void describeInput(IORegistryEntry *entry,unsigned depth,size_t &used) {
+    if(depth>4 || used>=sizeof(native_hid_input_registry)-128)return;
+    int count=snprintf(native_hid_input_registry+used,sizeof(native_hid_input_registry)-used,
+        "%u %s [%s]\n",depth,entry->getName(),entry->getMetaClass()->getClassName());
+    if(count<=0 || (size_t)count>=sizeof(native_hid_input_registry)-used)return;
+    used+=count;OSIterator *it=entry->getChildIterator(gIOServicePlane);
+    if(!it)return;
+    while(OSObject *child=it->getNextObject()) {
+        IORegistryEntry *next=OSDynamicCast(IORegistryEntry,child);
+        if(next)describeInput(next,depth+1,used);
+    }
+    it->release();
+}
+// Compact one property of the first IOHIDEventDriver below entry: XML tags dropped, key end -> '=', value end -> ' '.
+static IORegistryEntry *findEventDriver(IORegistryEntry *parent,unsigned depth) {
+    if(!depth)return nullptr;
+    OSIterator *it=parent->getChildIterator(gIOServicePlane);if(!it)return nullptr;
+    IORegistryEntry *found=nullptr;
+    while(OSObject *child=it->getNextObject()) {
+        IORegistryEntry *entry=OSDynamicCast(IORegistryEntry,child);
+        if(!entry)continue;
+        if(entry->metaCast("IOHIDEventDriver")){found=entry;break;}
+        if((found=findEventDriver(entry,depth-1)))break;
+    }
+    it->release();return found;
+}
+static void appendProperty(IORegistryEntry *driver,const char *key,const char *label,size_t &used) {
+    OSObject *value=driver->copyProperty(key);
+    int n=snprintf(native_hid_input_props+used,sizeof(native_hid_input_props)-used,"%s:",label);
+    if(n>0)used+=n;
+    if(value) {
+        OSSerialize *text=OSSerialize::withCapacity(4096);
+        if(text && value->serialize(text)) {
+            const char *in=text->text();bool tag=false;char name[16];unsigned nameLen=0;
+            for(unsigned i=0;in && in[i] && used<sizeof(native_hid_input_props)-2;++i) {
+                char c=in[i];
+                if(c=='<'){tag=true;nameLen=0;continue;}
+                if(tag) {
+                    if(c=='>') {
+                        tag=false;name[nameLen]=0;
+                        if(!strcmp(name,"/key"))native_hid_input_props[used++]='=';
+                        else if(name[0]=='/')native_hid_input_props[used++]=' ';
+                        else if(!strcmp(name,"true/")||!strcmp(name,"false/")){
+                            used+=snprintf(native_hid_input_props+used,sizeof(native_hid_input_props)-used,"%s ",name[0]=='t'?"T":"F");
+                        }
+                    } else if(nameLen<sizeof(name)-1)name[nameLen++]=c;
+                    continue;
+                }
+                if(c=='\n'||c=='\t')continue;
+                native_hid_input_props[used++]=c;
+            }
+        }
+        OSSafeReleaseNULL(text);OSSafeReleaseNULL(value);
+    } else if(used<sizeof(native_hid_input_props)-6) {memcpy(native_hid_input_props+used,"none ",5);used+=5;}
+    native_hid_input_props[used]=0;
+}
+__attribute__((noinline)) void native_hid_live_checkpoint(IOService *device) {
+    size_t used=0;native_hid_input_registry[0]=0;describeInput(device,0,used);
+    if(IORegistryEntry *driver=findEventDriver(device,4)) {
+        size_t props=0;native_hid_input_props[0]=0;
+        // backboardd's digitizer service classification reads Built-In/DisplayIntegrated from the event service it
+        // opened, not from the HID device below it; publish them on the service itself (idempotent, once per second).
+        // Set once only: every setProperty on a service with attached user clients is a registry property-change
+        // notification, and repeating it each second keeps backboardd/hidd busy re-evaluating the service.
+        static IORegistryEntry *publishedFor;
+        if(device->getProperty("Built-In") && publishedFor!=driver) {
+            publishedFor=driver;
+            driver->setProperty("Built-In",kOSBooleanTrue);driver->setProperty("DisplayIntegrated",kOSBooleanTrue);
+            // backboardd (-[BKHIDDirectTouchEventProcessor processEvent:sender:dispatcher:], decoded from the target) drops a
+            // digitizer event unless the sending service has PrimaryUsagePage 0x0D and PrimaryUsage 1, 4 or 0x20
+            // ("ignoring digitizer event ... from unsupported service"). The combined device lists its keyboard collection
+            // first, so the services would publish (1,6); publish Digitizer/Touch Screen on the services after they have
+            // matched (setting it on the device would change driver matching, which is observed to depend on the layout).
+            driver->setProperty("PrimaryUsagePage",(unsigned long long)0x0d,32);driver->setProperty("PrimaryUsage",(unsigned long long)4,32);
+            // backboardd's digitizer filter is {DeviceUsagePage, DeviceUsage, Built-In}; make the flag visible on the
+            // interface (the event service's provider) as well, not only on the device two levels down.
+            if(IORegistryEntry *interface=driver->getParentEntry(gIOServicePlane)) {
+                interface->setProperty("Built-In",kOSBooleanTrue);interface->setProperty("DisplayIntegrated",kOSBooleanTrue);
+                interface->setProperty("PrimaryUsagePage",(unsigned long long)0x0d,32);interface->setProperty("PrimaryUsage",(unsigned long long)4,32);
+                // backboardd looks HID services up with IOPropertyMatch={HIDServiceSupport=true}; IOHIDEventService normally
+                // publishes it from start(), and the fuxi digitizer never answered that query, so publish it here too.
+                driver->setProperty("HIDServiceSupport",kOSBooleanTrue);
+            }
+        }
+        // The Digitizer/DebugState dumps (appendProperty) are not read on hardware runs without a photograph and walk
+        // driver-internal state from a foreign thread; only the cheap Built-In readback stays.
+        appendProperty(driver,"Built-In","BI",props);
+        appendProperty(driver,"PrimaryUsagePage","PP",props);appendProperty(driver,"PrimaryUsage","PU",props);
+        appendProperty(driver,"HIDServiceSupport","HS",props);
+        // Published by IOHIDEventService::start(); backboardd opens a HID service through this user client, so its
+        // presence separates "started" from "attached but never started".
+        // AppleUserHIDEventService publishes no IOUserClientClass, and IOService::newUserClient reads that property,
+        // so backboardd has nothing to open. Setting it here is the smallest way to give the matched service a
+        // userland outlet; whether the class accepts IOHIDEventServiceUserClient is what the next run shows.
+        // Not forced any more: IOHIDEventServiceUserClient dispatches through the kernel IOHIDEventService method table,
+        // which driverkit HID services do not implement (sel 2 returned kIOReturnUnsupported). The DriverKit service keeps
+        // its own outlet.
+        // driver->setProperty("IOUserClientClass","IOHIDEventServiceUserClient");
+        // backboardd subscribed with IOServiceNotificationUser and queried at boot, before this property existed, and
+        // IOKit does not re-notify on a property change. Re-announcing the service makes subscribers look again.
+        // registerService() is an IOService method; findEventDriver returns an IORegistryEntry.
+        if(IOService *svc=OSDynamicCast(IOService,driver)) svc->registerService();
+        appendProperty(driver,"IOUserClientClass","UC",props);
+        // Which event driver matches is decided by the interface's usage keys, not the driver's: read them off the
+        // provider, plus the matched driver's class, so a wrong match is visible instead of inferred.
+        appendProperty(driver,"IOClass","DC",props);
+        if(IORegistryEntry *iface=driver->getParentEntry(gIOServicePlane)) {
+            appendProperty(iface,"PrimaryUsagePage","IPP",props);
+            appendProperty(iface,"PrimaryUsage","IPU",props);
+            appendProperty(iface,"Transport","ITR",props);
+            appendProperty(iface,"HIDDefaultBehavior","IDB",props);
+        }
+        native_hid_diag(driver);
+    } else {
+        // No event driver: show what matching saw on the interface (first child of the device).
+        size_t props=0;native_hid_input_props[0]=0;
+        OSIterator *it=device->getChildIterator(gIOServicePlane);
+        IOService *iface=it?OSDynamicCast(IOService,it->getNextObject()):nullptr;
+        if(iface) {
+            int n=snprintf(native_hid_input_props+props,sizeof(native_hid_input_props)-props,"NCL:%s NBS:%u ",
+                iface->getMetaClass()->getClassName(),(unsigned)iface->getBusyState());
+            if(n>0)props+=n;
+            appendProperty(iface,"DeviceUsagePairs","NDUP",props);
+            appendProperty(iface,"PrimaryUsagePage","NIPP",props);
+            appendProperty(iface,"PrimaryUsage","NIPU",props);
+            appendProperty(iface,"Transport","NITR",props);
+        }
+        static unsigned noDriverRounds;
+        ++noDriverRounds;
+        if(iface && noDriverRounds==5 && !device->getProperty("HIDDefaultBehavior")) {
+            // Presence-only key, checked on the IOHIDDevice (IOHIDFamily MatchPropertyTable owner).
+            device->setProperty("HIDDefaultBehavior","");
+            iface->setProperty("HIDDefaultBehavior","");
+            iface->registerService();
+            printf("FTS hid default-behavior published, rematch\n");
+        }
+        if(iface && noDriverRounds==30) {
+            SInt32 generation=0;
+            OSOrderedSet *set=gIOCatalogue?gIOCatalogue->findDrivers(iface,&generation):nullptr;
+            printf("FTS cat gen%d n%u\n",(int)generation,set?set->getCount():0u);
+            for(unsigned i=0;set && i<set->getCount();++i) {
+                OSDictionary *pers=OSDynamicCast(OSDictionary,set->getObject(i));
+                if(!pers)continue;
+                OSString *cls=OSDynamicCast(OSString,pers->getObject("IOClass"));
+                OSString *bid=OSDynamicCast(OSString,pers->getObject("CFBundleIdentifier"));
+                OSString *usr=OSDynamicCast(OSString,pers->getObject("IOUserServerName"));
+                OSString *nm=OSDynamicCast(OSString,pers->getObject("IOPersonalityName"));
+                bool pm=iface->passiveMatch(pers);
+                printf("FTS cat %u %s/%s usr%s pm%u %s\n",i,cls?cls->getCStringNoCopy():"?",
+                    bid?bid->getCStringNoCopy():"?",usr?"1":"0",(unsigned)pm,nm?nm->getCStringNoCopy():"");
+                if(!pm && !usr) {
+                    char keys[400];size_t kl=0;keys[0]=0;
+                    char flips[200];size_t fl=0;flips[0]=0;
+                    OSCollectionIterator *ki=OSCollectionIterator::withCollection(pers);
+                    while(ki) {
+                        OSSymbol *key=OSDynamicCast(OSSymbol,ki->getNextObject());
+                        if(!key)break;
+                        int n=snprintf(keys+kl,sizeof keys-kl,"%s,",key->getCStringNoCopy());
+                        if(n>0 && (size_t)n<sizeof keys-kl)kl+=n;
+                        OSDictionary *copy=OSDictionary::withDictionary(pers);
+                        if(copy) {
+                            copy->removeObject(key);
+                            if(iface->passiveMatch(copy)) {
+                                n=snprintf(flips+fl,sizeof flips-fl,"%s,",key->getCStringNoCopy());
+                                if(n>0 && (size_t)n<sizeof flips-fl)fl+=n;
+                            }
+                            copy->release();
+                        }
+                    }
+                    OSSafeReleaseNULL(ki);
+                    printf("FTS cat %u keys %s\nFTS cat %u flip %s\n",i,keys,i,flips[0]?flips:"none");
+                }
+            }
+            OSSafeReleaseNULL(set);
+        }
+        OSSafeReleaseNULL(it);
+        appendProperty(device,"DeviceUsagePairs","DDUP",props);
+    }
+    __asm__ volatile("" ::: "memory");
+}
+void native_hid_input_observed(unsigned event,int result) {
+    if(event<8){native_hid_input_events[event]=native_hid_input_events[event]+1;native_hid_input_results[event]=result;}
+}
+__attribute__((noinline)) void native_hid_checkpoint(void) { __asm__ volatile("" ::: "memory"); }
+static void native_hid_input_probe_body(void) {
+    if(native_hid_stage)return;
+    const bool fuxiTouch=native_fuxi_touch_enabled!=0;
+    native_hid_stage=1;
+    native_hid_load_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOHIDFamily");
+    if(!native_hid_load_status)
+        native_hid_matching_load_status=OSKext::loadKextWithIdentifier("com.apple.iokit.IOHIDEventDriver",
+            true,false,kOSKextExcludeNone,kOSKextExcludeNone,nullptr);
+    native_hid_stage=2;
+    const char *names[]={"IOHIDUserDevice","IOHIDEventDriver","IOHIDEventService","IOHIDResourceDeviceUserClient","IOHIDDevice"};
+    for(unsigned i=0;i<5;++i) {
+        const OSSymbol *name=OSSymbol::withCString(names[i]);
+        const OSMetaClass *meta=name?OSMetaClass::getMetaClassWithName(name):nullptr;
+        if(meta)native_hid_class_sizes[i]=meta->getClassSize();
+        OSSafeReleaseNULL(name);
+    }
+    if(native_hid_load_status==0) {
+        OSDictionary *match=IOService::serviceMatching("IOHIDResource");
+        IOService *resource=match?IOService::waitForMatchingService(match,5000000000ULL):nullptr;
+        native_hid_resource_found=resource!=nullptr;
+        unsigned sendHome=0;PE_parse_boot_argn("offline-hid-home",&sendHome,sizeof(sendHome));
+        if(resource && (sendHome==1 || fuxiTouch) && native_hid_class_sizes[4]==208) {
+            void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);
+            if(handle) {
+                native_hid_static_init();native_hid_input_meta_status=OSMetaClass::postModLoad(handle);
+                if(!native_hid_input_meta_status) {
+                    bool started=false;
+                    if(sendHome==1 || fuxiTouch) {
+                        // fuxi touch uses the keyboard-first combined device: on this kernel the standalone digitizer
+                        // service starts but never gets an IOHIDEventDriver (t27: started=1 driver=0), while the
+                        // combined descriptor is the arrangement the event driver attaches to. NativeHidInput adds
+                        // the digitizer collection when fuxi touch is enabled and republishes Digitizer/Touch Screen
+                        // plus Built-In on the matched service, which is what backboardd's digitizer filter reads.
+                        IOService *device=native_hid_input_allocate();
+                        native_hid_input_object=(uintptr_t)device;
+                        bool valid=device && device->metaCast("IOHIDDevice") && device->init();
+                        native_hid_input_observed(0,valid?0:kIOReturnError);
+                        bool attached=valid && device->attach(resource);
+                        native_hid_input_observed(1,attached?0:kIOReturnError);
+                        started=attached && device->start(resource);
+                        if(!started) {
+                            native_hid_input_observed(7,kIOReturnError);
+                            if(attached)device->detach(resource);
+                            OSSafeReleaseNULL(device);native_hid_input_object=0;
+                        }
+                    }
+                    unsigned touchHid=0;
+                    unsigned split=0;
+                    PE_parse_boot_argn("sheng-touch-split",&split,sizeof(split));
+                    if(!fuxiTouch && started && split==1 && PE_parse_boot_argn("sheng-touch-hid",&touchHid,sizeof(touchHid)) && touchHid==1) {
+                        // Separate digitizer service (primary usage Digitizer/Touch Screen, Built-In).
+                        IOService *touch=native_hid_touch_allocate();
+                        bool touchStarted=touch && touch->metaCast("IOHIDDevice") && touch->init() && touch->attach(resource) && touch->start(resource);
+                        if(!touchStarted && touch){touch->detach(resource);OSSafeReleaseNULL(touch);}
+                    }
+                    // The offline devices live for this bounded boot. Its
+                    // service attachment and timer remain genuine live objects.
+                }
+            }
+        }
+        OSSafeReleaseNULL(resource);OSSafeReleaseNULL(match);
+    }
+    native_hid_stage=3;native_hid_checkpoint();
+}
+// Loading IOHIDFamily and starting the digitizer service from bsd_autoconf() stalls the boot handoff at the logo
+// (t25: boot UI and touch thread alive, progress frozen). The fuxi path runs the same probe from its own thread.
+static void native_hid_probe_thread(void *, wait_result_t) {
+    unsigned delayMs=20000;
+    if(!PE_parse_boot_argn("fuxi-touch-hid-delay",&delayMs,sizeof(delayMs)) || delayMs>120000)delayMs=20000;
+    IOSleep(delayMs);
+    native_hid_input_probe_body();
+}
+void native_hid_input_probe(void) {
+    unsigned enabled=0;
+    const bool fuxiTouch=native_fuxi_touch_enabled!=0;
+    if((!PE_parse_boot_argn("offline-hid-input",&enabled,sizeof(enabled)) || enabled!=1) && !fuxiTouch)return;
+    if(fuxiTouch) {
+        static bool spawned;
+        if(spawned)return;
+        spawned=true;
+        thread_t thread=nullptr;
+        if(kernel_thread_start(native_hid_probe_thread,nullptr,&thread)==KERN_SUCCESS)thread_deallocate(thread);
+        return;
+    }
+    native_hid_input_probe_body();
+}
+}

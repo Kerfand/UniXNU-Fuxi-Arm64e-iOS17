@@ -1,0 +1,1 @@
+../../device/scripts/read-sheng-log.py

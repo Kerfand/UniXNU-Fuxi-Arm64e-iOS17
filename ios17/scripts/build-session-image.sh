@@ -1,0 +1,1 @@
+../../device/scripts/build-session-image.sh

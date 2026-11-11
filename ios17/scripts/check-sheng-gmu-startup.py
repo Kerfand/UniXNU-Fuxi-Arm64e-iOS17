@@ -1,0 +1,1 @@
+../../device/scripts/check-sheng-gmu-startup.py

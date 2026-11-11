@@ -1,0 +1,1 @@
+../../device/scripts/build-air-nir-diagnostic.py
