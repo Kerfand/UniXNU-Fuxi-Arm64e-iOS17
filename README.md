@@ -24,7 +24,7 @@
 
 - **GPU / 显示**：Adreno 740 执行命令，IOSurface 与交换链正常，b3a8（XR10）帧由 CPU 转换后上屏。
 - **触控**：FTM5 正常；21H16 上内核 `IOHIDEventDriver` 需要 IOHIDDevice 带 `HIDDefaultBehavior` 才会匹配（配合 `dk=0` 跳过 DriverKit）；补上 `OSArray::withObjects` 映射后触控不再卡死。
-- **按键**：`FuxiButtons`（PMK8550 PON/RESIN + PM8550 GPIO6）接入 NativeHidInput report 2，电源、音量键可用。
+- **按键**：`FuxiButtons`（PMK8550 PON/RESIN + PM8550 GPIO6）接入 NativeHidInput report 2，电源可用，音量键不可用。
 - **激活**：Data 种子缺 `/private/var/Keychains`，securityd 无法打开钥匙串，mobileactivationd 迁移失败。内核在 Data 挂载后按 21H16 系统卷 `/private/var` 模板补齐目录（`sheng-data-skel=1`，表由 `tools/mkskel.py` 从你自己的 IPSW 生成），mobileactivationd 原生激活，已跳过激活。
 - **亮度**：`fuxi-backlight=dsi`（DCS 0x51）+ `sheng-backlight-control=1`；arm64e 上改为真正的 `getMetaClass()` 重写，不再改虚表。
 - **GPU 插件**：Turnip（`libvulkan_freedreno.dylib`）改用 chained fixups 链接，修复 mediaserverd / iconservicesagent 在子线程加载 Metal 时 dyld 栈溢出（设置打开慢的根因）。
