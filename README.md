@@ -44,7 +44,6 @@
 
 ## 已知问题
 
-- 状态栏仍显示红色 `rdar` 条（`ios17/statusbar/FuxiStatusBar.c` 已上机，但尚未生效，待排查）。
 - 扬声器无声（见上），打字卡顿。
 - ADT 中 iPhone15,2 的 `target-type` 仍为 `D72`，真机为 `D73`。
 
