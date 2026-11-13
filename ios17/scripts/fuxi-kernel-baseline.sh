@@ -40,7 +40,8 @@ if [ -z "${UNIXNU_PATCH_LIST:-}" ]; then
 # The fuxi patch set adds zzzc-boot-log, which overlaps the boot-progress hunk; it must unwind first.
 # ios17-job-policy.patch edits inside the zzz-boot-progress hunk of kern_exec.c: unwound before it.
 # ios17-wallpaper-iphone.patch edits inside the zzy-native-gpu-addon-mount hunk: unwound first as well.
-for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/ios17-wallpaper-iphone.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-job-policy.patch" "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
+# ios17-zaudio-hal-mount.patch adds lines right after the wallpaper patch's: it unwinds before it.
+for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/ios17-zaudio-hal-mount.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-wallpaper-iphone.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-job-policy.patch" "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
     "$ROOT/patches/xnu/zzyb-native-cryptex-os-view.patch" \
     "$ROOT/patches/xnu/zzy-staged-system-apps.patch" "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch" \
     "$ROOT/patches/xnu/zzyc-owner-skip-launch-constraints.patch"; do
@@ -52,7 +53,9 @@ done
 # rootauth-probe.patch adds a line inside the context of offline-owner-root-binding-audit.patch. Unwind both
 # first so those shared patches keep their idempotent (reverse) check; the arm64e loop below applies them again.
 if [ "${UNIXNU_XNU_ARCH:-arm64}" = arm64e ]; then
-  for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/rootauth-probe.patch" \
+  for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/zz-hot-sampler.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/screen-quiet-after-swap.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/rootauth-probe.patch" \
       "$ROOT/patches/xnu-10063-arm64e/init-exec-probe.patch" \
       "$ROOT/patches/xnu-10063-arm64e/init-hang-probe.patch" \
       "$ROOT/patches/xnu-10063-arm64e/exec-stage-probe.patch" \

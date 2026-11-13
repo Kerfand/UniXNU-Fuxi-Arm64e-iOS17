@@ -1,38 +1,54 @@
-# iOS 17.7 21H16 (iPhone15,2) checkpoint 1: arm64e kernel and the original fileset kexts, up to the
-# root-device wait. Storage, owner root, display, GPU and touch are left out: their bindings are pinned
-# to the iPad 21H461 kernelcache. The kernel console uses the UEFI framebuffer (-v).
+# iOS 17.7 21H16 (iPhone15,2) checkpoint 2b: arm64e kernel and the original fileset kexts, the read-only
+# NativeUfs transport on the 21H16 IOStorageFamily bindings (scripts/data/native-storage-original-bindings.S),
+# and the iPadOS owner-root chain: NativeAES (21H16 IOAESAccelerator bindings, native-aes-original-bindings.S),
+# NativeVirtioBlock with the verified multi-policy personality, VerifiedRootProbe and OWNER_ROOT_AUDIT/TRUST.
+# The 21H16 OS volume of the userdata image is not sealed (no snapshot), so Apple's root-hash authentication
+# returns EAUTH; the owner root accepts it instead when it is read-only and every block comes from a NativeUfs
+# window verified against the owner-signed policy. Policies are header-only (build-ios17-verified-root.py):
+# the hash tables are userdata data objects. Display, GPU and touch stay out.
 CONFIG_XNU_BUILD_ARCHIVES=y
 CONFIG_XNU_BUILD_WERROR=n
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
-CONFIG_XNU_NATIVE_AES=n
+CONFIG_XNU_NATIVE_AES=y
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
 CONFIG_XNU_DT_PANIC_REGION=y
 CONFIG_XNU_NATIVE_ARCH_TIMER=y
 CONFIG_XNU_NATIVE_PAN=y
-CONFIG_XNU_NATIVE_UFS=n
-CONFIG_XNU_NATIVE_RAM_BLOCK=n
-CONFIG_XNU_NATIVE_VIRTIO_BLOCK=n
-CONFIG_XNU_VERIFIED_ROOT_PROBE=n
-CONFIG_XNU_OWNER_ROOT_AUDIT=n
-CONFIG_XNU_OWNER_ROOT_TRUST=n
-CONFIG_XNU_OWNER_CACHE_MOUNT=n
-CONFIG_XNU_OWNER_CACHE_STARTUP=n
+CONFIG_XNU_NATIVE_UFS=y
+CONFIG_XNU_NATIVE_RAM_BLOCK=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+# Owner "no ignition" startup (as fuxi_full/sheng): the verified 21H16 SystemOS volume (NativeUfs object window,
+# SystemOS policy) is mounted read-only as a native union over /, the owner boot-manifest-hash is published from the
+# OS + SystemOS policy digests, and dyld flag bit 3 skips libignition (whose Preboot lookup, APFS role 0x10, has no
+# volume on this userdata). Scratch Data: a volatile NativeRamBlock disk over the packed seed DarwinBoot hands over as
+# /chosen/memory-map/PackedRAMDisk (<= 2 GiB, so no persistent store and no UFS write), mounted at /private/var.
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
 CONFIG_XNU_OWNER_CACHE_CARRIER=n
-CONFIG_XNU_OWNER_BOOT_MANIFEST=n
-CONFIG_XNU_OWNER_DATA_MOUNT=n
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_OWNER_DATA_MOUNT=y
+CONFIG_XNU_OWNER_DATA_VOLUME_UUID="FEE1FE9D-1C1D-42F9-9A12-0732FA326C30"
 CONFIG_XNU_OWNER_CRYPTEX_FILES=n
-CONFIG_XNU_OWNER_UNION_SYSTEMOS=n
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
+CONFIG_XNU_OWNER_CACHE_VOLUME_UUID="3820A687-749E-4947-89C3-19B8AC55D5A6"
+CONFIG_XNU_OWNER_ROOT_VOLUME_UUID="4A4918F2-B5D8-45EF-B9A7-D3639D762155"
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+CONFIG_XNU_NATIVE_UFS_ARCHIVE="{tree}/build/native-ufs/libNativeUfs.a"
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"
+CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
 CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/boot-log/libBootLog.a {tree}/.cache/fuxi-qud-build/libQcomXnuUsbDebug.a -Wl,-force_load,{tree}/build/ios17-stubs/libIos17Stubs.a"
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n
 CONFIG_XNU_BOOT_PROGRESS=n
-CONFIG_XNU_NATIVE_ADRENO=n
-CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
+CONFIG_XNU_NATIVE_ADRENO=y
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 CONFIG_XNU_SHENG_PMGR=n
 CONFIG_XNU_SOURCE_MOCKFS=n
 CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=n

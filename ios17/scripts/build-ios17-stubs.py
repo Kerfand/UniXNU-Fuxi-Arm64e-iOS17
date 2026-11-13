@@ -40,9 +40,9 @@ volatile uint64_t native_data_persist_pages, native_data_persist_loaded, native_
 # With CONFIG_XNU_NATIVE_LEGACY_DISPLAY the display archive (build-ios17-legacy-display.py) defines the two
 # lifecycle probes, so package/LegacyDisplayStub.c is left out and only its GOP hand-off no-ops are kept here.
 legacy_display = os.environ.get('XNU_NATIVE_LEGACY_DISPLAY') == '1'
-handoff_stubs = '''int native_gop_handoff_call(unsigned op, void *task, const void *in, unsigned long in_size, void *out, unsigned long out_size)
+handoff_stubs = '''__attribute__((weak)) int native_gop_handoff_call(unsigned op, void *task, const void *in, unsigned long in_size, void *out, unsigned long out_size)
 { (void)op; (void)task; (void)in; (void)in_size; (void)out; (void)out_size; return -536870203; /* kIOReturnNotReady */ }
-void *native_gop_handoff_memory(void) { return 0; }
+__attribute__((weak)) void *native_gop_handoff_memory(void) { return 0; }
 ''' if legacy_display else ''
 # Original kexts get IOInterruptEventSource::interruptEventSource(owner, action, provider, index) through this wrapper
 # (fixture: original 0xfffffff0083a8964 -> _unixnu_interrupt_event_source_soft). Software sources (provider NULL:
@@ -79,7 +79,11 @@ if os.environ.get('XNU_NATIVE_ADRENO') == '1':
                  'uint32_t native_gpu_perf_vote[2];',
                  # The touch probe (FuxiTouchProbe.cpp, in the display archive) defines the boot-log touch counters.
                  'volatile int32_t native_touch_strokes[16][7];', 'volatile uint32_t native_touch_stroke_count;',
-                 'volatile int32_t native_touch_extent[4];', 'volatile uint32_t native_touch_edge_stats[4];'):
+                 'volatile int32_t native_touch_extent[4];', 'volatile uint32_t native_touch_edge_stats[4];',
+                 # CpuFreqProbe.cpp (in the display archive, polled by FuxiCpuFreqLog.cpp) defines the frequency row.
+                 'char native_cpufreq_row[120];',
+                 # NativeGOPPresenter.cpp (the GPU scanout hand-off, sheng-fb-gpu=1) defines its wait counters.
+                 'volatile uint64_t native_gop_wait_stats[7];'):
         if text.count(decl) != 1:
             raise SystemExit('BootLogStubs.c changed: ' + decl)
         text = text.replace(decl, decl[:-1] + ' __attribute__((weak));')

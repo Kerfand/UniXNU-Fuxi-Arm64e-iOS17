@@ -38,7 +38,10 @@ if [ -z "${UNIXNU_PATCH_LIST:-}" ]; then
 # The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
 # inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
 # The fuxi patch set adds zzzc-boot-log, which overlaps the boot-progress hunk; it must unwind first.
-for LATE_PATCH in "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
+# ios17-job-policy.patch edits inside the zzz-boot-progress hunk of kern_exec.c: unwound before it.
+# ios17-wallpaper-iphone.patch edits inside the zzy-native-gpu-addon-mount hunk: unwound first as well.
+# ios17-zaudio-hal-mount.patch adds lines right after the wallpaper patch's: it unwinds before it.
+for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/ios17-zaudio-hal-mount.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-wallpaper-iphone.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-job-policy.patch" "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
     "$ROOT/patches/xnu/zzyb-native-cryptex-os-view.patch" \
     "$ROOT/patches/xnu/zzy-staged-system-apps.patch" "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch" \
     "$ROOT/patches/xnu/zzyc-owner-skip-launch-constraints.patch"; do
@@ -46,13 +49,31 @@ for LATE_PATCH in "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz
     git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
   fi
 done
-# arm64e: early-security-init-sign.patch edits the call that the XnuPrelink security-init patch adds. Unwind it
-# first so that patch keeps its idempotent check; the arm64e loop below applies it again.
+# arm64e: early-security-init-sign.patch edits the call that the XnuPrelink security-init patch adds, and
+# rootauth-probe.patch adds a line inside the context of offline-owner-root-binding-audit.patch. Unwind both
+# first so those shared patches keep their idempotent (reverse) check; the arm64e loop below applies them again.
 if [ "${UNIXNU_XNU_ARCH:-arm64}" = arm64e ]; then
-  LATE_PATCH="$ROOT/patches/xnu-10063-arm64e/early-security-init-sign.patch"
-  if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
-    git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
-  fi
+  for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/zz-hot-sampler.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/screen-quiet-after-swap.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/rootauth-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/init-exec-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/init-hang-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/exec-stage-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/unmapped-screen-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/owner-root-volume-uuid.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/reboot-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/exit-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/native-jop-key.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/crash-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/user-va-39bit.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/assert-expr-strings.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/stackshot-sync.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/iokit-user-probe.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/early-security-init-sign.patch"; do
+    if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
+      git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
+    fi
+  done
 fi
 for PATCH in "$ROOT"/patches/xnu/*.patch "$ROOT"/kits/XnuPrelink/patches/*.patch; do
   if ! git -C .cache/xnu-work apply --reverse --check "$PATCH" >/dev/null 2>&1; then
@@ -435,7 +456,7 @@ if [ "$OWNER_DATA_MOUNT" = 1 ] && [ "$OWNER_BOOT_MANIFEST" != 1 ]; then
   exit 1
 fi
 OWNER_DATA_HEADER=$ROOT/build/xnu/owner-data-volume.h
-python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" <<'PY_DATA_UUID'
+python3 - "$OWNER_DATA_HEADER" "$OWNER_DATA_MOUNT" "$NATIVE_RAM_BLOCK" "${XNU_OWNER_DATA_VOLUME_UUID:-}" "${XNU_OWNER_CACHE_VOLUME_UUID:-}" "${XNU_OWNER_ROOT_VOLUME_UUID:-}" <<'PY_DATA_UUID'
 from pathlib import Path
 import sys
 import uuid
@@ -455,14 +476,21 @@ if len(sys.argv) > 5 and sys.argv[5]:
     except ValueError:
         raise SystemExit('Set XNU_OWNER_CACHE_VOLUME_UUID to the SystemOS volume UUID of the signed policy')
 text += '#define XNU_OWNER_CACHE_VOLUME_UUID "' + cache + '"\n'
+# The OS (root) volume of the signed root policy, for the owner boot-manifest digest
+# (xnu-10063-arm64e/owner-root-volume-uuid.patch keeps the sheng/e5 21H461 value as its default).
+if len(sys.argv) > 6 and sys.argv[6]:
+    try:
+        text += '#define XNU_OWNER_ROOT_VOLUME_UUID "' + str(uuid.UUID(sys.argv[6])).upper() + '"\n'
+    except ValueError:
+        raise SystemExit('Set XNU_OWNER_ROOT_VOLUME_UUID to the OS volume UUID of the signed root policy')
 path.parent.mkdir(parents=True, exist_ok=True)
 if not path.exists() or path.read_text() != text:
     path.write_text(text)
 PY_DATA_UUID
 OWNER_DATA_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-data-mount-mode
-if [ "$(cat "$OWNER_DATA_STAMP" 2>/dev/null || echo 0)" != "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:${XNU_OWNER_CACHE_VOLUME_UUID:-}" ]; then
+if [ "$(cat "$OWNER_DATA_STAMP" 2>/dev/null || echo 0)" != "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:${XNU_OWNER_CACHE_VOLUME_UUID:-}:${XNU_OWNER_ROOT_VOLUME_UUID:-}" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
-  printf '%s\n' "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:${XNU_OWNER_CACHE_VOLUME_UUID:-}" > "$OWNER_DATA_STAMP"
+  printf '%s\n' "$OWNER_DATA_MOUNT:$NATIVE_RAM_BLOCK:${XNU_OWNER_CACHE_VOLUME_UUID:-}:${XNU_OWNER_ROOT_VOLUME_UUID:-}" > "$OWNER_DATA_STAMP"
 fi
 OWNER_CRYPTEX_FILES=${XNU_OWNER_CRYPTEX_FILES:-0}
 if [ "$OWNER_CRYPTEX_FILES" != 0 ] && [ "$OWNER_CRYPTEX_FILES" != 1 ]; then
@@ -787,7 +815,8 @@ python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/software
   "$NATIVE_VIRTIO_CONSOLE" "$ROOT/build/virtio-mmio-console/libVirtioMmioConsole.a" \
   "$NATIVE_OFFLINE_GPU" "$ROOT/build/native-offline-gpu/libNativeOfflineGPU.late.a" \
   "$SHENG_PMGR" "$ROOT/build/sheng-platform-power/libShengPlatformPower.a" \
-  "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/adreno740/libAdreno740.a" <<'PY'
+  "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/adreno740/libAdreno740.a" \
+  "${XNU_NATIVE_UFS:-0}" "${XNU_NATIVE_UFS_ARCHIVE:-$ROOT/build/native-ufs/libNativeUfs.a}" <<'PY'
 import hashlib
 from pathlib import Path
 import sys

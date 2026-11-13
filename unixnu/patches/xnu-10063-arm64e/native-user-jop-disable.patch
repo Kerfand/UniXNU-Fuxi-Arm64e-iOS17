@@ -1,0 +1,49 @@
+diff --git a/osfmk/arm64/locore.s b/osfmk/arm64/locore.s
+index 285bc2e..86e2609 100644
+--- a/osfmk/arm64/locore.s
++++ b/osfmk/arm64/locore.s
+@@ -451,6 +451,20 @@ el1_sp1_serror_vector_long:
+ 
+ .macro EL0_64_VECTOR guest_label
+ 	stp		x0, x1, [sp, #-16]!					// Save x0 and x1 to the exception stack
++#if HAS_NATIVE_PAC
++	/*
++	 * native-user-jop-disable.patch: a thread of a non-arm64e process (ARM_MACHINE_THREAD_DISABLE_USER_JOP) runs EL0 with
++	 * SCTLR_EL1 EnIA/EnIB/EnDA/EnDB clear (see the exception return below). ARMv8.3 has one set of enable bits for EL1&0,
++	 * so turn them back on before the kernel's first PAC instruction (LOAD_USER_PCB's autda just below).
++	 */
++	mrs		x0, SCTLR_EL1
++	tbnz	x0, #SCTLR_PACIA_ENABLED_SHIFT, 7f
++	MOV64	x1, (SCTLR_PACIA_ENABLED | SCTLR_PACIB_ENABLED | SCTLR_PACDA_ENABLED | SCTLR_PACDB_ENABLED)
++	orr		x0, x0, x1
++	msr		SCTLR_EL1, x0
++	isb		sy
++7:
++#endif /* HAS_NATIVE_PAC */
+ #if __ARM_KERNEL_PROTECT__
+ 	mov		x18, #0 						// Zero x18 to avoid leaking data to user SS
+ #endif
+@@ -1460,6 +1474,23 @@ Lexception_return_restore_registers:
+ 
+ 	msr		ELR_EL1, x1							// Load the return address into ELR
+ 	msr		SPSR_EL1, x2						// Load the return CPSR into SPSR
++#if HAS_NATIVE_PAC
++	/*
++	 * native-user-jop-disable.patch: Apple CPUs turn the user keys off for a non-arm64e process (ml_disable_user_jop_key,
++	 * APCTL); its shared region carries unsigned auth pointers (si_ptrauth 0) and the PAC instructions of the arm64e
++	 * dyld and cache code have to act as NOPs. Here the same is done with SCTLR_EL1 on the way back to EL0 only;
++	 * nothing below uses a PAC instruction, and the eret synchronizes the write.
++	 */
++	tbnz	w2, PSR64_MODE_EL_SHIFT, 7f				// returning to EL1: keep the keys
++	mrs		x3, TPIDR_EL1
++	ldr		w3, [x3, TH_ARM_MACHINE_FLAGS]
++	tbz		w3, ARM_MACHINE_THREAD_DISABLE_USER_JOP_SHIFT, 7f
++	mrs		x3, SCTLR_EL1
++	MOV64	x4, (SCTLR_PACIA_ENABLED | SCTLR_PACIB_ENABLED | SCTLR_PACDA_ENABLED | SCTLR_PACDB_ENABLED)
++	bic		x3, x3, x4
++	msr		SCTLR_EL1, x3
++7:
++#endif /* HAS_NATIVE_PAC */
+ 
+ /* Restore special register state */
+ 	ldr		w3, [sp, NS64_FPSR]

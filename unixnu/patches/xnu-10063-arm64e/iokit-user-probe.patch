@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 --- a/iokit/Kernel/IOUserClient.cpp
 +++ b/iokit/Kernel/IOUserClient.cpp
-@@ -2694,6 +2694,180 @@
+@@ -2694,6 +2694,192 @@
  	return internal_io_service_match_property_table(service, matching, matchingCnt, matches);
  }
  
@@ -17,7 +17,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +		uint32_t v = 0;
 +		unixnu_iokit_probe_mode = PE_parse_boot_argn("unixnu-iokit-probe", &v, sizeof(v)) ? (int)v : 0;
 +	}
-+	if (unixnu_iokit_probe_mode <= 0 || unixnu_iokit_probe_lines >= 1200) {
++	if (unixnu_iokit_probe_mode <= 0) {
 +		return false;
 +	}
 +	name[0] = 0;
@@ -31,10 +31,19 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +	return !strcmp(name, "backboardd") || !strcmp(name, "SpringBoard");
 +}
 +
++/* fuxi 2026-11-13: lookups naming "Sheng" (the audio server plug-in's beacons, ShengAudioService) are always logged; everything else
++ * keeps the 1200-line budget. */
++static bool
++unixnu_iokit_probe_always(const char * s)
++{
++	return s && (strnstr(s, "Sheng", strlen(s)) != NULL || strnstr(s, "Audio", strlen(s)) != NULL ||
++	    strnstr(s, "FSB:", strlen(s)) != NULL);
++}
++
 +static bool
 +unixnu_iokit_probe_keyword(const char * s)
 +{
-+	static const char * const keys[] = { "Accel", "GPU", "AGX", "Framebuffer", "Display", "Metal", "Adreno", "Surface", "IOMFB" };
++	static const char * const keys[] = { "Accel", "GPU", "AGX", "Framebuffer", "Display", "Metal", "Adreno", "Surface", "IOMFB", "Audio", "Sheng", "FSB:" };
 +	size_t len = strlen(s);
 +	for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
 +		if (strnstr(s, keys[i], len)) {
@@ -105,7 +114,8 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +	}
 +	buf[0] = 0;
 +	unixnu_iokit_probe_value(buf, sizeof(buf), dict, 0);
-+	if (!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(buf)) {
++	if ((!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(buf)) ||
++	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(buf))) {
 +		return;
 +	}
 +	IOService * now = IOService::copyMatchingService(dict);
@@ -124,7 +134,8 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +		return;
 +	}
 +	const char * cls = service->getMetaClass()->getClassName();
-+	if (!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) {
++	if ((!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) ||
++	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(cls))) {
 +		return;
 +	}
 +	unixnu_iokit_probe_lines++;
@@ -150,7 +161,8 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +	}
 +	const OSMetaClass * meta = client->getMetaClass();
 +	const char * cls = meta->getClassName();
-+	if (!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) {
++	if ((!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) ||
++	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(cls))) {
 +		return;
 +	}
 +	unsigned i;
@@ -182,7 +194,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  static kern_return_t
  internal_io_service_get_matching_services(
  	mach_port_t main_port,
-@@ -2715,6 +2889,7 @@
+@@ -2715,6 +2901,7 @@
  	if ((dict = OSDynamicCast( OSDictionary, obj))) {
  		IOTaskRegistryCompatibilityMatching(current_task(), dict);
  		*existing = IOUserIterator::withIterator(IOService::getMatchingServices( dict ));
@@ -190,7 +202,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  		kr = kIOReturnSuccess;
  	} else {
  		kr = kIOReturnBadArgument;
-@@ -2798,6 +2973,7 @@
+@@ -2798,6 +2985,7 @@
  	if ((dict = OSDynamicCast( OSDictionary, obj))) {
  		IOTaskRegistryCompatibilityMatching(current_task(), dict);
  		*service = IOService::copyMatchingService( dict );
@@ -198,7 +210,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  		kr = *service ? kIOReturnSuccess : kIOReturnNotFound;
  	} else {
  		kr = kIOReturnBadArgument;
-@@ -2929,6 +3105,7 @@
+@@ -2929,6 +3117,7 @@
  
  		notify = IOService::addMatchingNotification( sym, dict,
  		    &userNotify->_handler, userNotify );
@@ -206,7 +218,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  		if (notify) {
  			*notification = userNotify;
  			userNotify->setNotification( notify );
-@@ -4427,6 +4604,7 @@
+@@ -4427,6 +4616,7 @@
  #endif
  		res = service->newUserClient( owningTask, (void *) owningTask,
  		    connect_type, propertiesDict, &client );
@@ -214,7 +226,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  
  		if (propertiesDict) {
  			propertiesDict->release();
-@@ -5113,6 +5291,7 @@
+@@ -5113,6 +5303,7 @@
  	if (kIOReturnSuccess == ret) {
  		ret = client->callExternalMethod( selector, &args );
  	}
@@ -222,7 +234,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  
  	*scalar_outputCnt = args.scalarOutputCount;
  	*inband_outputCnt = args.structureOutputSize;
-@@ -5227,6 +5406,7 @@
+@@ -5227,6 +5418,7 @@
  	if (kIOReturnSuccess == ret) {
  		ret = client->callExternalMethod( selector, &args );
  	}

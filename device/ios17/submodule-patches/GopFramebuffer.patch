@@ -1,0 +1,316 @@
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+index 2f3e363..f022bcf 100644
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -72,6 +72,10 @@ static void noteSurface(OSObject *surface,IOMemoryDescriptor *memory)
+     native_legacy_surfaces[0]=k+1;
+     if(k>=4)return;
+     seen[k]=surface;
++    // fuxi surface probe (2026-11-13, Control Center / keyboard cut on the right): the render server's swap surfaces as they arrive.
++    printf("fuxi surface probe: #%u %llux%llu stride %llu format %08x planes %u alloc %llu\n",k,(unsigned long long)native_legacy_surface_width(surface),
++        (unsigned long long)native_legacy_surface_height(surface),(unsigned long long)native_legacy_surface_stride(surface),native_legacy_surface_format(surface),
++        native_legacy_surface_planes(surface),(unsigned long long)native_legacy_surface_allocation(surface));
+     if(memory->prepare()!=kIOReturnSuccess)return;
+     uint32_t segments=0;uint64_t largest=0;
+     for(IOByteCount offset=0,length=0;offset<memory->getLength() && segments<100000;offset+=length,++segments) {
+@@ -110,7 +114,21 @@ static inline bool nativeBgra(uint32_t format,uint32_t planes) {
+ // 64-bit RGBA half float ('RGhA', one plane): iPadOS 27's render server picks it for this panel's framebuffer once a Metal device renders
+ // (every Metal frame was refused while only BGRA was taken). The copy converts it to the scanout's BGRA (convertHalfRows below).
+ static inline bool nativeHalf(uint32_t format,uint32_t planes) {return format==0x52476841 && !planes;}
+-static inline bool nativeScanoutFormat(uint32_t format,uint32_t planes) {return nativeBgra(format,planes) || nativeHalf(format,planes);}
++// 'b3a8' (30RGBLE_8A_BiPlanar, two planes): iOS 17's render server picks it for this panel once a Metal device renders (21H16: every frame
++// was refused while only BGRA and RGhA were taken). Plane 0 holds the colour as 32-bit BGR10_XR words (blue in bits 0..9, green 10..19,
++// red 20..29; 384..894 is 0.0..1.0), plane 1 an 8-bit alpha plane the opaque panel ignores. The surface's own row value counts elements
++// (1088 for 1080 pixels), so plane 0's row is four bytes per element. The copy converts plane 0 to the scanout's BGRA (convertXrRows).
++static inline bool nativeXr(uint32_t format,uint32_t planes) {return format==0x62336138 && planes==2;}
++static inline bool nativeScanoutFormat(uint32_t format,uint32_t planes) {
++    return nativeBgra(format,planes) || nativeHalf(format,planes) || nativeXr(format,planes);
++}
++// The byte stride of the rows the copy reads: plane 0's for 'b3a8', the surface's own otherwise. iOS 17's single-plane '&BGA' also
++// reports its row in elements (1088 for 1080 pixels, 2026-11-12: every such frame was rejected as shorter than a row), so a value under
++// width * 4 counts 4-byte elements there too.
++static inline uint64_t scanoutSourceStride(uint32_t format,uint32_t planes,uint64_t stride,uint32_t width) {
++    const bool elements=nativeXr(format,planes) || (format==0x26424741 && planes==1);
++    return (elements && stride<uint64_t(width)*4 && stride<=UINT64_MAX/4)?stride*4:stride;
++}
+ // One byte per positive half bit pattern (32768); negative values and NaNs give 0, values of 1.0 and above 255.
+ static uint8_t *halfTable() {
+     static uint8_t *table;
+@@ -145,6 +163,148 @@ static bool convertHalfRows(volatile void *dst,uint64_t dstLength,uint64_t dstSt
+     }
+     return true;
+ }
++// Rows of BGR10_XR words to the scanout's BGRA rows (alpha opaque): (v - 384) * 255 / 510, clamped; extended-range values outside
++// 0.0..1.0 saturate. Returns false when a row runs past either end.
++static bool convertXrRows(volatile void *dst,uint64_t dstLength,uint64_t dstStride,const void *src,uint64_t srcLength,uint64_t srcStride,
++                          uint32_t width,uint32_t height) {
++    static uint8_t table[1024];static bool made;
++    if(!made) {
++        for(unsigned v=0;v<1024;++v)table[v]=v<=384?0:(v>=894?255:uint8_t(((v-384)*255+255)/510));
++        made=true;
++    }
++    if(dstStride<uint64_t(width)*4 || srcStride<uint64_t(width)*4 || !height ||
++       dstStride*(height-1)+uint64_t(width)*4>dstLength || srcStride*(height-1)+uint64_t(width)*4>srcLength)return false;
++    for(uint32_t y=0;y<height;++y) {
++        const uint32_t *in=reinterpret_cast<const uint32_t *>(static_cast<const uint8_t *>(src)+srcStride*y);
++        volatile uint32_t *out=reinterpret_cast<volatile uint32_t *>(static_cast<volatile uint8_t *>(dst)+dstStride*y);
++        for(uint32_t x=0;x<width;++x) {
++            const uint32_t p=in[x];
++            out[x]=0xff000000u|(uint32_t(table[(p>>20)&0x3ff])<<16)|(uint32_t(table[(p>>10)&0x3ff])<<8)|table[p&0x3ff];
++        }
++    }
++    return true;
++}
++
++// offline-legacy-logical-width / offline-legacy-logical-height: the display reports a logical mode at least as large as the panel (fuxi:
++// 1179x2556, iPhone 14 Pro's 393x852 pt at 3x, on a 1080x2400 panel) and every frame is scaled down to the GOP on the CPU.
++static uint32_t gLogicalW,gLogicalH,gPhysW,gPhysH;
++static bool gScaled;
++static void logicalConfigure(uint32_t physW,uint32_t physH) {
++    uint32_t w=0,h=0;
++    PE_parse_boot_argn("offline-legacy-logical-width",&w,sizeof(w));
++    PE_parse_boot_argn("offline-legacy-logical-height",&h,sizeof(h));
++    gPhysW=physW;gPhysH=physH;
++    gScaled=w>=physW && h>=physH && (w!=physW || h!=physH) && w<=8192 && h<=8192;
++    gLogicalW=gScaled?w:physW;gLogicalH=gScaled?h:physH;
++}
++// The display's (logical) size against the GOP the frame goes to.
++static bool scanoutMatches(uint32_t w,uint32_t h,const PE_Video &v) {
++    return gScaled?(w==gLogicalW && h==gLogicalH && v.v_width==gPhysW && v.v_height==gPhysH):(w==v.v_width && h==v.v_height);
++}
++static const uint8_t *xrTable() {
++    static uint8_t table[1024];static bool made;
++    if(!made) {
++        for(unsigned v=0;v<1024;++v)table[v]=v<=384?0:(v>=894?255:uint8_t(((v-384)*255+255)/510));
++        made=true;
++    }
++    return table;
++}
++enum ScaleSource {kScaleBGRA,kScaleXr,kScaleHalf};
++// One source row to 8-bit BGRA words.
++static bool scaleConvertRow(ScaleSource kind,const uint8_t *row,uint32_t *out,uint32_t width) {
++    if(kind==kScaleXr) {
++        const uint8_t *table=xrTable();const uint32_t *in=reinterpret_cast<const uint32_t *>(row);
++        for(uint32_t x=0;x<width;++x){const uint32_t p=in[x];out[x]=(uint32_t(table[(p>>20)&0x3ff])<<16)|(uint32_t(table[(p>>10)&0x3ff])<<8)|table[p&0x3ff];}
++    } else if(kind==kScaleHalf) {
++        const uint8_t *table=halfTable();if(!table)return false;const uint64_t *in=reinterpret_cast<const uint64_t *>(row);
++        for(uint32_t x=0;x<width;++x) {
++            const uint64_t p=in[x];
++            const uint32_t r=uint32_t(p)&0xffff,g=uint32_t(p>>16)&0xffff,b=uint32_t(p>>32)&0xffff;
++            out[x]=(uint32_t((r&0x8000)?0:table[r])<<16)|(uint32_t((g&0x8000)?0:table[g])<<8)|((b&0x8000)?0:table[b]);
++        }
++    } else {
++        const uint32_t *in=reinterpret_cast<const uint32_t *>(row);
++        for(uint32_t x=0;x<width;++x)out[x]=in[x];
++    }
++    return true;
++}
++// Bilinear sw x sh -> dw x dh (dw <= sw, dh <= sh), opaque BGRA out. Returns false when a row runs past either end.
++static bool scaleRows(volatile void *dst,uint64_t dstLength,uint64_t dstStride,uint32_t dw,uint32_t dh,
++                      const void *src,uint64_t srcLength,uint64_t srcStride,uint32_t sw,uint32_t sh,ScaleSource kind) {
++    const uint32_t bpp=kind==kScaleHalf?8:4;
++    if(!dw || !dh || !sw || !sh || dstStride<uint64_t(dw)*4 || srcStride<uint64_t(sw)*bpp ||
++       dstStride*(dh-1)+uint64_t(dw)*4>dstLength || srcStride*(sh-1)+uint64_t(sw)*bpp>srcLength)return false;
++    static uint32_t *xmap,*rows;static uint32_t xmapW,xmapSW,rowsW;
++    if(xmapW!=dw || xmapSW!=sw) {
++        if(xmap)IOFree(xmap,uint64_t(xmapW)*4);
++        xmap=static_cast<uint32_t *>(IOMalloc(uint64_t(dw)*4));xmapW=xmap?dw:0;xmapSW=xmap?sw:0;
++        if(!xmap)return false;
++        for(uint32_t x=0;x<dw;++x) {
++            int64_t f=(int64_t(2*x+1)*sw*256)/(int64_t(2)*dw)-128;if(f<0)f=0;
++            uint32_t i=uint32_t(f>>8),w=uint32_t(f&255);if(i>=sw-1){i=sw-1;w=0;}
++            xmap[x]=(i<<8)|w;
++        }
++    }
++    if(rowsW<sw) {
++        if(rows)IOFree(rows,uint64_t(rowsW)*8);
++        rows=static_cast<uint32_t *>(IOMalloc(uint64_t(sw)*8));rowsW=rows?sw:0;
++        if(!rows)return false;
++    }
++    uint32_t *r0=rows,*r1=rows+sw;int64_t have0=-1,have1=-1;
++    for(uint32_t y=0;y<dh;++y) {
++        int64_t f=(int64_t(2*y+1)*sh*256)/(int64_t(2)*dh)-128;if(f<0)f=0;
++        uint32_t i=uint32_t(f>>8),wy=uint32_t(f&255),j=i+1;if(i>=sh-1){i=sh-1;j=i;wy=0;}
++        if(have0!=int64_t(i)) {
++            if(have1==int64_t(i)){uint32_t *s=r0;r0=r1;r1=s;int64_t h=have0;have0=have1;have1=h;}
++            else{if(!scaleConvertRow(kind,static_cast<const uint8_t *>(src)+srcStride*i,r0,sw))return false;have0=i;}
++        }
++        if(have1!=int64_t(j)){if(!scaleConvertRow(kind,static_cast<const uint8_t *>(src)+srcStride*j,r1,sw))return false;have1=j;}
++        volatile uint32_t *out=reinterpret_cast<volatile uint32_t *>(static_cast<volatile uint8_t *>(dst)+dstStride*y);
++        for(uint32_t x=0;x<dw;++x) {
++            const uint32_t m=xmap[x],xi=m>>8,wx=m&255,xj=xi+1<sw?xi+1:xi;
++            const uint32_t a=r0[xi],b=r0[xj],c=r1[xi],d=r1[xj];
++            uint32_t px=0xff000000u;
++            for(unsigned s=0;s<24;s+=8) {
++                const uint32_t top=((a>>s)&255)*(256-wx)+((b>>s)&255)*wx,bot=((c>>s)&255)*(256-wx)+((d>>s)&255)*wx;
++                px|=(((top*(256-wy)+bot*wy)>>16)&255)<<s;
++            }
++            out[x]=px;
++        }
++    }
++    return true;
++}
++// fuxi USB debug screenshot (QcomXnuUsbDebug SCREENSHOT/SHOTNEXT, fuxi-usb-control-20261112): the GOP scanout every frame is copied
++// into, downscaled by fuxi-shot-scale (default 2) and handed over as packed RGB. Runs in the USB worker; reads the uncached mapping
++// with no lock, so a frame being written can tear.
++extern "C" int qcom_usb_debug_register_screenshot(int (*)(void *,uint8_t *,size_t,uint32_t *,uint32_t *),void *) __attribute__((weak_import));
++extern "C" int qcom_usb_debug_set_screenshot_storage(void *,size_t) __attribute__((weak_import));
++namespace {
++struct UsbShot {const volatile uint8_t *va;uint32_t w,h,stride,scale;};
++UsbShot gUsbShot;
++int usbShotCapture(void *cookie,uint8_t *rgb,size_t capacity,uint32_t *width,uint32_t *height) {
++    const UsbShot &s=*static_cast<const UsbShot *>(cookie);
++    const uint32_t ow=s.scale?s.w/s.scale:0,oh=s.scale?s.h/s.scale:0;
++    if(!s.va || !ow || !oh || uint64_t(ow)*oh*3>capacity)return 0;
++    for(uint32_t y=0;y<oh;++y) {
++        const volatile uint32_t *row=reinterpret_cast<const volatile uint32_t *>(s.va+uint64_t(y)*s.scale*s.stride);
++        uint8_t *out=rgb+uint64_t(y)*ow*3;
++        for(uint32_t x=0;x<ow;++x) {const uint32_t px=row[uint64_t(x)*s.scale];out[3*x]=uint8_t(px>>16);out[3*x+1]=uint8_t(px>>8);out[3*x+2]=uint8_t(px);}
++    }
++    *width=ow;*height=oh;return 1;
++}
++void usbShotRegister(IOMemoryMap *map,uint32_t w,uint32_t h,uint32_t stride) {
++    if(!&qcom_usb_debug_register_screenshot || !&qcom_usb_debug_set_screenshot_storage || gUsbShot.va || !map)return;
++    unsigned scale=2;PE_parse_boot_argn("fuxi-shot-scale",&scale,sizeof(scale));
++    if(scale<1 || scale>8)scale=2;
++    const uint64_t bytes=uint64_t(w/scale)*(h/scale)*3;
++    void *storage=bytes?IOMallocData(bytes):nullptr;
++    if(!storage)return;
++    if(!qcom_usb_debug_set_screenshot_storage(storage,bytes)) {IOFreeData(storage,bytes);return;}
++    gUsbShot={reinterpret_cast<const volatile uint8_t *>(map->getVirtualAddress()),w,h,stride,scale};
++    const int ok=qcom_usb_debug_register_screenshot(usbShotCapture,&gUsbShot);
++    printf("NativeLegacyDisplay: USB screenshot %ux%u (1/%u of %ux%u) %s\n",w/scale,h/scale,scale,w,h,ok==1?"registered":"refused");
++}
++}
+ class NativeLegacyDisplay;
+ static NativeLegacyDisplay *gDirectDisplay=nullptr;
+ extern "C" void native_legacy_direct_snapshot(void);
+@@ -267,7 +427,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+     // visible width) so the picture shows what the panel shows.
+     friend void native_legacy_direct_snapshot(void);
+     void snapshot() {
+-        if(!directOn || directBoot || shownSlot<0 || !bootMapping || !shownStride)return;
++        if(gScaled || !directOn || directBoot || shownSlot<0 || !bootMapping || !shownStride)return;
+         IOMemoryDescriptor *source=directSlots[shownSlot].memory;
+         PE_Video video={};uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
+         if(!source || PE_current_console(&video) || video.v_baseAddr!=bootMapping->getPhysicalAddress() || video.v_width!=width || video.v_height!=height)return;
+@@ -430,8 +590,14 @@ public:
+     // of the state pair) is meant to say; the platform subclass that normally writes it is not part of this
+     // port, so without it the user client's wait (selector 6) answers kIOReturnBusy forever and the compositor never presents. This is the
+     // original state setter (the virtual the original code calls with this same request shape) with only the powered word named.
++    // 21H16 (the generated ABI header defines NATIVE_LEGACY_ANNOUNCE_REQUESTED): the original swap_submit validates and queues a swap only
++    // while the requested-state word is set, and drops it with success otherwise, so the requested word is announced as well.
+     void announcePoweredByFirmware() {
++#if defined(NATIVE_LEGACY_ANNOUNCE_REQUESTED) && NATIVE_LEGACY_ANNOUNCE_REQUESTED
++        OriginalLegacyStateRequest request={0,1,0,1,1,{}};
++#else
+         OriginalLegacyStateRequest request={1,0,0,1,1,{}};
++#endif
+         applyStateRequest(&request,false);
+     }
+     bool start(IOService *provider) override {
+@@ -549,14 +715,14 @@ public:
+             uint32_t bw=0,bh=0;getDisplayDimensions(&bw,&bh);
+             uint64_t blankLength=(uint64_t)bw*bh*4;
+             if(PE_current_console(&blank) || blank.v_baseAddr!=bootMapping->getPhysicalAddress() ||
+-               blank.v_width!=bw || blank.v_height!=bh || blank.v_depth!=32 || blank.v_rotate ||
+-               !native_legacy_surface_bounds(bw,bh,blank.v_rowBytes,bootMapping->getLength(),bootMapping->getLength())) {
++               !scanoutMatches(bw,bh,blank) || blank.v_depth!=32 || blank.v_rotate ||
++               !native_legacy_surface_bounds(blank.v_width,blank.v_height,blank.v_rowBytes,bootMapping->getLength(),bootMapping->getLength())) {
+                 native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
+             }
+             if(!native_legacy_prepare_scanout()) {native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;}
+             directToBoot();
+             if(!native_legacy_fill_pixels(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
+-                bootMapping->getLength(),blank.v_rowBytes,bw,bh,0xff000000U)) {
++                bootMapping->getLength(),blank.v_rowBytes,blank.v_width,blank.v_height,0xff000000U)) {
+                 native_legacy_transfer_observed(kIOReturnBadArgument,request,0);return;
+             }
+             __asm__ volatile("dsb sy" ::: "memory");
+@@ -574,14 +740,15 @@ public:
+         PE_Video video={};
+         uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
+         uint64_t length=(uint64_t)width*height*4;
+-        uint64_t sourceStride=native_legacy_surface_stride(surface);
++        uint64_t sourceStride=scanoutSourceStride(native_legacy_surface_format(surface),native_legacy_surface_planes(surface),
++            native_legacy_surface_stride(surface),width);
+         uint64_t allocation=native_legacy_surface_allocation(surface);
+         if(!memory || !memory->metaCast("IOMemoryDescriptor") || !native_legacy_surface_bounds(width,height,sourceStride,allocation,memory->getLength()) ||
+            native_legacy_surface_width(surface)<width || native_legacy_surface_height(surface)<height ||
+            !nativeScanoutFormat(native_legacy_surface_format(surface),native_legacy_surface_planes(surface)) ||
+            PE_current_console(&video) || video.v_baseAddr!=bootMapping->getPhysicalAddress() ||
+-           video.v_width!=width || video.v_height!=height || video.v_depth!=32 || video.v_rotate ||
+-           !native_legacy_surface_bounds(width,height,video.v_rowBytes,bootMapping->getLength(),bootMapping->getLength())) {
++           !scanoutMatches(width,height,video) || video.v_depth!=32 || video.v_rotate ||
++           !native_legacy_surface_bounds(video.v_width,video.v_height,video.v_rowBytes,bootMapping->getLength(),bootMapping->getLength())) {
+             native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
+         }
+         // The diagnostic renderer repaints the page over the scanout until it is told the system owns the display; the GPU path needs that as much
+@@ -591,8 +758,9 @@ public:
+         }
+         noteSurface(surface,memory);
+         const bool half=nativeHalf(native_legacy_surface_format(surface),native_legacy_surface_planes(surface));
+-        if(directOn && !half && !gpuBypass && latchRequest)stat(5);
+-        if(directOn && !half && !gpuBypass && !latchRequest) {
++        const bool xr=nativeXr(native_legacy_surface_format(surface),native_legacy_surface_planes(surface));
++        if(directOn && !half && !xr && !gpuBypass && latchRequest)stat(5);
++        if(directOn && !half && !xr && !gpuBypass && !latchRequest && !gScaled) {
+             if(!gpuWrote(request)) {transferred=true;return;}
+             const int slot=directSlot(surface,memory);
+             if(slot>=0) {
+@@ -608,7 +776,9 @@ public:
+         }
+         directToBoot();
+         stat(7);note(7,-1,request);
+-        if(!gpuBypass && native_legacy_gpu_offer(this,memory,sourceStride,width,height,half?halfOfferFormat():NGP_BGRX8888)) {
++        // fuxi 2026-11-13: frames of the logical mode go to the GPU too (scanout_scale); a presenter without it refuses them
++        // and the CPU scaling below runs as before.
++        if(!gpuBypass && !xr && !(gScaled && half) && native_legacy_gpu_offer(this,memory,sourceStride,width,height,half?halfOfferFormat():NGP_BGRX8888)) {
+             // The GPU writes the scanout memory behind the CPU's back: the differential copy's picture of it is stale from now on.
+             native_legacy_swap_stage(1);
+             shadowValid=false;gpuRequest=request;gpuLength=length;transferred=true;
+@@ -629,10 +799,13 @@ public:
+             OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNoMemory,request,0);return;
+         }
+         flush_dcache64((addr64_t)source->getVirtualAddress(),(unsigned)source->getLength(),false);
+-        if(half) {
++        if(half || xr || gScaled) {
+             if(!native_legacy_prepare_scanout()) {OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;}
+             uint64_t copyStart;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyStart));
+-            if(!convertHalfRows(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),bootMapping->getLength(),video.v_rowBytes,
++            if(gScaled?!scaleRows(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),bootMapping->getLength(),video.v_rowBytes,
++                video.v_width,video.v_height,reinterpret_cast<const void *>(source->getVirtualAddress()),source->getLength(),sourceStride,width,height,
++                xr?kScaleXr:half?kScaleHalf:kScaleBGRA) :
++               !(xr?convertXrRows:convertHalfRows)(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),bootMapping->getLength(),video.v_rowBytes,
+                 reinterpret_cast<const void *>(source->getVirtualAddress()),source->getLength(),sourceStride,width,height)) {
+                 OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnBadArgument,request,0);return;
+             }
+@@ -783,7 +956,8 @@ public:
+                     if(native_legacy_surface_width(surface)>=width && native_legacy_surface_height(surface)>=height &&
+                        nativeScanoutFormat(native_legacy_surface_format(surface),native_legacy_surface_planes(surface)) &&
+                        memory && memory->metaCast("IOMemoryDescriptor") &&
+-                       native_legacy_surface_bounds(width,height,native_legacy_surface_stride(surface),
++                       native_legacy_surface_bounds(width,height,scanoutSourceStride(native_legacy_surface_format(surface),
++                           native_legacy_surface_planes(surface),native_legacy_surface_stride(surface),width),
+                            native_legacy_surface_allocation(surface),memory->getLength())) {
+                         reason=0;accepted=true;
+                     } else {
+@@ -845,12 +1019,15 @@ public:
+         bool valid=mapping->getVirtualAddress() && mapping->getPhysicalAddress()==video.v_baseAddr &&
+                    mapping->getLength()==video.v_rowBytes*video.v_height;
+         if(valid) {
+-            installBootDimensions((uint32_t)video.v_width,(uint32_t)video.v_height);
++            logicalConfigure((uint32_t)video.v_width,(uint32_t)video.v_height);
++            installBootDimensions(gLogicalW,gLogicalH);
+             uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
+-            valid=width==video.v_width && height==video.v_height;
++            valid=width==gLogicalW && height==gLogicalH;
++            if(gScaled)printf("NativeLegacyDisplay: logical %ux%u scaled to the %ux%u panel\n",gLogicalW,gLogicalH,gPhysW,gPhysH);
+             if(valid) {
+                 OSSafeReleaseNULL(bootMapping);bootMapping=mapping;mapping=nullptr;primary=video.v_display==1;
+-                valid=native_legacy_gop_mapping_observed(this,bootMapping,width,height);
++                valid=native_legacy_gop_mapping_observed(this,bootMapping,(uint32_t)video.v_width,(uint32_t)video.v_height);
++                if(valid)usbShotRegister(bootMapping,(uint32_t)video.v_width,(uint32_t)video.v_height,(uint32_t)video.v_rowBytes);
+ #if defined(NATIVE_LEGACY_DEFAULT_SURFACE) && NATIVE_LEGACY_DEFAULT_SURFACE
+                 // The family calls its void slot 316 after startHardware. Our backend supplies the client's default surface.
+                 if(valid)valid=installDefaultSurface(width,height);

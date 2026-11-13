@@ -16,6 +16,15 @@
 #include <mach/kmod.h>
 extern "C" kmod_info_t g_kernel_kmod_info;
 extern "C" void native_legacy_display_static_init(void) __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
+// The GPU scanout hand-off (drivers/GopFramebuffer/NativeGOPPresenter.cpp, boot-arg sheng-fb-gpu=1), as the iPadOS LegacyDisplayProbe.cpp
+// sets it up: created after the display started, attached to the resource service (not under the display subsystem node, whose
+// children the original display code enumerates), its framebuffer memory taken from the GOP nub.
+extern "C" void native_gop_presenter_static_init(void) __asm__("__GLOBAL__sub_I_NativeGOPPresenter.cpp");
+extern "C" IOService *native_gop_presenter_create(void);
+extern "C" void native_gop_presenter_set_source(IOService *presenter, IOService *nub);
+extern "C" bool native_gop_gpu_offer(IOService *, void *display, IOMemoryDescriptor *, uint64_t stride, uint32_t width, uint32_t height,
+    uint32_t format);
+static IOService *gpuHandoffPresenter;
 extern "C" IOService *native_legacy_display_allocate(void);
 extern "C" kern_return_t OSKextLoadKextWithIdentifier(const char *);
 static IOService *pendingLegacyDisplay, *activeLegacyDisplay, *activeNub;
@@ -75,8 +84,11 @@ extern "C" {
 bool native_legacy_prepare_scanout(void) { return true; }
 // GPU hand-off and direct DPU scanout are not part of the iOS 17 bring-up: every frame takes the CPU copy.
 // Weak: Adreno740 / GpuPowerProbe provide the real ones when the GPU is linked.
-__attribute__((weak)) bool native_legacy_gpu_offer(void *, IOMemoryDescriptor *, uint64_t, uint32_t, uint32_t, uint32_t) { return false; }
-void native_legacy_gpu_fallback_observed(int) { native_legacy_gpu_fallbacks = native_legacy_gpu_fallbacks + 1; }
+// Was a no-op returning false: every frame took the CPU copy. Hands the frame to the GPU when the presenter is up.
+bool native_legacy_gpu_offer(void *display, IOMemoryDescriptor *memory, uint64_t stride, uint32_t width, uint32_t height, uint32_t format)
+{ return gpuHandoffPresenter && native_gop_gpu_offer(gpuHandoffPresenter, display, memory, stride, width, height, format); }
+volatile int32_t native_legacy_gpu_last_status;
+void native_legacy_gpu_fallback_observed(int status) { native_legacy_gpu_last_status = status; native_legacy_gpu_fallbacks = native_legacy_gpu_fallbacks + 1; }
 __attribute__((weak)) bool native_adreno_fences(uint32_t *submitted, uint32_t *retired) { (void)submitted; (void)retired; return false; }
 uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) { return 0; }
 
@@ -209,6 +221,7 @@ void native_legacy_display_probe(void)
 	void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
 	if (!handle) { stage(90, "preModLoad failed"); return; }
 	native_legacy_display_static_init();
+	native_gop_presenter_static_init();
 	native_legacy_meta_status = OSMetaClass::postModLoad(handle);
 	if (native_legacy_meta_status) { printf("ios17 legacy display: postModLoad %d\n", native_legacy_meta_status); stage(91, "metaclass failed"); return; }
 	PE_Video video = {};
@@ -239,6 +252,11 @@ extern "C" void native_touch_probe(void);
 // The fuxi buttons (kits/sheng/FuxiButtons.cpp, boot-arg fuxi-buttons=1): PMK8550 PON/RESIN and PM8550 GPIO6 over the SPMI
 // observer, reported through NativeHidInput report 2.
 extern "C" void fuxi_buttons_probe(void);
+extern "C" void fuxi_wifi_probe(void);        // fuxi-wifi=1: read-only look at the WCN7850 path
+extern "C" void sheng_audio_probe(void);      // sheng-audio=N: speakers, microphone, audio service (AudioProbe.cpp)
+extern "C" void sheng_adsp_probe(void);       // sheng-adsp=1/2: the audio DSP (AdspProbe.cpp), power.md section 3
+extern "C" void fuxi_cpufreq_start(void);     // sheng-cpufreq=N: CPU/L3 frequency votes (CpuFreqProbe.cpp, FuxiCpuFreqLog.cpp)
+extern "C" void fuxi_wifi_link_probe(void);   // fuxi-wifi=2/3/5: power, PCIe0 link; 5 runs Ath12kWifi (FuxiWifiNw21)
 // The panel brightness service: BacklightProbe.cpp starts AppleARMBacklight.cpp (boot-arg sheng-backlight=1),
 // which publishes backlight-control for CoreBrightness. The 21H16 late probe never called it, so the panel
 // stayed dark no matter which backlight boot arguments were set.
@@ -249,7 +267,12 @@ void native_legacy_display_late_probe(void)
 	native_keystore_probe();
 	sheng_gpu_power_probe();
 	native_touch_probe();
+	fuxi_cpufreq_start();
+	sheng_adsp_probe();
+	sheng_audio_probe();
 	fuxi_buttons_probe();
+	fuxi_wifi_probe();
+	fuxi_wifi_link_probe();
 	// Panel brightness runs before the display-object check: it does not need the GOP nub, and returning early
 	// on a missing IOSurface must not also leave the screen unlit.
 	sheng_backlight_probe();
@@ -302,6 +325,18 @@ void native_legacy_display_late_probe(void)
 			if (attached) { stage(5, "start"); started = display->start(nub); native_legacy_start_result = started; }
 			if (started && phase == 4) {
 				activeLegacyDisplay = display; activeNub = nub;
+				{
+					unsigned gpu = 0; PE_parse_boot_argn("sheng-fb-gpu", &gpu, sizeof gpu);
+					if (gpu == 1) {
+						IOService *handoff = native_gop_presenter_create();
+						IOService *home = IOService::getResourceService();
+						bool handoffAttached = false;
+						if (handoff && home) native_gop_presenter_set_source(handoff, nub);
+						if (handoff && home && handoff->init() && (handoffAttached = handoff->attach(home)) && handoff->start(home)) gpuHandoffPresenter = handoff;
+						else { if (handoffAttached) handoff->detach(home); OSSafeReleaseNULL(handoff); }
+						printf("ios17 legacy display: GPU hand-off presenter %s\n", gpuHandoffPresenter ? "started" : "failed");
+					}
+				}
 				finishUnitScalePolicy(true);
 				OSSafeReleaseNULL(displayTreeParent);
 				stage(10, "display started");

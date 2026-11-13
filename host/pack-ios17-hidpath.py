@@ -86,6 +86,30 @@ adt = work / 'kernel.macho.adt'
 auth_blob = IPSW_CACHE / 'SystemVolume.payload'
 if ROOT_MODE:
     assert len(auth_blob.read_bytes()) == 208 and struct.unpack_from('<4I', auth_blob.read_bytes()) == (2, 0, 1, 32)
+# The red "rdar" status bar (2026-11-12): +[_UIStatusBarVisualProvider_Phone visualProviderSubclassForScreen:visualProviderInfo:]
+# (UIKitCore) and its SystemStatusUI twin pick DynamicSplit only when the screen has an exclusion area (the island) below the top
+# edge, else Split (notch) or LegacyPhone, whose size tables have no 360x800 pt screen; nothing matches and
+# _UIStatusBarGetVisualProviderClassForScreen falls back to the Fallback provider ("No status bar visual provider for screen ...
+# rdar://45025538"), a red strip. Each fixup turns the first test (tbz w0, #0: no exclusion area) into b +0x14, the DynamicSplit
+# branch; DynamicSplit picks DynamicSplitMedium for a screen up to 393 pt wide (the iPhone 14 Pro's own provider). Applied through
+# the kernel's signed-text fixups (bsd/kern/ubc_subr.c, /chosen/text-fixups) to the 21H16 dyld cache. STATUSBAR_FIXUPS=0 packs
+# without them.
+# Tried first and dropped: returning at once from the Fallback providers' -setupInContainerView: (no bar at all) sent SpringBoard
+# into a stack overflow at every launch, and the phone stayed at the Apple logo.
+STATUSBAR_FIXUPS = [
+    # 2026-11-12, second form. DynamicSplitMedium is the 393 pt island layout: on this 360 pt screen without an exclusion area its
+    # time and battery sat off the island and Control Center's grid did not fill the width. Split1080 is Apple's layout for the
+    # 1080-pixel phones (360 pt wide), which pong/mondrian select (userland/ui_compat.c PongStatusBarVisualProvider1080, a Split1080
+    # subclass whose +referenceScreenScale answers the screen's nativeScale). Here, for UIKit (03) and SystemStatusUI (25):
+    # Phone takes the Split branch, Split answers Split1080 (its size table has no 360x800 pt entry), Split1080's
+    # +referenceScreenScale answers 3.0 (its own 2.88 is the 375 pt mini scaled to 1080 pixels).
+    'dyld_shared_cache_arm64e.03,498de58,00010036e00314aa,13000014e00314aa',   # _UIStatusBarVisualProvider_Phone +0x38: b Split branch
+    'dyld_shared_cache_arm64e.25,5e7fc74,00010036e00314aa,1a000014e00314aa',   # STUIStatusBarVisualProvider_Phone +0x38: b Split branch
+    'dyld_shared_cache_arm64e.03,499247c,7f2303d5ff8304d1eb2b0c6d,a0432fd000003c91c0035fd6',   # _UIStatusBarVisualProvider_Split: return Split1080
+    'dyld_shared_cache_arm64e.25,5e85b50,7f2303d5ff8304d1eb2b0c6d,c0520ad000e01191c0035fd6',   # STUIStatusBarVisualProvider_Split: return Split1080
+    'dyld_shared_cache_arm64e.03,499d7f0,882600d0009942fd,0010611ec0035fd6',   # _UIStatusBarVisualProvider_Split1080 +referenceScreenScale: 3.0
+    'dyld_shared_cache_arm64e.25,5e8e324,a80000f000dd45fd,0010611ec0035fd6',   # STUIStatusBarVisualProvider_Split1080 +referenceScreenScale: 3.0
+] if ROOT_MODE and os.environ.get('STATUSBAR_FIXUPS', '1') != '0' else []
 # The ios17 overlay's copy of make-fuxi-adt.py (adds --vmm-present; device/ stays the iPadOS one).
 subprocess.run(['python3', str(base / 'device-ios17/scripts/make-fuxi-adt.py'), '--output', str(adt),
                 '--dram-size', '0x80000000', '--owned-memory-size', '0x130000000',
@@ -95,6 +119,7 @@ subprocess.run(['python3', str(base / 'device-ios17/scripts/make-fuxi-adt.py'), 
                 '--phone-identity', '--phone-model', 'iPhone15,2', '--trust-cache',
                 *(['--packed-data-ramdisk'] if DATA_SEED else []),
                 *(['--gpu-addon'] if GPU_ADDON else []),
+                *[a for f in STATUSBAR_FIXUPS for a in ('--text-fixup', f)],
                 # vmm-present: the original AMFI developer-mode init waits 30 s for ApplePMGRNub and panics
                 # "AMFI: No PMGR?" unless kern.hv_vmm_present is set (fuxi has no original PMGR).
                 *(['--system-volume-auth-blob', str(auth_blob), '--vmm-present'] if ROOT_MODE else [])], check=True)
@@ -104,11 +129,11 @@ if ROOT_MODE:
     assert nodes['/chosen']['system-volume-auth-blob'] == auth_blob.read_bytes()
     assert nodes['/defaults']['vmm-present'] == struct.pack('<I', 1)
 assert nodes['/']['model'] == b'iPhone15,2\0', nodes['/']['model']
-assert 'text-fixups' not in nodes['/chosen'], 'no userland fixups in a kernel-only test'
+assert nodes['/chosen'].get('text-fixups', b'') == b''.join(f.encode() + b'\0' for f in STATUSBAR_FIXUPS)
 assert len([n for n in nodes if n.startswith('/cpus/')]) == 8
 
 args = ('serial=3 debug=0x14c kt_fixed_zones=120 qcom-usb-debug=1 armcpu-spi-ipi=1 sheng-smp=1 '
-        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0 fuxi-panic-fastboot=30 '
+        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0 fuxi-panic-fastboot=30 fuxi-wifi=5 sheng-adsp=2 sheng-audio=1 offline-legacy-logical-width=1125 offline-legacy-logical-height=2436 log-gpu=1 sheng-cpufreq=3 cpumask=0xf9 sheng-fb-gpu=1 '
         # unixnu-hang-probe (log only, xnu-10063-arm64e/init-hang-probe.patch): report the init task's threads every
         # 10 s while the exec of /sbin/launchd does not return.
         # qcom-usb-diag=1: the QUD driver's diagnostic mode gives every console write a 1 ms flush window, so the
@@ -121,8 +146,9 @@ args = ('serial=3 debug=0x14c kt_fixed_zones=120 qcom-usb-debug=1 armcpu-spi-ipi
         # as the /arm-io display-subsystem on the GOP framebuffer (phase 4), CPU-copy swaps, UI scale 3, 60 Hz vsync tick.
         + ('offline-mobile-graphics-load=1 offline-legacy-register=1 offline-legacy-phase=4 offline-legacy-gop=1 '
            'offline-legacy-pm=1 offline-legacy-validate=1 offline-legacy-transfer=1 offline-legacy-cpu-present=1 '
-           'offline-legacy-unit-scale=3 sheng-vsync=60 '
-           # offline-legacy-logical-width/height (scaled logical mode) off: the user asked for the 3x 360x800 pt layout back.
+           'offline-legacy-unit-scale=3 sheng-vsync=120 '
+           # offline-legacy-logical-width/height=1125x2436 (set with the fuxi args above): 375x812 pt at 3x is a screen type UIKit knows
+           # (iPhone X class); 360x800 and 375x833.3 match none, so the keyboard and Control Center fell back to generic layouts.
            '' if ROOT_MODE else '')
         # sheng-diag=1: the plugin keeps its command-buffer stage ring and reports it through its telemetry rows (GPU hang diagnosis).
         # AppleKeyStore stand-in (no SEP): SpringBoard leaves the boot logo only once the class answers its state queries.
@@ -133,7 +159,7 @@ args = ('serial=3 debug=0x14c kt_fixed_zones=120 qcom-usb-debug=1 armcpu-spi-ipi
         + 'offline-key-events=1 sheng-aks=1 sheng-backlight=1 fuxi-backlight=dsi sheng-backlight-control=1 '
         # Thread report of SpringBoard every 40 s (init-hang-probe.patch unixnu-pp): where it waits after the boot logo.
         # Thread probe for the user-driven hangs (Settings, sleep/wake): three processes every 20 s for 40 rounds.
-        + 'unixnu-pp=PosterBoard,CollectionsPoste unixnu-pp-rounds=30 unixnu-pp-interval=20 '
+        + ''
         # fuxi FTM5 touch (FuxiTouchProbe stage 4, polled) feeding the HID digitizer (NativeHidInput on the 21H16 IOHIDDevice).
         + 'fuxi-touch=4 unixnu-iokit-probe=1 fuxi-touch-poll=1 fuxi-touch-hid=1 fuxi-touch-digitizer-only=1 '
         # dk=0: skip DriverKit personalities (the AppleUserHIDDrivers user server never launches); the kernel
@@ -151,7 +177,7 @@ args = ('serial=3 debug=0x14c kt_fixed_zones=120 qcom-usb-debug=1 armcpu-spi-ipi
         # on it synchronously; disabled, the activation-state lookup fails at once.
         # mobileactivationd runs natively now (sheng-keychains=1 gives securityd its Keychains directory).
         + ('sheng-gpu-addon=1 ' if GPU_ADDON else '')
-        + ('native-fuxi-ufs-root=1 sheng-gpu-power=9 sheng-gpu-metal=1 sheng-gpu-dcvs=1 sheng-gpu-pause-us=100 unixnu-hang-panic=1 qcom-usb-ctl=1' if ROOT_MODE else 'native-ufs-probe=%d' % UFS_PROBE))   # unixnu-unmapped: log unmapped calls, return 0
+        + ('native-fuxi-ufs-root=1 sheng-gpu-power=9 sheng-gpu-metal=1 sheng-gpu-dcvs=1 sheng-gpu-pause-us=100 qcom-usb-ctl=1' if ROOT_MODE else 'native-ufs-probe=%d' % UFS_PROBE))   # unixnu-unmapped: log unmapped calls, return 0
 if ROOT_MODE and os.environ.get('NO_QUD') == '1':
     # Control experiment: without the QUD USB console (qcom-usb-debug/qcom-usb-diag) and without the diagnostic
     # panic; only the on-screen marks report whether the exec of /sbin/launchd returns.
@@ -216,6 +242,11 @@ if ROOT_MODE:
         ids = json.loads(GPU_TRUST.read_text())
         # statusbar_cdhash: FuxiStatusBar.dylib, the plugin's weak dylib (device-ios17/scripts/build-fuxi-statusbar.py).
         hashes = sorted(bytes.fromhex(ids[k]) for k in ('cdhash', 'turnip_cdhash', 'daemon_cdhash', 'statusbar_cdhash') if k in ids)
+        # The audio server plug-in (device-ios17/scripts/build-fuxi-audio-hal.py; mounted by ios17-zaudio-hal-mount.patch from the
+        # addon's audio/ entries), https://unixnu.com/zh/porting/power section 3: its CDHash joins the owner module.
+        audio_trust = _TREE / 'build/sheng-audio-hal/trust.json'
+        if audio_trust.is_file():
+            hashes = sorted(hashes + [bytes.fromhex(json.loads(audio_trust.read_text())['cdhash'])])
         owner = struct.pack('<I16sI', 2, hashlib.sha256(b'unixnu-fuxi-ios17-gpu-owner').digest()[:16], len(hashes))
         owner += b''.join(h + bytes([2, 0, 0, 0]) for h in hashes)
         modules.insert(0, owner)

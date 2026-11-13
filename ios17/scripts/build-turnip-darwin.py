@@ -2,7 +2,7 @@
 """Build Turnip (Mesa freedreno Vulkan) with the native Darwin kernel backend (patches/mesa/turnip-darwin-kmd.patch).
 
 --target host builds for the Mac only to prove the backend compiles and links against the real Turnip; --target ios
-cross-builds the ARM64/iOS 17 library, --target ios27 the arm64e/iOS 27 one. Neither runs a GPU: the backend talks to the NativeAdreno IOKit service, which
+cross-builds the ARM64/iOS 17 library, --target ios27 the arm64e/iOS 27 one, --target macos27 the arm64e/macOS 27 one. None runs a GPU: the backend talks to the NativeAdreno IOKit service, which
 exists only on the tablet. Output stays under build/ and is never committed."""
 import argparse
 import hashlib
@@ -16,12 +16,12 @@ from mesa_patch_identity import validate_recorded_patches
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--target', choices=('host', 'ios', 'ios27', 'ios17e'), default='host')
+parser.add_argument('--target', choices=('host', 'ios', 'ios27', 'macos27', 'ios17e'), default='host')
 parser.add_argument('--configure-only', action='store_true')
 parser.add_argument('--builtin-pack', type=Path, help='Embed an exact-source/profile/GPU-bound own builtin pack; no runtime compiler fallback')
 args = parser.parse_args()
 SOURCE = ROOT / '.cache/mesa-work'
-OUT = ROOT / {'host': 'build/mesa-tu', 'ios': 'build/mesa-tu-ios', 'ios27': 'build/mesa-tu-ios27',
+OUT = ROOT / {'host': 'build/mesa-tu', 'ios': 'build/mesa-tu-ios', 'ios27': 'build/mesa-tu-ios27', 'macos27': 'build/mesa-tu-macos27',
               'ios17e': 'build/mesa-tu-ios17e'}[args.target]
 LOGS = ROOT / '.cache'
 
@@ -42,14 +42,16 @@ env['PATH'] = str(ROOT / '.cache/mesa-tools/bin') + ':' + str(ROOT / '.cache/mes
 options = ['-Dgallium-drivers=', '-Dvulkan-drivers=freedreno', '-Dfreedreno-kmds=darwin',
            '-Dtu-darwin-abi-dir=' + str(ROOT / 'drivers/Adreno740'), '-Dplatforms=macos', '-Dglx=disabled',
            '-Degl=disabled', '-Dgbm=disabled', '-Dopengl=false', '-Dgles1=disabled', '-Dgles2=disabled',
-           '-Dllvm=disabled', '-Dshared-glapi=disabled', '-Dxmlconfig=disabled', '-Dshader-cache=disabled',
+           '-Dllvm=disabled', '-Dshared-glapi=disabled', '-Dxmlconfig=disabled', '-Dshader-cache=enabled',
            '-Dtools=', '-Dbuild-tests=false', '-Dvideo-codecs=', '-Dvulkan-layers=']
 setup = [ROOT / '.cache/mesa-venv/bin/meson', 'setup', OUT, SOURCE, '--wrap-mode=nodownload']
-if args.target in ('ios', 'ios27', 'ios17e'):
-    sdk = read(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'])
-    find = lambda tool: read(['xcrun', '--sdk', 'iphoneos', '--find', tool])
+if args.target in ('ios', 'ios27', 'macos27', 'ios17e'):
+    sdk_name = 'macosx' if args.target == 'macos27' else 'iphoneos'
+    sdk = read(['xcrun', '--sdk', sdk_name, '--show-sdk-path'])
+    find = lambda tool: read(['xcrun', '--sdk', sdk_name, '--find', tool])
     # ios17e: iOS 17 arm64e (iPhone15,2 21H16, whose render server is an arm64e process).
-    triple = {'ios27': 'arm64e-apple-ios27.0', 'ios17e': 'arm64e-apple-ios17.0'}.get(args.target, 'arm64-apple-ios17.0')
+    triple = {'ios': 'arm64-apple-ios17.0', 'ios27': 'arm64e-apple-ios27.0', 'macos27': 'arm64e-apple-macos27.0',
+              'ios17e': 'arm64e-apple-ios17.0'}[args.target]
     flags = ['-target', triple, '-isysroot', sdk, '-fstack-protector-strong']
     cross = ROOT / ('build/mesa-tu-%s.cross' % args.target)
     cross.parent.mkdir(exist_ok=True)
@@ -58,9 +60,15 @@ if args.target in ('ios', 'ios27', 'ios17e'):
         % (find('clang'), find('clang++'), find('clang'), find('ar'), find('strip')) +
         "[host_machine]\nsystem = 'darwin'\ncpu_family = 'aarch64'\ncpu = 'arm64'\nendian = 'little'\n"
         "[properties]\nneeds_exe_wrapper = true\n[built-in options]\n" +
-        ''.join('%s = %r\n' % (k, flags) for k in ('c_args', 'cpp_args', 'objc_args', 'c_link_args', 'cpp_link_args',
-                                                    'objc_link_args')))
+        ''.join('%s = %r\n' % (k, flags) for k in ('c_args', 'cpp_args', 'objc_args')) +
+        # ios17e: chained fixups. 21H16 dyld's withChainStarts sizes a stack buffer by image size for a non-chained arm64e
+        # image, overflowing a 512 KB thread stack in mediaserverd/iconservicesagent.
+        ''.join('%s = %r\n' % (k, flags + (['-Wl,-fixup_chains'] if args.target == 'ios17e' else []))
+                for k in ('c_link_args', 'cpp_link_args', 'objc_link_args')))
     setup += ['--cross-file', cross]
+    if args.target == 'ios17e':
+        # An existing build directory keeps the cross file it was set up with: name the link arguments as options too.
+        options += ['-D%s=%r' % (k, flags + ['-Wl,-fixup_chains']) for k in ('c_link_args', 'cpp_link_args', 'objc_link_args')]
     # Release with NDEBUG for the tablet: Mesa's default debugoptimized keeps assertions and NIR validation after
     # every pass, which the tablet's pipeline makings paid for (int-143: 58 pipeline states took 68 s). The host
     # build keeps them for the simulation checks.

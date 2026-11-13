@@ -1,0 +1,53 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7542,6 +7542,49 @@
+ 	    &floating_stage, &floating_status);
+ 	printf("ios17 wallpaper 7565: background stage %d status %d, floating stage %d status %d\n", native_gpu_addon3_stage,
+ 	    native_gpu_addon3_status, floating_stage, floating_status);
++	/* fuxi (ios17-zaudio-hal-mount.patch, https://unixnu.com/zh/porting/power section 3): the board's audio server plug-in next to
++	 * the system's - the audio server loads every driver bundle in this directory. The addon's audio/ entries land in
++	 * /private/var/ngpu/audio; the union keeps the sealed plug-ins visible (BuiltinAudioPlugin.driver). Scratch 0xe00..0xfff. */
++	static volatile int audio_stage = 0, audio_status = -1;
++	static const char audio_source[] = "/private/var/ngpu/audio", audio_point[] = "/System/Library/Audio/Plug-Ins/HAL";
++	native_gpu_addon_mount(p, scratch, 0xe00, audio_source, sizeof(audio_source), audio_point, sizeof(audio_point),
++	    "/System/Library/Audio/Plug-Ins/HAL/BuiltinAudioPlugin.driver", "/System/Library/Audio/Plug-Ins/HAL/ShengAudio.driver/Info.plist",
++	    &audio_stage, &audio_status);
++	printf("fuxi audio hal mount: stage %d status %d\n", audio_stage, audio_status);
++	/* fuxi probe (2026-11-13): what a readdir of the plug-in directory returns through the union (the audio server scans it with
++	 * opendir/readdir for "*.driver"). */
++	{
++		vnode_t dir = NULLVP;
++		vfs_context_t ctx = vfs_context_current();
++		int lerr = vnode_lookup(audio_point, 0, &dir, ctx);
++		if (!lerr) {
++			char *buf = kalloc_data(4096, Z_WAITOK | Z_ZERO);
++			int eofflag = 0, numdirent = 0, total = 0, rounds = 0;
++			uio_t auio = buf ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
++			while (auio && !eofflag && rounds++ < 8) {
++				uio_reset(auio, uio_offset(auio), UIO_SYSSPACE, UIO_READ);
++				uio_addiov(auio, CAST_USER_ADDR_T(buf), 4096);
++				if ((lerr = VNOP_READDIR(dir, auio, 0, &eofflag, &numdirent, ctx)) != 0) break;
++				size_t got = 4096 - (size_t)uio_resid(auio);
++				/* the plain (non-extended) readdir record: struct dirent of <sys/dirent.h> */
++				struct fuxi_dirent {uint32_t d_ino; uint16_t d_reclen; uint8_t d_type, d_namlen; char d_name[256];};
++				for (size_t at = 0; at + 8 <= got;) {
++					struct fuxi_dirent *de = (struct fuxi_dirent *)(void *)(buf + at);
++					if (!de->d_reclen) break;
++					if (de->d_namlen) printf("fuxi audio hal dir: %.*s\n", (int)de->d_namlen, de->d_name);
++					total++;
++					at += de->d_reclen;
++				}
++				if (!got) break;
++			}
++			printf("fuxi audio hal dir: %d entries, error %d eof %d\n", total, lerr, eofflag);
++			if (auio) uio_free(auio);
++			if (buf) kfree_data(buf, 4096);
++			vnode_put(dir);
++		} else {
++			printf("fuxi audio hal dir: lookup error %d\n", lerr);
++		}
++	}
+ }
+ 
+ /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies

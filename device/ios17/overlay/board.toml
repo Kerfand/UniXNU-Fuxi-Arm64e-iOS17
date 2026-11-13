@@ -28,7 +28,9 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 # first_lba and last_lba are the GPT entry "userdata" of LUN 0, read from the tablet.
 [userdata]
 first_lba = 0x2F7840
-last_lba = 0x76923FA
+# last_lba as NativeUfs read it from this phone's LUN 0 GPT (native-ufs-probe=10, 2026-11-06:
+# userdata first=0x2f7840 last=0x3afc3fa); the earlier 0x76923FA did not match the device.
+last_lba = 0x3AFC3FA
 lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
@@ -38,20 +40,33 @@ windows = [
 [kernel]
 defconfig = "fuxi_ios17_kernel_defconfig"
 # Archive builders of the kernel step, in order. Each is a script of the build tree with its arguments.
-# NativeUfs publishes the UFS windows and its authentication callback. NativeVirtioBlock is compiled
-# with the verified multi-policy personality; both block transports use fuxi's pinned original
-# IOBlockStorageDevice bindings instead of the repository-external live storage capture.
-# VerifiedRootProbe supplies the signed OS/SystemOS policy bundle; run
-# scripts/build-fuxi-verified-root-policy.py once before this step so the
-# CONFIG_XNU_VERIFIED_ROOT_ARCHIVE output already exists (sheng supplies it the same way).
+# Checkpoint 2b, the iPadOS owner-root chain on 21H16: NativeAES on the 21H16 IOAESAccelerator bindings,
+# NativeUfs and NativeVirtioBlock in verified multi-policy mode (NativeVirtioBlock carries the storage
+# bindings of scripts/data/native-storage-original-bindings.S), and the header-only VerifiedRoot inputs
+# of build-ios17-verified-root.py (the hash tables are userdata data objects "<window>.hashes").
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
   "build-arm-driver.py ArmDTPlatform",
   "build-arm-driver.py ArmCpu",
+  "build-arm-driver.py NativeAES",
+  "build-native-aes-bindings.py",
+  "build-arm-driver.py NativeUfs --verified-root --verified-root-bundle",
+  "build-arm-driver.py NativeVirtioBlock --verified-root --verified-root-bundle",
+  "build-arm-driver.py NativeRamBlock",
   "build-libpthread-kernel.py",
+  "build-ios17-verified-root.py",
   "build-boot-log.py",
   "build-fuxi-usb-debug.py",
+  "prepare-fuxi-gmu.py --dtb ../../../../uefi-fuxi/Resources/DTBs/fuxi.dtb",
+  "prepare-fuxi-gmu-votes.py --dtb ../../../../uefi-fuxi/Resources/DTBs/fuxi.dtb",
+  "prepare-fuxi-command-db-oracle.py",
+  "prepare-fuxi-driver-compat.py",
+  "build-arm-driver.py Adreno740",
+  "build-adreno740-kits.py",
+  "build-adreno740-accelerator.py",
+  "build-ios17-hid-input.py",
+  "build-ios17-legacy-display.py",
   "build-ios17-stubs.py",
 ]
 
@@ -65,7 +80,11 @@ slide = "-0x1000000"
 early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff008f2c4c4"
 # Bring-up: match against the symbol-bearing RELEASE build of the same XNU source and send
 # unmatched calls to the reporting stub of fileset-unmapped-call.patch.
-extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--allow-missing"]
+# The kexts right after the original kernel code (AppleARMPlatform, AppleARMWatchdogTimer) cap the native code
+# at the original kernel's code size; --move-code moves their __TEXT_EXEC (+0x200000, fileset_move.py) so the
+# native kernel can carry the GPU driver.
+extra_args = ["--fileset-reference", "build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf", "--allow-missing",
+              "--move-code", "com.apple.driver.AppleARMPlatform", "--move-code", "com.apple.driver.AppleARMWatchdogTimer"]
 # Checkpoint 1 (root wait): security, crypto, storage and filesystem kexts only. The iPad list's audio,
 # display, GPU and HDCP families are left out; they also keep the original kernel's holes too small.
 roots = [
@@ -80,6 +99,18 @@ roots = [
   "com.apple.security.AppleImage4",
   "com.apple.security.sandbox",
   "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOHIDEventDriver",
+  # Codeless: the kernel IOHIDEventDriver personality for digitizers (usage page 13), used with dk=0.
+  "com.apple.iokit.IOHIDEventDriverSafeBoot",
+  # Display bring-up: IOSurface (every graphics client) and the non-DCP IOMobileGraphicsFamily that holds
+  # IOMobileFramebufferLegacy, the original lifecycle the GOP framebuffer backend binds to.
+  "com.apple.iokit.IOSurface",
+  # GPU: the original IOAcceleratorES base of the staged AGXAccelerator (Metal discovery matches IOAcceleratorES).
+  "com.apple.iokit.IOGPUFamily",
+  # Display: the non-DCP IOMobileGraphicsFamily (IOMobileFramebufferLegacy, same ABI as 21H461). It pulls 9
+  # audio/AV/HDCP/DART/scaler dependencies; the largest __PRELINK_TEXT gap left is 0x139499, which fits native __TEXT
+  # only with assert-expr-strings.patch (0x164000 -> 0x120000).
+  "com.apple.iokit.IOMobileGraphicsFamily",
 ]
 
 [firmware]

@@ -455,6 +455,13 @@ subprocess.run(['python3', str(ROOT / 'scripts/build-arm-driver.py'), 'NativeKey
 keyevents_late = ROOT / 'build/native-keystore-events/NativeKeyStoreEvents.late.o'
 run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_NativeKeyStoreEvents.cpp',
      ROOT / 'build/native-keystore-events/NativeKeyStoreEvents.o', keyevents_late])
+# The GPU scanout hand-off (sheng-fb-gpu=1, as the iPadOS build-native-legacy-display.py builds it): the Metal plugin's
+# GpuScanoutClient copies each frame into the GOP scanout on the GPU through the Adreno driver's 0x7000 methods. Without it the iOS 17
+# display copied every frame on the CPU (native_legacy_copy_pixels, 2026-11-12 samples). Its static initializer runs late (probe).
+subprocess.run(['python3', str(ROOT / 'scripts/build-arm-driver.py'), 'NativeGOPPresenter'], check=True)
+gop_late = ROOT / 'build/native-gop-presenter/NativeGOPPresenter.late.o'
+run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_NativeGOPPresenter.cpp',
+     ROOT / 'build/native-gop-presenter/NativeGOPPresenter.o', gop_late])
 
 # The launchd job policy (kits/sheng/BootWatchdogPolicy.c), called by ios17-job-policy.patch after the scratch Data mount,
 # compiled like kern_exec.c as the iPadOS build-boot-progress.py compiles it.
@@ -591,13 +598,105 @@ for bl_stem, bl_rel in (('BacklightProbe', 'kits/sheng/BacklightProbe.cpp'),
         bl_obj = bl_late
     backlight_objs.append(bl_obj)
 
+# ---- WiFi: Ath12kWifi f6bf561 (the legacy runtime) with the fuxi board code, fuxi-wifi=5 ----
+# https://unixnu.com/zh/porting/network: the module (drivers/Ath12kWifiLegacy) runs MHI, firmware, QMI and the station; the board gives it
+# PCIe0, DMA and MSI (FuxiWifiLink / FuxiWifiMhi / FuxiWifiNw21 / FuxiWifiFwStore) and the OS side (FuxiWifiNet: en0, Apple80211). The same
+# sources and runtime the iPadOS 17.7.11 recipe builds (device/scripts/build-native-legacy-display.py, FUXI_WIFI_RUNTIME=legacy), here
+# for the arm64e kernel: the board C++ takes the probe's own compile command and the module scripts/build-native-wifi-ios17.py the
+# kernel's code generation, so the callback tables (lx_platform, nw_board, nw_wifi_events) are signed alike on both sides.
+import hashlib as _hashlib, zlib as _zlib
+wifi_module = ROOT / 'drivers/Ath12kWifiLegacy'
+require((wifi_module / 'include/nw_abi.h').is_file(), f'{wifi_module}: Ath12kWifi f6bf561 (legacy runtime) missing')
+wifi_includes = touch_includes + ['-I', str(wifi_module / 'include'), '-I', str(ROOT / 'kits/ArmSmmu4K')]
+wifi_objs = []
+for src in (ROOT / 'kits/sheng/FuxiWifiProbe.cpp', ROOT / 'kits/sheng/FuxiWifiLink.cpp', ROOT / 'kits/sheng/FuxiWifiMhi.cpp',
+            ROOT / 'kits/sheng/FuxiWifiNw21.cpp', ROOT / 'kits/sheng/FuxiWifiFwPart.cpp', ROOT / 'kits/sheng/FuxiWifiNet.cpp',
+            # CPU frequency domains (sheng-cpufreq): CpuFreqProbe.cpp as the iPadOS build has it, polled by FuxiCpuFreqLog.cpp.
+            ROOT / 'kits/sheng/CpuFreqProbe.cpp', ROOT / 'kits/sheng/FuxiCpuFreqLog.cpp'):
+    obj = OUT / (src.stem + '.ios17.o')
+    subprocess.run([str(src) if a == str(probe_src) else str(obj) if a == str(probe_obj) else a for a in cmd] + wifi_includes,
+                   cwd=record['directory'], check=True)
+    if src.stem == 'FuxiWifiNet':
+        # The network side's metaclasses are registered late (FuxiWifiNw21.cpp netStart): its static initializer leaves __mod_init_func.
+        late_obj = OUT / 'FuxiWifiNet.late.o'
+        run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_FuxiWifiNet.cpp', obj, late_obj])
+        obj = late_obj
+    wifi_objs.append(obj)
+mhi_obj = OUT / 'MhiBoot.ios17.o'
+m_args, m_cmd, m_k = startup_record['arguments'], [], 0
+while m_k < len(m_args):
+    m_a = m_args[m_k]
+    if m_a == startup_record['file']:
+        m_cmd.append(str(ROOT / 'kits/sheng/MhiBoot.c'))
+    elif m_a == '-o':
+        m_cmd += ['-o', str(mhi_obj)]; m_k += 1
+    elif m_a in ('-MF', '-MT', '-MJ'):
+        m_k += 1
+    elif m_a == '-Xclang' and m_args[m_k + 1].startswith('-W'):
+        m_k += 1
+    elif not m_a.startswith('-W'):
+        m_cmd.append(m_a)
+    m_k += 1
+subprocess.run(m_cmd + ['-mgeneral-regs-only', '-I', str(ROOT / '.cache/xnu-work/osfmk'), '-I', str(ROOT / 'kits/sheng')],
+               cwd=startup_record['directory'], check=True)
+wifi_objs.append(mhi_obj)
+# The WCN7850 files are not in the kernel: the fileset __DATA has no room for them (0x171070 bytes ahead of the retained kexts).
+# FuxiWifiFwPart.cpp reads them from the WFW1 container in the partition named "oops" (scripts/make-wifi-fw.py), the
+# official layout (https://unixnu.com/zh/porting/network).
+wifi_module_out = subprocess.check_output(['python3', str(ROOT / 'scripts/build-native-wifi-ios17.py'), str(wifi_module),
+                                          str(OUT / 'ath12k-wifi-legacy-ios17'), cmd[0]], text=True, timeout=900)
+wifi_module_objs = [Path(l.split(' ', 1)[1]) for l in wifi_module_out.splitlines() if l.startswith('OBJ ')]
+require(len(wifi_module_objs) >= 50, 'Ath12kWifi f6bf561 objects')
+wifi_objs += wifi_module_objs
+print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_objs) - len(wifi_module_objs)} board objects')
+
+# ---- the audio DSP (sheng-adsp=1 survey, 2 start + GLINK + IPC router): https://unixnu.com/zh/porting/power section 3 ----
+# UniXNU-sheng's ADSP stack as fuxi has it (kits/sheng/AdspProbe.cpp: fuxi's 0x6080000 carveout, firmware from modem_a only, the
+# "fuxi adsp:" log rows; FuxiAdspFirmware.cpp: the FAT half of AdspFirmware.c). The protocol libraries are plain C, compiled like
+# QcomRpmh.c (osfmk startup.c's command); the probe and the firmware reader take the probe's C++ command.
+adsp_objs = []
+for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmware.cpp',
+            # the speaker/microphone path and the audio service (sheng-audio): AudioProbe.cpp on fuxi's CS35L41
+            ROOT / 'kits/sheng/AudioProbe.cpp', ROOT / 'kits/sheng/ShengAudioService.cpp'):
+    obj = OUT / (src.stem + '.ios17.o')
+    subprocess.run([str(src) if a == str(probe_src) else str(obj) if a == str(probe_obj) else a for a in cmd] + touch_includes,
+                   cwd=record['directory'], check=True)
+    if src.stem == 'ShengAudioService':
+        # its metaclass registers late (AudioProbe.cpp publishService calls __GLOBAL__sub_I_ShengAudioService.cpp)
+        late_obj = OUT / 'ShengAudioService.late.o'
+        run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_ShengAudioService.cpp', obj, late_obj])
+        obj = late_obj
+    adsp_objs.append(obj)
+for src in ('QcomGlink.c', 'QcomMdt.c', 'QcomQmp.c', 'QcomSmem.c', 'QcomSmp2p.c', 'QcomQrtr.c', 'ShengQrtr.c', 'FatVolume.c',
+            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c'):
+    src = ROOT / 'kits/sheng' / src
+    obj = OUT / (src.stem + '.ios17.o')
+    sargs, scmd, k = startup_record['arguments'], [], 0
+    while k < len(sargs):
+        a = sargs[k]
+        if a == startup_record['file']:
+            scmd.append(str(src))
+        elif a == '-o':
+            scmd += ['-o', str(obj)]; k += 1
+        elif a in ('-MF', '-MT', '-MJ'):
+            k += 1
+        elif a == '-Xclang' and sargs[k + 1].startswith('-W'):
+            k += 1
+        elif not a.startswith('-W'):
+            scmd.append(a)
+        k += 1
+    subprocess.run(scmd + ['-mgeneral-regs-only', '-I', str(ROOT / '.cache/xnu-work/osfmk'), '-I', str(ROOT / 'kits/sheng')],
+                   cwd=startup_record['directory'], check=True)
+    adsp_objs.append(obj)
+print(f'adsp: {len(adsp_objs)} objects')
+
 # ---- archive ----
 late = OUT / 'NativeLegacyDisplay.late.o'
 run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_NativeLegacyDisplay.cpp',
      OUT / 'NativeLegacyDisplay.o', late])
 archive = OUT / 'libNativeLegacyDisplay.late.a'
 archive.unlink(missing_ok=True)
-run(['llvm-ar', 'rcs', archive, late, probe_obj, gpupower_obj, keystore_obj, keyevents_late, policy_obj, *touch_cxx, *touch_c, *hid_objs, *backlight_objs, OUT / 'legacy-original-bindings.o', OUT / 'legacy-original-adapters.o'])
+run(['llvm-ar', 'rcs', archive, late, probe_obj, gpupower_obj, keystore_obj, keyevents_late, gop_late, policy_obj, *touch_cxx, *touch_c, *hid_objs, *backlight_objs, *wifi_objs, *adsp_objs, OUT / 'legacy-original-bindings.o', OUT / 'legacy-original-adapters.o'])
 sources = ['drivers/GopFramebuffer/NativeLegacyDisplay.cpp', 'scripts/data/Ios17LegacyDisplayProbe.cpp', 'kits/sheng/GpuPowerProbe.cpp',
            'kits/sheng/KeyStoreProbe.cpp', 'kits/sheng/BootWatchdogPolicy.c', 'kits/sheng/FuxiTouchProbe.cpp', 'kits/sheng/HidInputProbe.cpp', 'drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp',
            'kits/sheng/BacklightProbe.cpp', 'kits/sheng/AppleARMBacklight.cpp', 'kits/sheng/GeniI2c.c', 'scripts/build-ios17-legacy-display.py']

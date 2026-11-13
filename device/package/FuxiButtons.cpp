@@ -131,3 +131,20 @@ extern "C" void fuxi_buttons_probe(void){
  if(kernel_thread_start(buttonsThread,nullptr,&thread)==KERN_SUCCESS)thread_deallocate(thread);
  else fail(7,-12);
 }
+
+// fuxi USB control (INPUT verb, fuxi-usb-control-20261112). op 0: availability (no side effect); 1/2: touch (FuxiTouchProbe);
+// 3: buttons mask a through the same sink as the polled PMIC keys (bit 0 menu/home, 1 power, 2 volume up, 3 volume down,
+// HID usages 0x40/0x30/0xe9/0xea), ORed with the keys physically held; 0 releases. Runs in the USB worker thread.
+extern "C" int fuxi_control_touch(unsigned op, unsigned a, unsigned b);
+extern "C" int fuxi_control_input(unsigned op, unsigned a, unsigned b) {
+ if(op==0)return 1;
+ if(op==1||op==2)return fuxi_control_touch(op,a,b);
+ if(op==3){
+  auto sink=__atomic_load_n(&gSink,__ATOMIC_ACQUIRE);
+  if(!sink || a>15u)return 0;
+  sink(gSinkContext,(a|(uint32_t)fuxi_buttons_stats[3])&15u);
+  IOLog("[FuxiButtons] usb control mask=%x\n",a);
+  return 1;
+ }
+ return 0;
+}

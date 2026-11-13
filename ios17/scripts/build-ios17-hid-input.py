@@ -179,10 +179,15 @@ shared = (ROOT / 'drivers/NativeHidInput/NativeHidInput.cpp').read_text()
 guard = ('#if defined(__arm64e__) && !(defined(NATIVE_HID_SOURCE_API) && NATIVE_HID_SOURCE_API)\n'
          '#error "The original HID ABI path is arm64 iOS 17 only; use the source API build for arm64e."\n#endif\n')
 require(shared.count(guard) == 1, 'NativeHidInput.cpp arm64e guard anchor')
-# The shared hook carries a 24A446 IOHIDEventDriver ABI, which is not qualified for 21H16.
+# The shared edge hook (kIOHIDDigitizerEventFromEdgeTip on contacts that start at a panel edge; without it UIKit's edge type is 0
+# and SpringBoard's home and switcher gestures fail at once) was disabled here as unqualified for 21H16. Checked 2026-11-12 against
+# the 21H16 kernelcache's chained fixups: IOHIDFamily holds 220-slot vtables whose per-slot PAC diversities equal the shared
+# kSlotDiversity table exactly (dispatchEvent 0x1134 at slot 198), and the IOHIDEvent vtable has getType/getIntegerValue/
+# setIntegerValue/getFixedValue at 18/23/24/25 as the hook calls them. install() still checks every slot of the live vtable and
+# leaves the driver alone on any mismatch (install row 2). fuxi-touch-edge=0 keeps it off.
 edge_call='if(driver && (touchEnabled || touchOnly))edge::install(driver);'
 require(shared.count(edge_call)==1,'one optional edge-hook installation')
-shared=shared.replace(edge_call,'if(false && driver && (touchEnabled || touchOnly))edge::install(driver); // 21H16: edge hook unqualified')
+shared=shared.replace(edge_call,'if(driver && (touchEnabled || touchOnly)){unsigned e=1;PE_parse_boot_argn("fuxi-touch-edge",&e,sizeof(e));if(e)edge::install(driver);}')
 SRC = OUT / 'NativeHidInput.cpp'
 # Optional iOS digitizer-only diagnostic, preserving the shared iPadOS source.
 start_marker = 'bool start(IOService *provider) override {'

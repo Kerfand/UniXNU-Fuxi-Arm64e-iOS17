@@ -89,6 +89,138 @@ if 'qcom_reset_request(int mode)\n{' not in debug_text:
         debug_text = debug_text.replace(old, new, 1)
     debug_source.write_text(debug_text)
 
+# 2026-11-12: panic -> fastboot whatever the CDC state. The drain above only reached fuxi_panic_fastboot() once the host had read
+# every byte (finished): with no host reading, a stalled IN endpoint (deadline expired) or the console no longer ACTIVE at panic,
+# the phone stayed in the panic spin. Now every exit of the drain takes the 30 s -> PON bootloader -> PSCI reset path; it still
+# needs fuxi-panic-fastboot=30 and the reset windows that were mapped when the console came up (no mapping, no reset).
+debug_text = debug_source.read_text()
+if 'fuxi_panic_fastboot_any_cdc_state' not in debug_text:
+    for old, new in (
+            ('    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) return;\n'
+             '    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE) goto out;\n'
+             '    {\n'
+             '        char *p = append_text(announcement, "\\nQCOM USB PANIC pending_at_start=");\n',
+             '    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) {\n'
+             '#ifdef FUXI_PANIC_FASTBOOT\n'
+             '        fuxi_panic_fastboot();   /* fuxi_panic_fastboot_any_cdc_state: console not ACTIVE or guard busy */\n'
+             '#endif\n'
+             '        return;\n'
+             '    }\n'
+             '    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE) goto out;\n'
+             '    {\n'
+             '        char *p = append_text(announcement, "\\nQCOM USB PANIC pending_at_start=");\n'),
+            ('    if (finished) fuxi_panic_fastboot();\n',
+             '    /* Drained or not (no host reading, IN endpoint stalled, deadline expired): fastboot either way. */\n'
+             '    (void)finished;\n'
+             '    fuxi_panic_fastboot();\n')):
+        if debug_text.count(old) != 1:
+            raise SystemExit('QcomXnuUsbDebug.c: panic fastboot anchor changed: ' + old.splitlines()[0])
+        debug_text = debug_text.replace(old, new, 1)
+    debug_source.write_text(debug_text)
+
+# 2026-11-12: USB serial screenshot and phone control. The INPUT verb (touch and buttons) is the one verb that takes arguments, every
+# other verb keeps its exact grammar; its action runs after the reply is queued and the sequence committed (like REBOOT), so a replayed
+# frame does nothing. Screenshot storage can be supplied at run time: the static buffer stays the default (the module's tests use it),
+# the display driver hands over a buffer the size of its downscaled scanout (the fileset's __DATA cannot hold one).
+def qud_edit(relative, pairs):
+    path = module / relative
+    text = path.read_text()
+    if 'fuxi-usb-control-20261112' in text:
+        return
+    for old, new in pairs:
+        if text.count(old) != 1:
+            raise SystemExit(f'{relative}: usb control anchor changed: ' + old.splitlines()[0])
+        text = text.replace(old, new, 1)
+    path.write_text(text)
+qud_edit('kernel/QcomUsbControl.h', (
+    ('    SXNU_CONTROL_VERB_REBOOT_FASTBOOT\n};\n',
+     '    SXNU_CONTROL_VERB_REBOOT_FASTBOOT,\n'
+     '    /* fuxi-usb-control-20261112: synthetic input, <2hex op> <4hex a> <4hex b> after the verb. */\n'
+     '    SXNU_CONTROL_VERB_INPUT\n};\n'),
+    ('    enum sxnu_control_verb verb;\n};\n',
+     '    enum sxnu_control_verb verb;\n    uint32_t arg[3];   /* INPUT only */\n};\n'),
+    ('        text[7] == \'T\') return SXNU_CONTROL_VERB_SHOTNEXT;\n    return SXNU_CONTROL_VERB_INVALID;\n',
+     '        text[7] == \'T\') return SXNU_CONTROL_VERB_SHOTNEXT;\n'
+     '    if (bytes == 5u && text[0] == \'I\' && text[1] == \'N\' && text[2] == \'P\' &&\n'
+     '        text[3] == \'U\' && text[4] == \'T\') return SXNU_CONTROL_VERB_INPUT;\n'
+     '    return SXNU_CONTROL_VERB_INVALID;\n'),
+    ('    case SXNU_CONTROL_VERB_REBOOT_FASTBOOT: return "REBOOT-FASTBOOT";\n',
+     '    case SXNU_CONTROL_VERB_REBOOT_FASTBOOT: return "REBOOT-FASTBOOT";\n'
+     '    case SXNU_CONTROL_VERB_INPUT: return "INPUT";\n'),
+    ('    if (verb == SXNU_CONTROL_VERB_INVALID) return 0;\n    cursor++;\n',
+     '    if (verb == SXNU_CONTROL_VERB_INVALID) return 0;\n    cursor++;\n'
+     '    uint32_t args[3] = {0u, 0u, 0u};   /* a refused frame leaves *frame untouched */\n'
+     '    if (verb == SXNU_CONTROL_VERB_INPUT) {\n'
+     '        static const size_t widths[3] = {2u, 4u, 4u};\n'
+     '        for (unsigned int a = 0; a < 3u; a++) {\n'
+     '            uint64_t value;\n'
+     '            if (cursor > bytes || bytes - cursor < widths[a] + 1u) return 0;\n'
+     '            if (!sxnu_control_parse_hex(p + cursor, widths[a], &value) ||\n'
+     '                p[cursor + widths[a]] != (uint8_t)\' \') return 0;\n'
+     '            args[a] = (uint32_t)value;\n'
+     '            cursor += widths[a] + 1u;\n'
+     '        }\n'
+     '    }\n'),
+    ('    frame->verb = verb;\n    return 1;\n}\n',
+     '    frame->verb = verb;\n'
+     '    frame->arg[0] = args[0]; frame->arg[1] = args[1]; frame->arg[2] = args[2];\n'
+     '    return 1;\n}\n'),
+    ('        frame->verb > SXNU_CONTROL_VERB_REBOOT_FASTBOOT) return SXNU_CONTROL_VERB_INVALID;\n',
+     '        frame->verb > SXNU_CONTROL_VERB_INPUT) return SXNU_CONTROL_VERB_INVALID;\n'),
+    ('        accepted > SXNU_CONTROL_VERB_REBOOT_FASTBOOT || frame->verb != accepted) return 0;\n',
+     '        accepted > SXNU_CONTROL_VERB_INPUT || frame->verb != accepted) return 0;\n')))
+qud_edit('kernel/QcomUsbScreenshot.c', (
+    ('static uint8_t pixels[QUD_SCREENSHOT_MAX_BYTES];\n',
+     '/* fuxi-usb-control-20261112: the static buffer is the default; a provider may hand over a larger one. */\n'
+     'static uint8_t pixels_static[QUD_SCREENSHOT_MAX_BYTES];\n'
+     'static uint8_t *pixels = pixels_static;\n'
+     'static size_t pixels_capacity = sizeof(pixels_static);\n'),
+    ('           (uint64_t)w * h * 3u <= QUD_SCREENSHOT_MAX_BYTES;\n}\n',
+     '           (uint64_t)w * h * 3u <= pixels_capacity;\n}\n'
+     'int qcom_usb_debug_set_screenshot_storage(void *storage, size_t bytes)\n'
+     '{\n'
+     '    if (!storage || bytes < sizeof(pixels_static) || bytes > UINT32_MAX || ready) return 0;\n'
+     '    pixels = storage; pixels_capacity = bytes;\n'
+     '    return 1;\n'
+     '}\n'),
+    ('provider(provider_cookie, pixels, sizeof(pixels), &w, &h)', 'provider(provider_cookie, pixels, pixels_capacity, &w, &h)')))
+qud_edit('include/QcomUsbScreenshot.h', (
+    ('int qcom_usb_debug_register_framebuffer(const struct qcom_usb_framebuffer *framebuffer);\n',
+     'int qcom_usb_debug_register_framebuffer(const struct qcom_usb_framebuffer *framebuffer);\n'
+     '/* fuxi-usb-control-20261112: caller storage for the snapshot (at least the static default, kept until reset).\n'
+     ' * Call once, before the first SCREENSHOT. Returns 1 when taken. */\n'
+     'int qcom_usb_debug_set_screenshot_storage(void *storage, size_t bytes);\n'),))
+qud_edit('kernel/QcomXnuUsbDebug.c', (
+    # Placed inside the span tests/check.py extracts (control_reply_reboot .. control_service) so the handler model compiles too.
+    ('static void control_handle_frame(const struct sxnu_control_frame *frame,\n',
+     '/* fuxi-usb-control-20261112: synthetic input behind the INPUT verb. op 0 asks whether input is available (no side effect);\n'
+     ' * the board (FuxiButtons) provides the real one. Returns 1 when carried out. */\n'
+     'int fuxi_control_input(unsigned int op, unsigned int a, unsigned int b);\n'
+     '__attribute__((weak)) int fuxi_control_input(unsigned int op, unsigned int a, unsigned int b)\n'
+     '{\n    (void)op; (void)a; (void)b;\n    return 0;\n}\n'
+     'static void control_handle_frame(const struct sxnu_control_frame *frame,\n'),
+    ('    int reboot_accepted = 0;\n    size_t shot_bytes = 0;\n',
+     '    int reboot_accepted = 0;\n    int input_accepted = 0;\n    size_t shot_bytes = 0;\n'),
+    ('    default:\n        return;\n    }\n    if (!reply_bytes) {\n',
+     '    case SXNU_CONTROL_VERB_INPUT:\n'
+     '        if (frame->arg[0] < 1u || frame->arg[0] > 3u)\n'
+     '            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "ERR", "badop");\n'
+     '        else if (!fuxi_control_input(0u, 0u, 0u))\n'
+     '            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "ERR", "unavailable");\n'
+     '        else {\n'
+     '            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "OK", "queued");\n'
+     '            input_accepted = 1;\n'
+     '        }\n'
+     '        break;\n'
+     '    default:\n        return;\n    }\n    if (!reply_bytes) {\n'),
+    ('    if (shot_bytes) (void)qcom_usb_shot_commit(shot_bytes);\n',
+     '    if (shot_bytes) (void)qcom_usb_shot_commit(shot_bytes);\n'
+     '    if (input_accepted) (void)fuxi_control_input(frame->arg[0], frame->arg[1], frame->arg[2]);\n')))
+# The handler model builds its frames positionally (-Wextra -Werror): give the new arg field its zero initializer there.
+qud_edit('tests/test_usb_screenshot_control.c', (
+    ('    const struct sxnu_control_frame frame = {7, seq, 0, verb};\n',
+     '    const struct sxnu_control_frame frame = {7, seq, 0, verb, {0u, 0u, 0u}};   /* fuxi-usb-control-20261112 */\n'),))
+
 patcher = module / 'scripts/xnu_patches.py'
 state = json.loads(subprocess.check_output([sys.executable, patcher, 'status',
                    '--xnu', root / '.cache/xnu-work', '--profile', 'darwin23-fuxi'], text=True))

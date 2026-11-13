@@ -265,6 +265,10 @@ void watchThread(void *,wait_result_t){
 
 // The network side asks the worker to send a queued frame now (FuxiWifiNet.cpp if_output) instead of at its next wake.
 extern "C" void fuxi_wifi_wake(void){wakeWorker();}
+// The address in /chosen at boot, before userland: with /defaults/vmm-present (the iOS 17 ADT) MobileGestalt answers the wifi
+// capability from /chosen/mac-address-wifi0 alone, and Settings shows no Wi-Fi row while it is false. Published only once the
+// firmware ran, the property came after MobileGestaltHelper had answered (and cached) false. It needs only unique-chip-id.
+extern "C" void fuxi_wifi_publish_mac(void){publishMac();}
 // Files the network side may look for (sheng: join.txt in the firmware container for unattended joins): none on fuxi.
 extern "C" int fuxi_wifi_file(const char *,const uint8_t **,size_t *){return -1;}
 extern "C" void native_wifi_logf(int level,const char *fmt,...){

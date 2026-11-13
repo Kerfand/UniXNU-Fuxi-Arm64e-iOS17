@@ -1,0 +1,77 @@
+// Pinned IOAESAccelerator imports for fuxi's iOS 17.7 21H16 (iPhone15,2) kernelcache.
+//
+// Original addresses in com.apple.iokit.IOCryptoAcceleratorFamily of the unchanged MH_FILESET kernelcache
+// (sha256 9bd1028796b0baa12922ab44fda1805b11595981338288c7881c669238d352e5); fileset kexts are not slid.
+// Recovered 2026-11-06 from the class's own vtable 0xfffffff007c04f48 (181 slots: 168 IOService slots, then the
+// 13 IOAESAccelerator virtuals whose PAC discriminators match their mangled names one for one; NOTE that
+// getAlgorithmName is first declared by IOCryptoAccelerator in 21H16, discriminator 0x6497):
+//   slots 0/1 D1/D0, slot 7 getMetaClass -> gMetaClass (its metaclass constructor passes "IOAESAccelerator" and
+//   size 0x120), start/getWorkLoop/callPlatformFunction by their IOService discriminators;
+//   C2 calls IOCryptoAccelerator C2 (0xfffffff009845ab8) and stores this vtable+16; D2 is the BTI/B that precedes
+//   D1 and tail-calls IOCryptoAccelerator D2 -> IOService D2.
+.globl __ZN16IOAESAccelerator10gMetaClassE
+.set __ZN16IOAESAccelerator10gMetaClassE, 0xfffffff00a45d578
+
+.globl __ZN16IOAESAccelerator10performAESEP18IOMemoryDescriptorS1_yP7IOAESIV14IOAESOperationP12IOAESKeyDatayyPFvPviES7_
+.set __ZN16IOAESAccelerator10performAESEP18IOMemoryDescriptorS1_yP7IOAESIV14IOAESOperationP12IOAESKeyDatayyPFvPviES7_, 0xfffffff009843834
+
+.globl __ZN16IOAESAccelerator10performAESEPvS0_P4taskyP7IOAESIV14IOAESOperationP12IOAESKeyDataPFvS0_iES0_
+.set __ZN16IOAESAccelerator10performAESEPvS0_P4taskyP7IOAESIV14IOAESOperationP12IOAESKeyDataPFvS0_iES0_, 0xfffffff0098434f4
+
+.globl __ZN16IOAESAccelerator12_completeAESEP23IOAESAcceleratorCommand
+.set __ZN16IOAESAccelerator12_completeAESEP23IOAESAcceleratorCommand, 0xfffffff009844170
+
+.globl __ZN16IOAESAccelerator12_queueLockedEP23IOAESAcceleratorCommand
+.set __ZN16IOAESAccelerator12_queueLockedEP23IOAESAcceleratorCommand, 0xfffffff009843f08
+
+.globl __ZN16IOAESAccelerator13_startCommandEv
+.set __ZN16IOAESAccelerator13_startCommandEv, 0xfffffff0098440d8
+
+.globl __ZN16IOAESAccelerator14isKeySupportedEj
+.set __ZN16IOAESAccelerator14isKeySupportedEj, 0xfffffff009843ee4
+
+.globl __ZN16IOAESAccelerator16getAlgorithmNameEv
+.set __ZN16IOAESAccelerator16getAlgorithmNameEv, 0xfffffff009842ba0
+
+.globl __ZN16IOAESAccelerator17createSpecialKeysEv
+.set __ZN16IOAESAccelerator17createSpecialKeysEv, 0xfffffff009844394
+
+.globl __ZN16IOAESAccelerator17performAESQuantumEP23IOAESAcceleratorCommand
+.set __ZN16IOAESAccelerator17performAESQuantumEP23IOAESAcceleratorCommand, 0xfffffff009843ea4
+
+.globl __ZN16IOAESAccelerator18completeAESQuantumEP23IOAESAcceleratorCommand
+.set __ZN16IOAESAccelerator18completeAESQuantumEP23IOAESAcceleratorCommand, 0xfffffff009843dc4
+
+.globl __ZN16IOAESAccelerator18disableHardwareKeyEj
+.set __ZN16IOAESAccelerator18disableHardwareKeyEj, 0xfffffff009843edc
+
+.globl __ZN16IOAESAccelerator19getSupportedOptionsEv
+.set __ZN16IOAESAccelerator19getSupportedOptionsEv, 0xfffffff009843ef0
+
+.globl __ZN16IOAESAccelerator19performImmediateAESEP23IOAESAcceleratorCommand
+.set __ZN16IOAESAccelerator19performImmediateAESEP23IOAESAcceleratorCommand, 0xfffffff009843ecc
+
+.globl __ZN16IOAESAccelerator20callPlatformFunctionEPK8OSSymbolbPvS3_S3_S3_
+.set __ZN16IOAESAccelerator20callPlatformFunctionEPK8OSSymbolbPvS3_S3_S3_, 0xfffffff009843394
+
+.globl __ZN16IOAESAccelerator5startEP9IOService
+.set __ZN16IOAESAccelerator5startEP9IOService, 0xfffffff009842bb0
+
+.globl __ZN16IOAESAcceleratorC2EPK11OSMetaClass
+.set __ZN16IOAESAcceleratorC2EPK11OSMetaClass, 0xfffffff0098426a0
+
+.globl __ZN16IOAESAcceleratorD0Ev
+.set __ZN16IOAESAcceleratorD0Ev, 0xfffffff009842718
+
+.globl __ZN16IOAESAcceleratorD1Ev
+.set __ZN16IOAESAcceleratorD1Ev, 0xfffffff009842710
+
+.globl __ZN16IOAESAcceleratorD2Ev
+.set __ZN16IOAESAcceleratorD2Ev, 0xfffffff009842708
+
+.globl __ZNK16IOAESAccelerator11getWorkLoopEv
+.set __ZNK16IOAESAccelerator11getWorkLoopEv, 0xfffffff0098434c0
+
+.globl __ZNK16IOAESAccelerator12getMetaClassEv
+.set __ZNK16IOAESAccelerator12getMetaClassEv, 0xfffffff009842774
+

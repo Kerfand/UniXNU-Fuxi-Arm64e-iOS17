@@ -2292,3 +2292,83 @@ extern "C" int native_fuxi_ufs_root_authorized (dev_t device)
   iterator->release ();
   return authorized;
 }
+
+
+// ---- Read-only access to named partitions (board drivers) ---------------------------------------------------------------------------
+// fuxi Wi-Fi (2026-11-12): the WCN7850 firmware sits in a WFW1 container in the partition named "oops", as in the UniXNU reference
+// (https://unixnu.com/zh/porting/network; UniXNU-sheng package/WifiProbe.cpp reads it through these two calls). Read-only: a primary-GPT
+// lookup by name on LUN 0..7 (4096-byte blocks; header and entry-array CRCs checked) and READ(10) of blocks inside a partition found
+// that way. hostWrite4k stays the only write path and keeps refusing everything outside the userdata windows.
+namespace {
+struct UfsPartRange { uint32_t lun; uint64_t first, last; };
+UfsPartRange gUfsPartRange[8];
+uint32_t gUfsPartRanges;
+}
+
+extern "C" int native_ufs_part_find (const char *name, uint32_t *lun, uint64_t *firstLba, uint64_t *blocks)
+{
+  if (!name || !*name || !gHost.ready) return 0;
+  size_t nameLength = strlen (name);
+  if (nameLength > 36) return 0;
+  uint8_t *buffer = static_cast<uint8_t *> (IOMallocData (4096 * 5));   // the header block, then up to 128 entries
+  if (!buffer) return 0;
+  int found = 0;
+  for (uint8_t unit = 0; unit < 8 && !found; unit++) {
+    if (hostRead4k (unit, 1, 1, buffer) != kIOReturnSuccess) continue;
+    if (le32 (buffer) != 0x20494645U || le32 (buffer + 4) != 0x54524150U || le32 (buffer + 84) != 128) continue;
+    uint32_t headerBytes = le32 (buffer + 12);
+    if (headerBytes < 92 || headerBytes > 4096 || rootCrc32 (buffer, headerBytes, true) != le32 (buffer + 16)) continue;
+    uint64_t usableFirst = le64 (buffer + 40), usableLast = le64 (buffer + 48), entriesLba = le64 (buffer + 72);
+    uint32_t count = le32 (buffer + 80), entriesCrc = le32 (buffer + 88);
+    if (entriesLba < 2 || !count || count > 128) continue;
+    uint32_t entryBlocks = (count * 128 + 4095) / 4096;
+    if (hostRead4k (unit, entriesLba, entryBlocks, buffer + 4096) != kIOReturnSuccess ||
+        rootCrc32 (buffer + 4096, count * 128) != entriesCrc) continue;
+    for (uint32_t index = 0; index < count; index++) {
+      const uint8_t *entry = buffer + 4096 + index * 128;
+      if (!rootEntryUsed (entry)) continue;
+      bool same = true;
+      for (size_t c = 0; c < 36; c++) {
+        uint16_t have = uint16_t (entry[56 + 2 * c] | (entry[57 + 2 * c] << 8));
+        uint16_t want = c < nameLength ? uint8_t (name[c]) : 0;
+        if (have != want) { same = false; break; }
+        if (!want) break;
+      }
+      if (!same) continue;
+      uint64_t first = le64 (entry + 32), last = le64 (entry + 40);
+      if (last < first || first < usableFirst || last > usableLast) break;
+      uint32_t slot = __atomic_load_n (&gUfsPartRanges, __ATOMIC_ACQUIRE);
+      if (slot < 8) {
+        gUfsPartRange[slot] = { unit, first, last };
+        __atomic_store_n (&gUfsPartRanges, slot + 1, __ATOMIC_RELEASE);
+      }
+      if (lun) *lun = unit;
+      if (firstLba) *firstLba = first;
+      if (blocks) *blocks = last - first + 1;
+      found = 1;
+      break;
+    }
+  }
+  IOFreeData (buffer, 4096 * 5);
+  return found;
+}
+
+// Reads `blocks` 4096-byte blocks of `lun` from `lba` into dst; only inside a partition native_ufs_part_find returned. 1 on success.
+extern "C" int native_ufs_part_read (uint32_t lun, uint64_t lba, uint32_t blocks, void *dst)
+{
+  if (!dst || !blocks) return 0;
+  bool inside = false;
+  for (uint32_t i = 0; i < __atomic_load_n (&gUfsPartRanges, __ATOMIC_ACQUIRE); i++) {
+    const UfsPartRange &r = gUfsPartRange[i];
+    if (r.lun == lun && lba >= r.first && lba <= r.last && blocks <= r.last - lba + 1) { inside = true; break; }
+  }
+  if (!inside) return 0;
+  while (blocks) {
+    uint32_t chunk = blocks > kDataMax / 4096 ? static_cast<uint32_t> (kDataMax / 4096) : blocks;
+    if (hostRead4k (static_cast<uint8_t> (lun), lba, chunk, dst) != kIOReturnSuccess) return 0;
+    dst = static_cast<uint8_t *> (dst) + chunk * 4096ULL;
+    lba += chunk;
+    blocks -= chunk;
+  }
+  return 1;
+}

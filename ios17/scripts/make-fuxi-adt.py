@@ -43,6 +43,18 @@ UFS_PHY_SIZE = 0x2000
 # (iPad Pro 12.9). The point width is not what the cell carries: iPhone X is 1125x2436 at 3x (375 pt), iPhone 14 Pro
 # 1179x2556 at 3x (393 pt).
 PHONE_MODELS = {'iPhone10,3': ('D22', 'iPhone X', 2436), 'iPhone15,2': ('D72', 'iPhone 14 Pro', 2556)}
+# /product product-id of the real board device tree (IPSW Firmware/all_flash/DeviceTree.<board>.im4p). libMobileGestalt keys its product
+# table by these 20 bytes (MGGetProductType); without them it answers 0xffffffff, and VirtualAudio, which picks its compiled-in routing
+# database by that product type (VirtualAudio 0x6e3dc), finds no category ("Unable to locate category '%s' in the routing database"),
+# so no audio session gets an output route. iPhone15,2: DeviceTree.d73ap.im4p of iPhone15,2_17.7_21H16_Restore.ipsw (MG table index 55,
+# product type 0xaf477c2d). iPhone10,3: DeviceTree.d22ap.im4p (docs/devices/nx769j.md).
+# /product/audio acoustic-id of the real board device tree: MobileGestalt's AcousticID, which VirtualAudio turns into its tuning directory
+# (/System/Library/Audio/Tunings/AID<n>/VAD/graph_configurations.plist). Without it the answer is 0, AID0 does not exist, VirtualAudio's
+# file reader throws "Could not construct" (VirtualAudio 0x17296c) and the plug-in stays "not initialized yet" (fopen hook, 2026-11-13).
+# iPhone15,2: 8006 (DeviceTree.d73ap.im4p; the 21H16 OS volume carries Library/Audio/Tunings/AID8006).
+PHONE_ACOUSTIC_IDS = {'iPhone15,2': 8006}
+PHONE_PRODUCT_IDS = {'iPhone10,3': bytes.fromhex('fd079b298144a7deb4d7c87fef3eb474d8f0e7eb'),
+                     'iPhone15,2': bytes.fromhex('d3b5ffca33e4604460655adfd77fdfa4757e7e93')}
 
 
 def node(name, properties=(), children=()):
@@ -156,7 +168,11 @@ def main():
         target, name, subtype = PHONE_MODELS[args.phone_model]
         # No compatible-device-fallback: its value comes from an iPhone device tree, which no pinned source here carries.
         identity = {'model': args.phone_model, 'target': target, 'name': name,
-                    'idiom': 'phone', 'subtype': subtype, 'scale': 3, 'gamut': 'P3', 'fallback': None}
+                    # gamut sRGB (2026-11-12): with P3 the 21H16 render server composes into 'b3a8' (BGR10_XR) surfaces, which the
+                    # display's GPU copy does not take, so NativeLegacyDisplay converted every frame on the CPU (convertXrRows: a third
+                    # of backboardd's samples, frames 40-50 ms apart). The iPad identity's sRGB gets BGRA.
+                    'idiom': 'phone', 'subtype': subtype, 'scale': 3, 'gamut': 'sRGB', 'fallback': None,
+                    'product_id': PHONE_PRODUCT_IDS.get(args.phone_model), 'acoustic_id': PHONE_ACOUSTIC_IDS.get(args.phone_model)}
     else:
         identity = None
     tree = node('device-tree', [
@@ -232,7 +248,10 @@ def main():
                              ('artwork-scale-factor', struct.pack('<I', identity['scale'])),
                              ('artwork-display-gamut', identity['gamut'].encode() + b'\0'),
                              *([('compatible-device-fallback', identity['fallback'].encode() + b'\0')] if identity['fallback'] else []),
-                             ('thin-bezel', struct.pack('<I', 1))] if identity else [] )]),
+                             *([('product-id', identity['product_id'])] if identity.get('product_id') else []),
+                             ('thin-bezel', struct.pack('<I', 1))] if identity else [] )],
+             [node('audio', [('acoustic-id', struct.pack('<I', identity['acoustic_id']))])]
+             if identity and identity.get('acoustic_id') else []),
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),

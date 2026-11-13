@@ -1,0 +1,241 @@
+--- a/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737554105 +0800
++++ b/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737671005 +0800
+@@ -1966,11 +1966,238 @@
+ 	unixnu_pp_schedule();
+ }
+ 
++/*
++ * fuxi (zz-hot-sampler.patch), boot-arg unixnu-hot=<process name>: where a process spends its CPU time. Every millisecond
++ * a cross-call to every other CPU reads the interrupted context (cpu_int_state, as unixnu_sample_cpu does); when the
++ * interrupted thread belongs to that process it counts the user pc (interrupted at EL0), or the kernel pc and the user
++ * return address of the trap the thread is in (EL1). Every 10 s the 48 heaviest of each table, the totals and the process's
++ * dyld shared cache slide go to the console as "unixnu hot:" lines, then the tables restart; unixnu-hot-rounds such reports
++ * (default 30, at most 120). Reads only. Written for the iOS 17 render server, whose frames took 40-50 ms of its CPU time
++ * while the GPU was 5-34 % busy (2026-11-12).
++ */
++extern unsigned int cpu_broadcast_xcall_simple(boolean_t self_xcall, broadcastFunc func, void *parm);
++#define UNIXNU_HOT_SLOTS 2048
++struct unixnu_hot_slot {
++	uint64_t key;
++	uint32_t count;
++	uint32_t pad;
++};
++/* from the heap at arm time: in bss the 96 KiB took the fileset kernel's native __DATA past its room */
++static struct unixnu_hot_slot *unixnu_hot_u, *unixnu_hot_k, *unixnu_hot_c, *unixnu_hot_l, *unixnu_hot_f;
++static uint32_t unixnu_hot_samples, unixnu_hot_user, unixnu_hot_kernel, unixnu_hot_other, unixnu_hot_lost, unixnu_hot_ticks;
++static task_t unixnu_hot_task;
++static char unixnu_hot_name[32];
++static thread_call_t unixnu_hot_tick_call, unixnu_hot_report_call;
++static uint32_t unixnu_hot_rounds, unixnu_hot_max = 30;
++static volatile uint32_t unixnu_hot_running;
++
++static void
++unixnu_hot_add(struct unixnu_hot_slot *table, uint64_t key)
++{
++	if (!key) {
++		return;
++	}
++	uint32_t h = (uint32_t)((key >> 2) * 2654435761u) & (UNIXNU_HOT_SLOTS - 1);
++	for (int i = 0; i < 32; i++) {
++		struct unixnu_hot_slot *s = &table[(h + i) & (UNIXNU_HOT_SLOTS - 1)];
++		uint64_t current = os_atomic_load(&s->key, relaxed);
++		if (current == 0) {
++			if (os_atomic_cmpxchg(&s->key, 0ULL, key, relaxed)) {
++				current = key;
++			} else {
++				current = os_atomic_load(&s->key, relaxed);
++			}
++		}
++		if (current == key) {
++			os_atomic_inc(&s->count, relaxed);
++			return;
++		}
++	}
++	os_atomic_inc(&unixnu_hot_lost, relaxed);
++}
++
++static void
++unixnu_hot_sample(__unused void *arg)
++{
++	thread_t self = current_thread();
++	task_t task = self ? get_threadtask(self) : TASK_NULL;
++	if (!unixnu_hot_task || task != unixnu_hot_task) {
++		os_atomic_inc(&unixnu_hot_other, relaxed);
++		return;
++	}
++	arm_saved_state_t *state = (arm_saved_state_t *)getCpuDatap()->cpu_int_state;
++	if (!state) {
++		return;
++	}
++	os_atomic_inc(&unixnu_hot_samples, relaxed);
++	uint64_t pc = (uint64_t)ptrauth_strip((void *)get_saved_state_pc(state), ptrauth_key_return_address);
++	if (get_saved_state_cpsr(state) & 0xc) {      /* interrupted at EL1: in a trap, a fault or an interrupt */
++		os_atomic_inc(&unixnu_hot_kernel, relaxed);
++		unixnu_hot_add(unixnu_hot_k, pc);
++		arm_saved_state_t *us = get_user_regs(self);
++		if (us) {
++			unixnu_hot_add(unixnu_hot_c,
++			    (uint64_t)ptrauth_strip((void *)get_saved_state_lr(us), ptrauth_key_return_address) & 0xfffffffffULL);
++		}
++	} else {
++		os_atomic_inc(&unixnu_hot_user, relaxed);
++		unixnu_hot_add(unixnu_hot_u, pc & 0xfffffffffULL);
++		/* the interrupted lr: for a leaf (objc_msgSend, malloc) the code that called it */
++		unixnu_hot_add(unixnu_hot_l,
++		    (uint64_t)ptrauth_strip((void *)get_saved_state_lr(state), ptrauth_key_return_address) & 0xfffffffffULL);
++		/*
++		 * Inclusive profile: every return address of the interrupted frame chain counts once. The chain is read through
++		 * the task pmap without faulting (an IPI handler must not take a fault): pmap_find_pa_nofault, then the physical
++		 * aperture; a frame record that would cross a 4 KiB page or a page that is not resident ends the walk.
++		 */
++		pmap_t upmap = get_task_pmap(task);
++		uint64_t ufp = get_saved_state_fp(state);
++		for (int depth = 0; upmap && depth < 24 && ufp && !(ufp & 7) && (ufp & 0xfff) <= 0xff0; depth++) {
++			pmap_paddr_t pa = pmap_find_pa_nofault(upmap, ufp);
++			if (!pa || !pmap_valid_address(pa)) {
++				break;
++			}
++			const uint64_t *record = (const uint64_t *)phystokv(pa);
++			uint64_t next = record[0], ret = record[1];
++			unixnu_hot_add(unixnu_hot_f, (uint64_t)ptrauth_strip((void *)ret, ptrauth_key_return_address) & 0xfffffffffULL);
++			if (next <= ufp) {
++				break;
++			}
++			ufp = next;
++		}
++	}
++}
++
++static void
++unixnu_hot_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	if (!unixnu_hot_running) {
++		return;
++	}
++	unixnu_hot_ticks++;
++	(void)cpu_broadcast_xcall_simple(FALSE, unixnu_hot_sample, NULL);
++	uint64_t deadline;
++	clock_interval_to_deadline(1, NSEC_PER_MSEC, &deadline);
++	thread_call_enter_delayed(unixnu_hot_tick_call, deadline);
++}
++
++static void
++unixnu_hot_print(const char *kind, struct unixnu_hot_slot *table)
++{
++	for (int n = 0; n < 48; n++) {
++		struct unixnu_hot_slot *best = NULL;
++		for (int i = 0; i < UNIXNU_HOT_SLOTS; i++) {
++			if (table[i].count && (!best || table[i].count > best->count)) {
++				best = &table[i];
++			}
++		}
++		if (!best) {
++			break;
++		}
++		printf("unixnu hot: %s %u %llx\n", kind, best->count, (unsigned long long)best->key);
++		best->count = 0;
++	}
++	bzero(table, sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS);
++}
++
++static void
++unixnu_hot_report(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
++{
++	/* (re)find the process: the render server may have restarted */
++	task_t task, found = TASK_NULL;
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&tasks, task, task_t, tasks) {
++		void *proc = get_bsdtask_info(task);
++		const char *name = proc ? proc_name_address(proc) : NULL;
++		if (name && !strcmp(name, unixnu_hot_name)) {
++			task_reference(task);
++			found = task;
++			break;
++		}
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	if (unixnu_hot_running) {
++		uint32_t samples = os_atomic_xchg(&unixnu_hot_samples, 0, relaxed), user = os_atomic_xchg(&unixnu_hot_user, 0, relaxed);
++		uint32_t kernel = os_atomic_xchg(&unixnu_hot_kernel, 0, relaxed), other = os_atomic_xchg(&unixnu_hot_other, 0, relaxed);
++		uint32_t lost = os_atomic_xchg(&unixnu_hot_lost, 0, relaxed), ticks = unixnu_hot_ticks;
++		unixnu_hot_ticks = 0;
++		uint64_t slide = 0;
++		if (unixnu_hot_task) {
++			mach_vm_address_t infos = task_get_all_image_info_addr(unixnu_hot_task);
++			if (infos) {
++				(void)vm_map_read_user(get_task_map(unixnu_hot_task), infos + 0x98, &slide, sizeof(slide));
++			}
++		}
++		printf("unixnu hot: round %u %s pid %d slide %#llx ticks %u samples %u user %u kernel %u other %u lost %u\n",
++		    unixnu_hot_rounds, unixnu_hot_name, unixnu_hot_task ? task_pid(unixnu_hot_task) : -1, slide, ticks, samples, user,
++		    kernel, other, lost);
++		unixnu_hot_print("U", unixnu_hot_u);
++		unixnu_hot_print("K", unixnu_hot_k);
++		unixnu_hot_print("C", unixnu_hot_c);
++		unixnu_hot_print("L", unixnu_hot_l);
++		unixnu_hot_print("F", unixnu_hot_f);
++		unixnu_hot_rounds++;
++	}
++	if (found && found != unixnu_hot_task) {
++		task_t old = unixnu_hot_task;
++		unixnu_hot_task = found;
++		if (old) {
++			task_deallocate(old);
++		}
++		printf("unixnu hot: sampling %s pid %d\n", unixnu_hot_name, task_pid(found));
++	} else if (found) {
++		task_deallocate(found);
++	}
++	if (unixnu_hot_rounds >= unixnu_hot_max) {
++		unixnu_hot_running = 0;
++		printf("unixnu hot: done\n");
++		return;
++	}
++	if (unixnu_hot_task && !unixnu_hot_running) {
++		unixnu_hot_running = 1;
++		uint64_t first;
++		clock_interval_to_deadline(1, NSEC_PER_MSEC, &first);
++		thread_call_enter_delayed(unixnu_hot_tick_call, first);
++	}
++	uint64_t deadline;
++	clock_interval_to_deadline(10, NSEC_PER_SEC, &deadline);
++	thread_call_enter_delayed(unixnu_hot_report_call, deadline);
++}
++
++static void
++unixnu_hot_arm(void)
++{
++	if (unixnu_hot_report_call || !PE_parse_boot_argn("unixnu-hot", unixnu_hot_name, sizeof(unixnu_hot_name)) || !unixnu_hot_name[0]) {
++		return;
++	}
++	unixnu_hot_name[sizeof(unixnu_hot_name) - 1] = 0;
++	(void)PE_parse_boot_argn("unixnu-hot-rounds", &unixnu_hot_max, sizeof(unixnu_hot_max));
++	if (unixnu_hot_max < 1 || unixnu_hot_max > 120) {
++		unixnu_hot_max = 30;
++	}
++	unixnu_hot_u = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
++	unixnu_hot_k = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
++	unixnu_hot_c = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
++	unixnu_hot_l = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
++	unixnu_hot_f = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
++	if (!unixnu_hot_u || !unixnu_hot_k || !unixnu_hot_c || !unixnu_hot_l || !unixnu_hot_f) {
++		printf("unixnu hot: no memory for the tables\n");
++		return;
++	}
++	unixnu_hot_tick_call = thread_call_allocate_with_options(unixnu_hot_tick, NULL, THREAD_CALL_PRIORITY_KERNEL, 0);
++	unixnu_hot_report_call = thread_call_allocate_with_options(unixnu_hot_report, NULL, THREAD_CALL_PRIORITY_KERNEL, 0);
++	printf("unixnu hot: armed for %s, %u rounds\n", unixnu_hot_name, unixnu_hot_max);
++	uint64_t deadline;
++	clock_interval_to_deadline(30, NSEC_PER_SEC, &deadline);
++	thread_call_enter_delayed(unixnu_hot_report_call, deadline);
++}
++
+ void unixnu_init_hang_probe_arm(task_t task);
+ void
+ unixnu_init_hang_probe_arm(task_t task)
+ {
+ 	unixnu_pp_arm();
++	unixnu_hot_arm();
+ 	uint32_t seconds = 0;
+ 	if (!PE_parse_boot_argn("unixnu-hang-probe", &seconds, sizeof(seconds)) || !seconds || unixnu_hang_call || !task) {
+ 		return;

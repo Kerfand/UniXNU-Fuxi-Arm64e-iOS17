@@ -30,11 +30,23 @@
 - **GPU 插件**：Turnip（`libvulkan_freedreno.dylib`）改用 chained fixups 链接，修复 mediaserverd / iconservicesagent 在子线程加载 Metal 时 dyld 栈溢出（设置打开慢的根因）。
 - **壁纸**：默认壁纸 7565 的 HEIC 图层需转成 PNG（Windows WIC，保留 alpha），由 `ios17-wallpaper-iphone.patch` 挂载；挂载成功，但 PosterBoard 的渲染扩展尚未出现，**壁纸仍不显示**。
 
+## 进度更新（2026-11-13）
+
+- **显示**：启用逻辑分辨率 1125×2436（375×812 pt，UIKit 认识的屏幕类型），由 GPU（AdrenoMetal `scanout_scale` AIR 内核，`unixnu/diffs/drivers_AdrenoMetal.diff`）缩放到 1080×2400 面板；控制中心布局恢复正常。AdrenoMetal 必须基于 `official-51b7003-import`（5d56587）构建。
+- **键盘**：可以打字。mobileassetd（普通 arm64 进程）因内核未关闭用户态 PAC 而在 dyld 中 FPAC 崩溃，kbd 同步等待它导致打开键盘的 App 卡死；`native-user-jop-disable.patch` 在返回 EL0 时为 `disable_user_jop` 线程清除 SCTLR_EL1 EnIA/IB/DA/DB、进入 EL1 时恢复。打字仍卡顿（UIKeyboardInputModeController 反复重算听写语言，待修）。
+- **音频**：ADSP、CS35L41 功放、HAL 插件 `device/hal/ShengAudioPlugIn.c` 均已工作。
+  - ADT 补上真机 D73AP 设备树的 `/product/product-id` 和 `/product/audio/acoustic-id = 8006`，MobileGestalt 识别为 iPhone 14 Pro，VirtualAudio 加载 AID8006 调校与路由数据库。
+  - 插件以 VirtualAudio 的 `Codec` 设备身份出现（8 声道输出，输出元素 4 的静音/音量控件），已建出 `Built-In Speaker` 端口。
+  - 插件在 arm64e 上改写 VirtualAudio 的导入（MobileGestalt、fopen、IORegistry、`__cxa_throw`、`_os_log_impl`），错误日志以 `ShengVA:` 信标出现在内核日志里。
+  - AID8006 的 `graph_configurations.plist` 去掉 `speaker_*` 项后由构建脚本从你自己的系统卷生成（不入库），避免闭环扬声器保护因缺出厂校准数据而崩溃。
+  - **仍无声**：播放路由要求 HAL 级扬声器保护（`spac`），尚未满足。
+- **内核探针**：1 kHz 热点采样器增加 LR 与整栈包含式统计（`zz-hot-sampler.patch`），线程探针、IOKit 探针常驻关键词。
+
 ## 已知问题
 
 - 状态栏仍显示红色 `rdar` 条（`ios17/statusbar/FuxiStatusBar.c` 已上机，但尚未生效，待排查）。
-- `offline-legacy-logical-width/height`（逻辑分辨率缩放）代码保留但未启用。
-- mobileassetd 仍有崩溃。
+- 扬声器无声（见上），打字卡顿。
+- ADT 中 iPhone15,2 的 `target-type` 仍为 `D72`，真机为 `D73`。
 
 ## 构建概要
 

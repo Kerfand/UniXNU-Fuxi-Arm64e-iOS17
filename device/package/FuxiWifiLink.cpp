@@ -114,11 +114,14 @@ bool prepareSleepClock(){
 struct Rail{const char *name;uint32_t mv;};
 constexpr Rail kRails[]={{"smpg5",1000},{"ldob15",1800},{"smpg2",980},{"smpe4",950},{"smpg4",1350},{"smpg6",1900}};
 int powerRails(){
- static uint8_t db[0x20000];Window dw={},rw={};
- if(!mapWindow(dw,0x81c60000,sizeof db))return -1;
- for(unsigned i=0;i<sizeof db;i+=4){uint32_t x=dw.va[i/4];memcpy(db+i,&x,4);}release(dw);
+ // The cmd-db copy (128 KiB) comes from the heap once: in __bss it alone took the iOS 17 fileset kernel past its __DATA room.
+ constexpr size_t kDbBytes=0x20000;static uint8_t *db;Window dw={},rw={};
+ if(!db)db=static_cast<uint8_t *>(IOMallocData(kDbBytes));
+ if(!db)return -1;
+ if(!mapWindow(dw,0x81c60000,kDbBytes))return -1;
+ for(unsigned i=0;i<kDbBytes;i+=4){uint32_t x=dw.va[i/4];memcpy(db+i,&x,4);}release(dw);
  QcomRpmhResource rails[6];
- for(unsigned i=0;i<6;++i)if(qcom_cmd_db_find(db,sizeof db,kRails[i].name,&rails[i])){IOLog("[FuxiWifi] missing cmd-db rail %s\n",kRails[i].name);return -2;}
+ for(unsigned i=0;i<6;++i)if(qcom_cmd_db_find(db,kDbBytes,kRails[i].name,&rails[i])){IOLog("[FuxiWifi] missing cmd-db rail %s\n",kRails[i].name);return -2;}
  if(!mapWindow(rw,0x17a20000,0x10000))return -3;
  volatile uint32_t *r=rw.va;const QcomRscLayout l=qcom_rsc_layout(r[0]);const unsigned tcs=0;const unsigned base=0xd00;
  // TCS2 is used by touch. Refuse an already triggered/enabled TCS0 rather than overwrite it.
@@ -307,9 +310,11 @@ void wifiLinkThread(void *,wait_result_t){
  release(gcc);release(tlmm);
 }
 }
+extern "C" void fuxi_wifi_publish_mac(void);   // FuxiWifiNw21.cpp
 extern "C" void fuxi_wifi_link_probe(void){
  static bool started;unsigned stage=0;
  if(!PE_parse_boot_argn("fuxi-wifi",&stage,sizeof stage)||(stage<2||stage>5||stage==4)||started)return;started=true;
+ if(stage==5){fuxi_wifi_publish_mac();IOLog("[FuxiWifi] mac-address-wifi0 published at boot\n");}
  if(stage==5)fuxi_wifi_dma_reserve();
  thread_t t=nullptr;if(kernel_thread_start(wifiLinkThread,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);
  else IOLog("[FuxiWifi] stage2 worker creation failed\n");

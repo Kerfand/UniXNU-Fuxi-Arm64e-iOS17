@@ -1,0 +1,43 @@
+--- a/osfmk/arm64/pcb.c	2026-11-12 20:37:11.585682339 +0800
++++ b/osfmk/arm64/pcb.c	2026-11-12 20:37:11.585764939 +0800
+@@ -1197,10 +1197,21 @@
+ static thread_call_t unixnu_beat_call;
+ static uint32_t unixnu_beat;
+ 
++/* fuxi (screen-quiet-after-swap.patch): no drawing on the boot framebuffer once the compositor's swaps reach the display. The GOP
++ * scanout is the system's from then on: the beat block (blue/white every tick), the stage marks and the text lines were repainted over
++ * the UI and flickered at the top of the screen. native_legacy_swapstat[0] counts swaps validated (NativeLegacyDisplay.cpp); before the
++ * first one the marks still report the boot. */
++extern volatile uint32_t native_legacy_swapstat[16] __attribute__((weak_import));
++static inline bool
++unixnu_screen_quiet(void)
++{
++	return &native_legacy_swapstat[0] != NULL && native_legacy_swapstat[0] != 0;
++}
++
+ static void
+ unixnu_fill(unsigned int slot, uint32_t color)
+ {
+-	if (!unixnu_fb) {
++	if (!unixnu_fb || unixnu_screen_quiet()) {
+ 		return;
+ 	}
+ 	unsigned long x0 = 40 + slot * 110;
+@@ -1277,7 +1288,7 @@
+ static void
+ unixnu_text(const char *s)
+ {
+-	if (!unixnu_fb) {
++	if (!unixnu_fb || unixnu_screen_quiet()) {
+ 		return;
+ 	}
+ 	/* unixnu_fb points at row 160; text starts UNIXNU_TEXT_Y - 160 rows below it (the mapping covers it). */
+@@ -1389,7 +1400,7 @@
+ 		return;
+ 	}
+ 	uint32_t count = ++unixnu_stage_count[stage];
+-	if (!unixnu_fb) {
++	if (!unixnu_fb || unixnu_screen_quiet()) {
+ 		return;
+ 	}
+ 	unsigned long x0 = 40 + stage * 44;

@@ -695,3 +695,17 @@ extern "C" void native_touch_probe(void) {
     if (kernel_thread_start(touchThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
     else native_touch_error = -12;
 }
+
+// fuxi USB control (INPUT verb, fuxi-usb-control-20261112): op 1 puts one contact down / moves it to panel pixel (a, b) of the
+// 1080x2400 panel, op 2 lifts it. Published like a drained frame in the probe's mapped space (30480 x 20320, autotap's centre
+// is 15240,10160). Returns 0 when no HID sink is attached.
+extern "C" int fuxi_control_touch(unsigned op, unsigned a, unsigned b) {
+    if (!__atomic_load_n(&gTouchSink, __ATOMIC_ACQUIRE)) return 0;
+    if (op == 1) {
+        if (a >= 1080u || b >= 2400u) return 0;
+        publishSynthetic(1, int(a * 30480u / 1080u), int(b * 20320u / 2400u));
+        return 1;
+    }
+    if (op == 2) { publishSynthetic(0, 0, 0); return 1; }
+    return 0;
+}

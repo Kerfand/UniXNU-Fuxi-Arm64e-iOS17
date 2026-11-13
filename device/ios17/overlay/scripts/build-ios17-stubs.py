@@ -20,23 +20,76 @@ from kernel_target import TRIPLE, check_object
 out = ROOT / 'build/ios17-stubs'
 out.mkdir(parents=True, exist_ok=True)
 extra = out / 'Ios17AbsentStubs.c'
-extra.write_text('''#include <stdint.h>
+# With CONFIG_XNU_NATIVE_UFS the real NativeUfs archive defines the UFS log window functions.
+ufs_stubs = '' if os.environ.get('XNU_NATIVE_UFS') == '1' else '''
 int native_ufs_log_open(uint64_t *first, uint64_t *count, const char **why) { if (why) *why = "no UFS (ios17 checkpoint)"; (void)first; (void)count; return -1; }
 int native_ufs_log_write(uint64_t lba, uint32_t blocks, const void *data) { (void)lba; (void)blocks; (void)data; return -1; }
 uint64_t native_ufs_export_blocks(void) { return 0; }
 int native_ufs_export_write(uint64_t lba, uint32_t blocks, const void *data) { (void)lba; (void)blocks; (void)data; return -1; }
 int native_ufs_log_sync(void) { return -1; }
 unsigned native_ufs_store_gpt_check(void) { return 0; }
-volatile uint32_t native_data_persist_state, native_data_persist_header, native_data_persist_gpt, native_data_persist_gpt_after;
+'''
+# NativeUfs weakly calls the boot-progress observer from its verified read path; without CONFIG_XNU_BOOT_PROGRESS
+# nothing defines it, and arm64e cannot link an undefined weak import, so provide the no-op observer.
+progress_stub = '' if os.environ.get('XNU_BOOT_PROGRESS') == '1' else 'void boot_progress_poll(void) {}\n'
+# With CONFIG_XNU_NATIVE_RAM_BLOCK the real NativeRamBlock object defines the Data persistence diagnostics.
+persist_stubs = '' if os.environ.get('XNU_NATIVE_RAM_BLOCK') == '1' else '''volatile uint32_t native_data_persist_state, native_data_persist_header, native_data_persist_gpt, native_data_persist_gpt_after;
 volatile uint64_t native_data_persist_pages, native_data_persist_loaded, native_data_persist_writes, native_data_persist_syncs,
     native_data_persist_errors, native_data_persist_first_lba, native_data_persist_present;
-volatile uint32_t native_process_wait_port[10];
-volatile int32_t fuxi_buttons_stats[10];
-void native_touch_probe(void) {}
+'''
+# With CONFIG_XNU_NATIVE_LEGACY_DISPLAY the display archive (build-ios17-legacy-display.py) defines the two
+# lifecycle probes, so package/LegacyDisplayStub.c is left out and only its GOP hand-off no-ops are kept here.
+legacy_display = os.environ.get('XNU_NATIVE_LEGACY_DISPLAY') == '1'
+handoff_stubs = '''__attribute__((weak)) int native_gop_handoff_call(unsigned op, void *task, const void *in, unsigned long in_size, void *out, unsigned long out_size)
+{ (void)op; (void)task; (void)in; (void)in_size; (void)out; (void)out_size; return -536870203; /* kIOReturnNotReady */ }
+__attribute__((weak)) void *native_gop_handoff_memory(void) { return 0; }
+''' if legacy_display else ''
+# Original kexts get IOInterruptEventSource::interruptEventSource(owner, action, provider, index) through this wrapper
+# (fixture: original 0xfffffff0083a8964 -> _unixnu_interrupt_event_source_soft). Software sources (provider NULL:
+# IOSurfaceRoot, IOHIDFamily, IOMobileGraphicsFamily) are created; hardware sources (ApplePMGR and the other original
+# platform drivers asking for an Apple interrupt that the Qualcomm board does not have) get NULL, as the unmapped
+# stub gave them. The plain mapping let ApplePMGR register interrupts and the boot died before the USB console.
+soft_events = '''extern void *unixnu_original_interrupt_event_source(void *owner, void *action, void *provider, int index)
+    __asm__("__ZN22IOInterruptEventSource20interruptEventSourceEP8OSObjectPFvS1_PS_iEP9IOServicei");
+extern int printf(const char *, ...);
+void *unixnu_interrupt_event_source_soft(void *owner, void *action, void *provider, int index)
+{
+	if (provider) {
+		printf("ios17 interrupt event source refused: owner %p provider %p index %d caller %p\\n", owner, provider, index,
+		    __builtin_extract_return_addr(__builtin_return_address(0)));
+		return 0;
+	}
+	return unixnu_original_interrupt_event_source(owner, action, provider, index);
+}
+'''
+extra.write_text('''#include <stdint.h>
+''' + ufs_stubs + progress_stub + persist_stubs + handoff_stubs + soft_events + '''volatile uint32_t native_process_wait_port[10];
+volatile uint32_t native_hid_input_events[8] __attribute__((weak));
+volatile int32_t fuxi_buttons_stats[10] __attribute__((weak));
+__attribute__((weak)) void native_touch_probe(void) {}
 ''')
 # The device package (the tree's package/ is the framework's); the build driver exports UNIXNU_DEVICE.
 package = Path(os.environ['UNIXNU_DEVICE']) / 'package' if os.environ.get('UNIXNU_DEVICE') else ROOT / 'kits/sheng'
-sources = [package / 'BootLogStubs.c', package / 'LegacyDisplayStub.c', extra]
+boot_log_stubs = package / 'BootLogStubs.c'
+if os.environ.get('XNU_NATIVE_ADRENO') == '1':
+    # GpuPowerProbe (in the display archive) defines the GPU counters BootLogStubs carries for builds without a GPU.
+    text = boot_log_stubs.read_text()
+    for decl in ('char native_gpu_coherence_row[120];', 'volatile uint64_t native_gpu_idle_sleeps;',
+                 'volatile uint64_t native_gpu_idle_spins;', 'volatile uint64_t native_gpu_idle_timeouts;',
+                 'uint32_t native_gpu_perf_vote[2];',
+                 # The touch probe (FuxiTouchProbe.cpp, in the display archive) defines the boot-log touch counters.
+                 'volatile int32_t native_touch_strokes[16][7];', 'volatile uint32_t native_touch_stroke_count;',
+                 'volatile int32_t native_touch_extent[4];', 'volatile uint32_t native_touch_edge_stats[4];',
+                 # CpuFreqProbe.cpp (in the display archive, polled by FuxiCpuFreqLog.cpp) defines the frequency row.
+                 'char native_cpufreq_row[120];',
+                 # NativeGOPPresenter.cpp (the GPU scanout hand-off, sheng-fb-gpu=1) defines its wait counters.
+                 'volatile uint64_t native_gop_wait_stats[7];'):
+        if text.count(decl) != 1:
+            raise SystemExit('BootLogStubs.c changed: ' + decl)
+        text = text.replace(decl, decl[:-1] + ' __attribute__((weak));')
+    boot_log_stubs = out / 'BootLogStubs.c'
+    boot_log_stubs.write_text(text)
+sources = [boot_log_stubs] + ([] if legacy_display else [package / 'LegacyDisplayStub.c']) + [extra]
 objects = []
 for source in sources:
     obj = out / (source.stem + '.o')

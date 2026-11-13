@@ -1,2 +1,2 @@
-a0f0287be80a5d8aef5c6b97a6cab62129e152bd feat(plugin): set the GPU log switch from log-gpu=1
+5d56587b301ed42b4742528aac9d3a40774ad9aa iOS 17 arm64e (21H16): keep the 24A446 QuartzCore address writes out of the NATIVE_ADRENO_IOS17_ARM64E build
 https://github.com/UniXNU/AdrenoMetal.git

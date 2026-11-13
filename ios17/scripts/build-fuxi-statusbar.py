@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Build FuxiStatusBar.dylib (device-ios17/statusbar/FuxiStatusBar.c) and load it from the NativeAdrenoMetal plugin.
 
-  build-fuxi-statusbar.py ADDON_IN ADDON_OUT
+  build-fuxi-statusbar.py ADDON_IN ADDON_OUT [SPRINGBOARD_PLIST]
+
+SPRINGBOARD_PLIST (optional): the OS volume's System/Library/LaunchDaemons/com.apple.SpringBoard.plist from your own IPSW. A copy
+with DYLD_INSERT_LIBRARIES naming the library is packed as daemons/com.apple.SpringBoard.plist (the LaunchDaemons overlay):
+SpringBoard draws the home and lock screen status bars but never loads the Metal plugin.
 
 1. Compile the library for iOS 17 arm64e with chained fixups and without function-pointer type discrimination (this
    toolchain's default; libobjc's class_addMethod and libdispatch authenticate IMPs and callbacks with a zero discriminator,
@@ -72,12 +76,13 @@ def add_weak_dylib(exe):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
     addon_in, addon_out = Path(sys.argv[1]), Path(sys.argv[2])
+    sb_plist = Path(sys.argv[3]) if len(sys.argv) == 4 else None
     lib = BUNDLE / 'FuxiStatusBar.dylib'
     run('xcrun', 'clang', '-target', 'arm64e-apple-ios17.0', '-isysroot', SDK, '-O2', '-Wall', '-Wextra', '-Werror',
-        '-fno-ptrauth-function-pointer-type-discrimination', '-dynamiclib', '-install_name', LOAD_PATH.decode(), '-Wl,-fixup_chains', SRC, '-lobjc', '-o', lib)
+        '-fno-ptrauth-function-pointer-type-discrimination', '-dynamiclib', '-install_name', LOAD_PATH.decode(), '-Wl,-fixup_chains', SRC, '-lobjc', '-framework', 'IOKit', '-o', lib)
     data = lib.read_bytes()
     _, _, cmds = load_commands(data)
     assert any(c == 0x80000034 for c, _, _ in cmds), 'FuxiStatusBar.dylib must use chained fixups'
@@ -107,6 +112,15 @@ def main():
             out.append((n, 0o755 if p.suffix == '.dylib' else 0o644, p.read_bytes()))
     names_bundle = sorted(prefix + p.relative_to(BUNDLE).as_posix() for p in BUNDLE.rglob('*') if p.is_file())
     assert sorted(n for n, _, _ in out if n.startswith(prefix)) == names_bundle
+    if sb_plist:
+        import plistlib
+        job = plistlib.loads(sb_plist.read_bytes())
+        assert job.get('Label') == 'com.apple.SpringBoard', 'not the SpringBoard job'
+        env_vars = dict(job.get('EnvironmentVariables', {}))
+        env_vars['DYLD_INSERT_LIBRARIES'] = '/System/Library/Extensions/NativeAdrenoMetal.bundle/FuxiStatusBar.dylib'
+        job['EnvironmentVariables'] = env_vars
+        out = [e for e in out if e[0] != 'daemons/com.apple.SpringBoard.plist']
+        out.append(('daemons/com.apple.SpringBoard.plist', 0o644, plistlib.dumps(job, fmt=plistlib.FMT_XML)))
     blob = m.write_addon(out)
     assert m.read_addon(blob) == out
     addon_out.write_bytes(blob)

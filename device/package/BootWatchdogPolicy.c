@@ -80,7 +80,7 @@ static int sheng_boot_data_skel(proc_t p,uint64_t scratch) {
  unsigned created=0,fixed=0,files=0,links=0,failed=0;int last=0;
  for(unsigned i=0;i<sizeof(sheng_skel_21h16)/sizeof(sheng_skel_21h16[0]);++i) {
   const struct sheng_skel_entry *e=&sheng_skel_21h16[i];
-  int error=copyout(e->path,scratch,strlen(e->path)+1);
+  int error=copyout(SKEL_PATH(e),scratch,strlen(SKEL_PATH(e))+1);
   if(!error && e->kind==0) {
    struct mkdir_args md={.path=scratch,.mode=e->mode};
    error=mkdir(p,&md,&result);
@@ -88,7 +88,7 @@ static int sheng_boot_data_skel(proc_t p,uint64_t scratch) {
    if(!error){struct lchown_args own={.path=scratch,.owner=e->uid,.group=e->gid};error=lchown(p,&own,&result);}
    if(!error){struct chmod_args cm={.path=scratch,.mode=e->mode};error=chmod(p,&cm,&result);}
   } else if(!error && e->kind==1) {
-   error=copyout(e->data,scratch+0x200,(size_t)e->size+1);
+   error=copyout(SKEL_DATA(e),scratch+0x200,(size_t)e->size+1);
    if(!error){struct symlink_args sl={.path=scratch+0x200,.link=scratch};error=symlink(p,&sl,&result);}
    if(!error){++links;struct lchown_args own={.path=scratch,.owner=e->uid,.group=e->gid};error=lchown(p,&own,&result);}
    else if(error==EEXIST)error=0;
@@ -100,7 +100,7 @@ static int sheng_boot_data_skel(proc_t p,uint64_t scratch) {
     int fd=result;
     for(size_t sent=0;!error && sent<e->size;) {
      size_t piece=e->size-sent<0x1f0?e->size-sent:0x1f0;
-     error=copyout(e->data+sent,scratch+0x200,piece);
+     error=copyout(SKEL_DATA(e)+sent,scratch+0x200,piece);
      if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=piece};user_ssize_t written=0;error=write(p,&wr,&written);
       if(!error && written!=(user_ssize_t)piece)error=EIO;}
      sent+=piece;
@@ -115,6 +115,45 @@ static int sheng_boot_data_skel(proc_t p,uint64_t scratch) {
  }
  printf("sheng data skel: dirs created %u existing %u, files %u, links %u, failed %u (last %d)\n",created,fixed,files,links,failed,last);
  return failed?last:0;
+}
+
+// With sheng-data-skel=1 (no boot-arg room for a switch of its own): a managed DictationLanguagesEnabled for the keyboard. With no Setup run, the key is absent; this device reports
+// no dictation support, so -[UIKeyboardInputModeController updateEnabledDictationLanguages:] never stores one, and every
+// -[UIKeyboardInputMode dictationLanguage] (each keyboard layout, each AFDictationConnection availability callback) falls into it and
+// recomputes every input mode through TextInput (TIGetDefaultInputModesForLanguage): the app's main thread at 100 % while typing
+// (zz-hot-sampler inclusive frames, 2026-11-13). The managed layer only answers reads of this key and leaves the user's own
+// com.apple.Preferences alone; the file is written once, when absent.
+static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
+ int on=0;int32_t result=0;
+ if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
+ static const char *const paths[]={
+  "/private/var/Managed Preferences/mobile/com.apple.Preferences.plist",
+  "/private/var/Managed Preferences/mobile/com.apple.keyboard.preferences.plist"};
+ static const char body[]=
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+  "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+  "<plist version=\"1.0\"><dict><key>DictationLanguagesEnabled</key><dict>"
+  "<key>en_US</key><true/><key>en</key><true/><key>zh-Hans_CN</key><true/><key>zh_CN</key><true/><key>zh-Hans</key><true/>"
+  "</dict></dict></plist>\n";
+ int last=0;unsigned written=0,present=0;
+ for(unsigned i=0;i<sizeof(paths)/sizeof(paths[0]);++i) {
+  int error=copyout(paths[i],scratch,strlen(paths[i])+1);
+  struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0644};
+  if(!error)error=open(p,&op,&result);
+  if(error==EEXIST){++present;continue;}
+  if(!error) {
+   int fd=result;
+   error=copyout(body,scratch+0x200,sizeof(body)-1);
+   if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
+    if(!error && n!=(user_ssize_t)(sizeof(body)-1))error=EIO;}
+   if(!error){struct fchown_args own={.fd=fd,.uid=0,.gid=0};error=fchown(p,&own,&result);}
+   struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;
+   if(!error)++written;
+  }
+  if(error)last=error;
+ }
+ printf("fuxi dictation prefs: written %u present %u rc %d\n",written,present,last);
+ return last;
 }
 
 // One comma-separated label at *c into the policy as a disabled key; advances *c past it.
@@ -150,6 +189,7 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
  // Independent of the launch policy below: report and continue on failure.
  (void)sheng_boot_data_skel(p,scratch);
  (void)sheng_boot_keychains(p,scratch);
+ (void)fuxi_boot_dictation_prefs(p,scratch);
  if(!enabled && !jobs[0] && !lite)return 0;
  policy[0]=0;strlcat(policy,policy_head,sizeof(policy));
  if(enabled)strlcat(policy,policy_watchdogd,sizeof(policy));

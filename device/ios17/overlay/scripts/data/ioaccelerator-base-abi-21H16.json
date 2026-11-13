@@ -1,0 +1,21 @@
+{
+  "kernelcache_sha256": "9bd1028796b0baa12922ab44fda1805b11595981338288c7881c669238d352e5",
+  "collection_slide": "0x0",
+  "metaclass": "0xfffffff00a45e710",
+  "instance_bytes": 136,
+  "vptr": "0xfffffff007c1c678",
+  "virtual_entries": 168,
+  "operational_overrides": [],
+  "metadata_overrides": [
+    0,
+    1,
+    7
+  ],
+  "protected_compatible_constructor_aliases": [
+    "0xfffffff0098cff28",
+    "0xfffffff0098cff5c"
+  ],
+  "nondeleting_destructor": "0xfffffff0098cff98",
+  "get_meta_class": "0xfffffff0098cfffc",
+  "evidence": "21H16 IOGPUFamily: the MetaClass constructor at 0xfffffff0098d000c calls OSMetaClass::OSMetaClass with the \"IOAcceleratorES\" name (0xfffffff0075bd3d9), the IOService metaclass and size 0x88; getMetaClass 0xfffffff0098cfffc returns 0xfffffff00a45e710. Its slot (vtable slot 7) is at 0xfffffff007c1c6b0, so the address point is 0xfffffff007c1c678: 168 chained entries, of which only 0, 1 (0xfffffff0098cff98 / 0xfffffff0098cffa0) and 7 are in IOGPUFamily code. Both constructors (0xfffffff0098cff28, 0xfffffff0098cff5c) only call IOService::IOService(const OSMetaClass *) (0xfffffff008377008) and store the DA/0xcda1-signed vtable; slot 0 (0xfffffff0098cff98) is bti; b IOService::~IOService (0xfffffff008377060). Same shape as 21H461 and 24A446."
+}

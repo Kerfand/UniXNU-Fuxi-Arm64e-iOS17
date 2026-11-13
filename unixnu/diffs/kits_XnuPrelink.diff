@@ -63,8 +63,266 @@ index fcd8b42..37a7918 100755
          'early_security_init': {k: hex(v) for k, v in (early_security_init or {}).items()},
          'missing_address_space': 'output collection',
          'mapping_complete': not bool(emit.missing), 'runtime_qualified': False, 'loadable': False,
+diff --git a/fileset_move.py b/fileset_move.py
+new file mode 100755
+index 0000000..80a8c79
+--- /dev/null
++++ b/fileset_move.py
+@@ -0,0 +1,252 @@
++"""Move the __TEXT_EXEC of selected retained kexts further into the collection's code mapping.
++
++With UNIXNU_FILESET_KERNEL_FIRST the native kernel code must end before the first retained kext code
++(xnu-10063 arm_vm_init takes everything after the kernel's __LAST as kext code). On the 21H16 collection the
++kexts right after the original kernel code (AppleARMPlatform, AppleARMWatchdogTimer) cap the native code at
++the size of the original kernel code. Their code is moved, as one block, to the end of the free space that
++follows them (up to the next retained kext), so the native kernel can grow into the space they vacate.
++
++Only __TEXT_EXEC moves, by a multiple of the 16 KiB page, so every page offset is unchanged:
++  - B/BL, ADR and literal loads whose source and target move by different amounts are re-encoded;
++  - ADRP is re-encoded by page arithmetic (the consumers' low 12 bits stay valid);
++  - B.cond/CBZ/TBZ that would cross a moved boundary are refused;
++  - chained pointers to the moved code get the new target;
++  - the moved kexts' LC_SEGMENT_64/sections and N_SECT symbols get the new addresses (OSKext finds a fileset
++    kext's code through its header's __TEXT_EXEC, lookupKextWithAddress).
++The input addresses are the collection's own (before rebase_collection)."""
++import struct
++
++from kc_image import Image, signed
++
++LC_SEGMENT_64, LC_SYMTAB = 0x19, 0x2
++PAGE = 0x4000
++MASK64 = (1 << 64) - 1
++
++
++def _code_segment(image):
++    found = [s for s in image.segments if s['name'] == '__TEXT_EXEC' and s['size']]
++    return found[0] if len(found) == 1 else None
++
++
++def plan_moves(cache, closure, bundles):
++    """[(begin, end, delta, bundle)] for the requested kexts, moved together to the end of their free run."""
++    root = next(s for s in cache.segments if s['name'] == '__TEXT_EXEC')
++    code = []
++    for name, (_, offset) in cache.entries.items():
++        if name == 'com.apple.kernel' or name not in closure:
++            continue
++        segment = _code_segment(Image(cache.data, offset))
++        if segment:
++            code.append((segment['va'], segment['va'] + segment['size'], name, segment['filesize']))
++    code.sort()
++    chosen = [c for c in code if c[2] in bundles]
++    if {c[2] for c in chosen} != set(bundles):
++        raise ValueError(f'Code to move is not retained: {sorted(set(bundles) - {c[2] for c in chosen})}')
++    first, last = code.index(chosen[0]), code.index(chosen[-1])
++    if code[first:last + 1] != chosen:
++        raise ValueError('Moved kexts must be adjacent in the code mapping')
++    limit = code[last + 1][0] if last + 1 < len(code) else root['va'] + root['size']
++    delta = (limit - chosen[-1][1]) & ~(PAGE - 1)
++    if delta <= 0:
++        raise ValueError('No free code space after the kexts to move')
++    if chosen[0][0] + delta < chosen[-1][1]:
++        raise ValueError('Moved code would overlap its old location')
++    return [(b, e, delta, n) for b, e, n, _ in chosen], limit
++
++
++class Moves:
++    def __init__(self, moves):
++        self.moves = moves
++
++    def delta(self, address):
++        for begin, end, delta, _ in self.moves:
++            if begin <= address < end:
++                return delta
++        return 0
++
++    def __call__(self, address):
++        return address + self.delta(address)
++
++
++def _consumer_targets(blob, off, register, page, window=8):
++    """Addresses formed from an ADRP page by the ADD/load/store immediates that use its register as base, up to
++    the next write of that register (straight-line window)."""
++    targets = []
++    for k in range(off + 4, min(len(blob) - 3, off + 4 + 4 * window), 4):
++        word, = struct.unpack_from('<I', blob, k)
++        base = (word >> 5) & 31
++        if word & 0xff800000 == 0x91000000 and base == register:            # ADD (immediate), 64-bit
++            shift = 12 if word & 0x400000 else 0
++            targets.append(page + (((word >> 10) & 0xfff) << shift))
++            if word & 31 == register:
++                break
++            continue
++        if word & 0x3b000000 == 0x39000000 and base == register:            # LDR/STR (unsigned immediate)
++            size = word >> 30
++            if word & 0x04800000 == 0x04800000:
++                size = 4
++            targets.append(page + (((word >> 10) & 0xfff) << size))
++            if word & 0x00400000 and word & 31 == register:                 # load into the base register
++                break
++            continue
++        if word & 31 == register or word & 0x7c000000 == 0x14000000 or word & 0xfe000000 == 0xd6000000:
++            break                                                           # clobber or control flow
++    return targets
++
++
++def _executable_ranges(cache):
++    result = []
++    for name, (_, offset) in cache.entries.items():
++        for s in Image(cache.data, offset).segments:
++            if s['name'] in ('__TEXT_EXEC', '__TEXT_BOOT_EXEC') and s['size']:
++                result.append((s['va'], s['va'] + s['size']))
++    return result
++
++
++def move_kext_code(cache, closure, bundles):
++    from fileset_emit import ChainReader, decode, chain_word, inline_data_ranges
++    moves, limit = plan_moves(cache, closure, bundles)
++    T = Moves(moves)
++    data = bytearray(cache.data)
++    report = dict(moves=[dict(bundle=n, old=hex(b), new=hex(b + d), size=hex(e - b)) for b, e, d, n in moves],
++                  delta=hex(moves[0][2]), free_after=hex(limit),
++                  branches=0, adrp=0, adr=0, literals=0, pointers=0, symbols=0, data_words_left=0)
++    executable = _executable_ranges(cache)
++
++    def is_code(address):
++        return any(b <= address < e for b, e in executable)
++
++    # 1. Copy the moved code; the vacated bytes become zero (the native kernel is placed there).
++    for begin, end, delta, _ in moves:
++        size = end - begin
++        source, target = cache.offset(begin, size), cache.offset(begin + delta, size)
++        data[target:target + size] = cache.data[source:source + size]
++    for begin, end, delta, _ in moves:
++        source = cache.offset(begin, end - begin)
++        data[source:source + end - begin] = bytes(end - begin)
++
++    def put(new_pc, word):
++        struct.pack_into('<I', data, cache.offset(new_pc, 4), word)
++
++    # 2. PC-relative instructions of every retained kext.
++    for name, (_, offset) in cache.entries.items():
++        if name == 'com.apple.kernel' or name not in closure:
++            continue
++        segment = _code_segment(Image(cache.data, offset))
++        if not segment or not segment['filesize']:
++            continue
++        blob = cache.data[segment['fileoff']:segment['fileoff'] + segment['filesize']]
++        pools = inline_data_ranges(blob)
++        for off in range(0, len(blob) - 3, 4):
++            if any(b <= off < e for b, e in pools):
++                continue
++            word, = struct.unpack_from('<I', blob, off)
++            pc = segment['va'] + off
++            npc = T(pc)
++            if word & 0x7c000000 == 0x14000000:                          # B / BL
++                target = pc + signed(word & 0x3ffffff, 26) * 4
++                ntarget = T(target)
++                if ntarget - npc == target - pc:
++                    continue
++                if not is_code(target):
++                    report['data_words_left'] += 1
++                    continue
++                disp = ntarget - npc
++                if not -(1 << 27) <= disp < 1 << 27:
++                    raise ValueError(f'{name}: branch out of range after the move at {pc:#x}')
++                put(npc, (word & 0xfc000000) | ((disp >> 2) & 0x3ffffff))
++                report['branches'] += 1
++            elif word & 0x9f000000 == 0x90000000:                        # ADRP
++                imm = signed(((word >> 5) & 0x7ffff) << 2 | ((word >> 29) & 3), 21)
++                page = (pc & ~4095) + (imm << 12)
++                first, last = T.delta(page), T.delta(page + 4095)
++                if first != last:
++                    # The page holds both moved and unmoved bytes: the consumer's low 12 bits decide.
++                    targets = _consumer_targets(blob, off, word & 31, page)
++                    deltas = {T.delta(t) for t in targets}
++                    if len(deltas) != 1:
++                        raise ValueError(f'{name}: ADRP at {pc:#x} names a page split by a moved boundary '
++                                         f'and its consumers do not settle the side ({[hex(t) for t in targets]})')
++                    first = deltas.pop()
++                    report['adrp_split_pages'] = report.get('adrp_split_pages', 0) + 1
++                npage = page + first
++                nimm = ((npage & ~4095) - (npc & ~4095)) >> 12
++                if nimm == imm:
++                    continue
++                if not -(1 << 20) <= nimm < 1 << 20:
++                    raise ValueError(f'{name}: ADRP out of range after the move at {pc:#x}')
++                put(npc, (word & 0x9f00001f) | (((nimm >> 2) & 0x7ffff) << 5) | ((nimm & 3) << 29))
++                report['adrp'] += 1
++            elif word & 0x9f000000 == 0x10000000:                        # ADR
++                target = pc + signed(((word >> 5) & 0x7ffff) << 2 | ((word >> 29) & 3), 21)
++                disp = T(target) - npc
++                if disp == target - pc:
++                    continue
++                if not -(1 << 20) <= disp < 1 << 20:
++                    raise ValueError(f'{name}: ADR out of range after the move at {pc:#x}')
++                put(npc, (word & 0x9f00001f) | (((disp >> 2) & 0x7ffff) << 5) | ((disp & 3) << 29))
++                report['adr'] += 1
++            elif word & 0x3b000000 == 0x18000000:                        # LDR (literal)
++                target = pc + signed((word >> 5) & 0x7ffff, 19) * 4
++                disp = T(target) - npc
++                if disp == target - pc:
++                    continue
++                if not -(1 << 20) <= disp < 1 << 20:
++                    raise ValueError(f'{name}: literal load out of range after the move at {pc:#x}')
++                put(npc, (word & 0xff00001f) | (((disp >> 2) & 0x7ffff) << 5))
++                report['literals'] += 1
++            else:
++                short = None
++                if word & 0xff000010 == 0x54000000 or word & 0x7e000000 == 0x34000000:   # B.cond, CBZ/CBNZ
++                    short = pc + signed((word >> 5) & 0x7ffff, 19) * 4
++                elif word & 0x7e000000 == 0x36000000:                                     # TBZ/TBNZ
++                    short = pc + signed((word >> 5) & 0x3fff, 14) * 4
++                if short is not None and T(short) - npc != short - pc and is_code(short):
++                    raise ValueError(f'{name}: short branch at {pc:#x} crosses a moved boundary')
++
++    # 3. Chained pointers to moved code.
++    reader = ChainReader(cache.data, cache)
++    for segment in cache.segments:
++        for page, sites in reader.pages(segment['name']).items():
++            for offset, value in sites:
++                site = segment['va'] + page * PAGE + offset
++                if T.delta(site):
++                    raise ValueError(f'Chained pointer site inside moved code: {site:#x}')
++                target_offset, auth, key, diversity, addrdiv, step = decode(value)
++                target = cache.base + target_offset
++                delta = T.delta(target)
++                if not delta:
++                    continue
++                at = segment['fileoff'] + page * PAGE + offset
++                struct.pack_into('<Q', data, at, chain_word(auth, key, diversity, addrdiv,
++                                                            target_offset + delta, step))
++                report['pointers'] += 1
++
++    # 4. Headers and symbols of the moved kexts.
++    for begin, end, delta, name in moves:
++        _, at = cache.entries[name]
++        image = Image(cache.data, at)
++        for command, offset, length in image.commands:
++            if command == LC_SEGMENT_64 and data[offset + 8:offset + 24].rstrip(b'\0') == b'__TEXT_EXEC':
++                address, size, fileoff, filesize = struct.unpack_from('<4Q', data, offset + 24)
++                struct.pack_into('<Q', data, offset + 24, address + delta)
++                struct.pack_into('<Q', data, offset + 40, cache.offset(address + delta, filesize))
++                count, = struct.unpack_from('<I', data, offset + 64)
++                for index in range(count):
++                    s = offset + 72 + 80 * index
++                    address, = struct.unpack_from('<Q', data, s + 32)
++                    struct.pack_into('<Q', data, s + 32, address + delta)
++                    section_off, = struct.unpack_from('<I', data, s + 48)
++                    if section_off:
++                        struct.pack_into('<I', data, s + 48, cache.offset(address + delta))
++            elif command == LC_SYMTAB:
++                symoff, count = struct.unpack_from('<II', data, offset + 8)
++                for index in range(count):
++                    symbol = symoff + 16 * index
++                    kind = data[symbol + 4]
++                    if not kind & 0xe0 and kind & 0x0e == 0x0e:
++                        value, = struct.unpack_from('<Q', data, symbol + 8)
++                        if begin <= value < end:
++                            struct.pack_into('<Q', data, symbol + 8, value + delta)
++                            report['symbols'] += 1
++    return Image(bytes(data)), report
 diff --git a/fixtures/fileset-21H16-symbols.json b/fixtures/fileset-21H16-symbols.json
-index fb92ef8..66943a8 100644
+index fb92ef8..7cdf7f6 100644
 --- a/fixtures/fileset-21H16-symbols.json
 +++ b/fixtures/fileset-21H16-symbols.json
 @@ -4,6 +4,20 @@
@@ -88,7 +346,7 @@ index fb92ef8..66943a8 100644
      {
        "original": "0xfffffff00845c0ec",
        "original_size": 36,
-@@ -360,6 +374,1007 @@
+@@ -360,6 +374,1014 @@
        "original_sha256": "4ad0d46adb132153b700d446e628ecabe13cfa232975cb053c8193fd40824965",
        "native_symbol": "__ZN9IOService15getPMRootDomainEv",
        "evidence": "BTI c; ldr x0, [global 0xfffffff00a35c5d0]; ret, between the reviewed getPlatform (reads gIOPlatform) and getResourceService (reads gIOResources); IOService.cpp defines exactly getPlatform, getPMRootDomain, getResourceService in that order (lines 1552-1567). Native getPMRootDomain is the same adrp/ldr/ret. Stubbed for AppleARMPlatform and ApplePMGR. Source: iokit/Kernel/IOService.cpp getPMRootDomain."
@@ -1093,10 +1351,17 @@ index fb92ef8..66943a8 100644
 +      "original_sha256": "c8a018341e8daf6ef86bbeb5c4ff90be1bc39925fad57cd10d32dcb2d8ceeab5",
 +      "native_symbol": "__ZN7OSArray11withObjectsEPPK8OSObjectjj",
 +      "evidence": "Factory (x0 = object array, x1 = count, x2 = capacity): alloc through OSArray::gMetaClass 0xfffffff00a329ee0 (slot +0x68, disc 0x1601), then initWithObjects at vtable +0xd8 with discriminator 0x04ec, release on failure; it lies between OSArray::withCapacity (0xfffffff0082e102c) and OSArray::withArray (0xfffffff0082e11ac). Source: libkern/c++/OSArray.cpp withObjects. IOHIDFamily calls it with a one-element array (site 0xfffffff009955bf8) on the first digitizer event, stores the result at +0x18 and the stub NULL hung the event path (QUD log fuxi-20261111-181417-640, 54 hits after a finger touch)."
++    },
++    {
++      "original": "0xfffffff0083f16f0",
++      "original_size": 148,
++      "original_sha256": "b9d18b3467d908dfc960df09157a45f8fd9f4605b9c5e3ffab91cd18665ca07c",
++      "native_symbol": "__ZN12IOUserClient27copyObjectForPortNameInTaskEP4taskjR11OSSharedPtrI8OSObjectE",
++      "evidence": "IOUserClient::copyObjectForPortNameInTask(task_t, mach_port_name_t, OSSharedPtr<OSObject>&) with the OSObject** overload inlined: a 148-byte function in com.apple.kernel __TEXT_EXEC (next start 0xfffffff0083f1784), placed between the matched copyObjectForPortNameInTask(task*, unsigned, OSObject**) at 0xfffffff0083f168c and releaseAsyncReference64 at 0xfffffff0083f1888 as in iokit/Kernel/IOUserClient.cpp. It authenticates the task's space at +0x300, calls the port lookup with the port name and type 0x1b (IKOT_IOKIT_IDENT), releases the shared pointer's previous object through its vtable slot 0x28 (release), stores the new one and returns 0xe00002bf (kIOReturnIPCError) when the lookup found nothing. Caller: IOSurface __TEXT_EXEC +0x20d40 ('ldr x0,[x0,#0xf0]; mov x2,sp; bl') with a zeroed 16-byte shared pointer slot. Unmatched it was sent to the unmapped-call stub, 53 times in one boot, and the 64th such call panics (the fuxi resets to fastboot of 2026-11-12)."
      }
    ],
    "data": [
-@@ -596,6 +1611,30 @@
+@@ -596,6 +1618,30 @@
        "native_symbol": "_vnop_searchfs_desc",
        "addend": 0,
        "evidence": "struct vnodeop_desc in original kernel __DATA: its vdesc_name pointer (at +8) points to the string \"vnop_searchfs\". apfs references it from its vnodeopv_entry_desc table; the other 55 descriptors apfs uses are already paired to their native _vnop_*_desc by name. Unbound, vfs_fsadd read a nameless operation and panicked \"operation not listed in vfs_op_descs\" (probe boot 2026-11-06 14:25). As the README notes, vnode descriptors must resolve to the native descriptors VFS initializes. Source: bsd/vfs/vnode_if.c vnop_searchfs_desc."
