@@ -111,6 +111,11 @@ roots = [
   # audio/AV/HDCP/DART/scaler dependencies; the largest __PRELINK_TEXT gap left is 0x139499, which fits native __TEXT
   # only with assert-expr-strings.patch (0x164000 -> 0x120000).
   "com.apple.iokit.IOMobileGraphicsFamily",
+  # FairPlay (2026-11-14): fairplayd.H2 looks up com_apple_driver_FairPlayIOKit first and exits 0 without it, so its Mach
+  # services (com.apple.fairplayd.versioned) stay with launchd; locationd's migration call waits on them forever and data
+  # migration (datamigrator) never finishes. Software only: IOResources provider, KPI libraries only, 288800 bytes.
+  # "com.apple.driver.FairPlayIOKit",   # out again 2026-11-14: fairplayd.H2 stays disabled (no UID/GID AES keys), and with the kext
+  # in the collection the sandbox panics in strlen on a freed string (Kernel data abort, lr in com.apple.security.sandbox).
 ]
 
 [firmware]

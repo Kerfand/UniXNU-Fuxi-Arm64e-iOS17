@@ -4,8 +4,16 @@
 // Observer sampling plus owned peripheral type/polarity/latch writes; no PDC changes or interrupt takeover.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
+extern "C" void unixnu_sample_task(const char *name) __attribute__((weak_import));
 #include <IOKit/IODeviceMemory.h>
 #include <kern/thread.h>
+#include <kern/clock.h>
+#include <sys/types.h>
+#include <sys/fcntl.h>
+#include <sys/vnode.h>
+#include <sys/uio.h>
+#include <sys/kauth.h>
+#include <sys/proc.h>
 #include <pexpert/pexpert.h>
 #include "FuxiButtonsCore.h"
 extern "C" {
@@ -16,6 +24,10 @@ volatile uint32_t fuxi_spmi_lock_word;
 void fuxi_spmi_lock(void){while(__atomic_exchange_n(&fuxi_spmi_lock_word,1u,__ATOMIC_ACQUIRE))IODelay(1);}
 void fuxi_spmi_unlock(void){__atomic_store_n(&fuxi_spmi_lock_word,0u,__ATOMIC_RELEASE);}
 }
+extern "C" void clock_set_calendar_microtime(clock_sec_t secs, clock_usec_t microsecs);
+volatile uint32_t fuxi_rtc_stats[4];   // 0 state (1 read, 2 set, <0 failed step), 1 seconds, 2 control, 3 apid
+extern "C" int vn_rdwr(enum uio_rw rw, struct vnode *vp, caddr_t base, int len, off_t offset, enum uio_seg segflg, int ioflg,
+    kauth_cred_t cred, int *aresid, proc_t p);
 namespace {
 constexpr uint64_t kCore=0xc400000,kCnfg=0xc42d000,kObserver=0xc440000;
 struct Window {IOMemoryMap *map;volatile uint32_t *va;};
@@ -48,6 +60,79 @@ int findApid(uint32_t ppid,uint32_t count){
  }
  return found;
 }
+// The system clock starts at 1970 (no calendar source): HTTPS certificate checks fail, so Wi-Fi joins but nothing loads.
+// PMK8550 RTC (fuxi 2026-11-14): read once; the calendar is set only from a plausible Unix time, otherwise only logged.
+int gRtcApid=-1;
+volatile int64_t gPendingOffset;
+volatile bool gOffsetPending;
+const char kOffsetPath[]="/private/var/db/fuxi-rtc-offset";
+// Seconds of the RTC (RTC_RW READ 0x48..0x4b, little endian), read until the low byte did not wrap. Caller holds no lock.
+int rtcSeconds(uint32_t *secs,uint8_t *ctrl){
+ if(gRtcApid<0)return -1;
+ uint8_t b[4]={},c0=0;int rc=0;
+ fuxi_spmi_lock();
+ rc=br_read8(gObs.va,&gArb,gRtcApid,0x46,ctrl);
+ for(int tries=0;tries<3 && !rc;++tries){
+  for(int i=0;i<4 && !rc;++i)rc=br_read8(gObs.va,&gArb,gRtcApid,(uint8_t)(0x48+i),&b[i]);
+  if(!rc)rc=br_read8(gObs.va,&gArb,gRtcApid,0x48,&c0);
+  if(!rc && c0>=b[0])break;
+ }
+ fuxi_spmi_unlock();
+ *secs=(uint32_t)b[0]|((uint32_t)b[1]<<8)|((uint32_t)b[2]<<16)|((uint32_t)b[3]<<24);
+ return rc;
+}
+// The stored offset (calendar seconds minus RTC seconds) as decimal text on the Data volume.
+bool offsetFile(bool write,int64_t *offset){
+ vfs_context_t ctx=vfs_context_create(nullptr);
+ if(!ctx)return false;
+ vnode_t vp=nullptr;
+ int error=vnode_open(kOffsetPath,write?(O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW):(O_RDONLY|O_NOFOLLOW),0644,0,&vp,ctx);
+ bool ok=false;
+ if(!error){
+  char text[32]={};int resid=0;
+  if(write){
+   int n=snprintf(text,sizeof text,"%lld\n",(long long)*offset);
+   error=vn_rdwr(UIO_WRITE,vp,text,n,0,UIO_SYSSPACE,IO_NOAUTH|IO_UNIT,vfs_context_ucred(ctx),&resid,vfs_context_proc(ctx));
+   ok=!error && !resid;
+  }else{
+   error=vn_rdwr(UIO_READ,vp,text,sizeof text-1,0,UIO_SYSSPACE,IO_NOAUTH,vfs_context_ucred(ctx),&resid,vfs_context_proc(ctx));
+   if(!error){
+    int64_t v=0;bool neg=false;const char *c=text;
+    if(*c=='-'){neg=true;++c;}
+    bool digits=false;while(*c>='0'&&*c<='9'){v=v*10+(*c-'0');++c;digits=true;}
+    if(digits){*offset=neg?-v:v;ok=true;}
+   }
+  }
+  vnode_close(vp,write?FWRITE:FREAD,ctx);
+ }
+ vfs_context_rele(ctx);
+ if(!ok)IOLog("fuxi rtc: offset file %s error %d\n",write?"write":"read",error);
+ return ok;
+}
+void readRtc(uint32_t count){
+ // Observer (read) channels need no ownership: the RTC_RW APID belongs to another EE, so findApid (EE0 only) misses it.
+ int apid=-1;
+ for(uint32_t i=0;i<count;++i){
+  uint32_t map=gCore.va[(BR_APID_MAP+4*i)/4];
+  if(map && ((map>>8)&0xff)==0x61)IOLog("fuxi rtc: candidate apid %u ppid %#x owner %u\n",i,(map>>8)&0xfff,gCnfg.va[i]&7u);
+  if(map && ((map>>8)&0xfff)==0x061 && apid<0)apid=(int)i;
+ }
+ fuxi_rtc_stats[3]=(uint32_t)apid;
+ if(apid<0){fuxi_rtc_stats[0]=(uint32_t)-1;IOLog("fuxi rtc: no RTC_RW apid\n");return;}
+ gRtcApid=apid;
+ uint32_t secs=0;uint8_t ctrl=0;
+ int rc=rtcSeconds(&secs,&ctrl);
+ fuxi_rtc_stats[1]=secs;fuxi_rtc_stats[2]=ctrl;
+ if(rc){fuxi_rtc_stats[0]=(uint32_t)-2;IOLog("fuxi rtc: read error %d\n",rc);return;}
+ int64_t offset=0;
+ const bool stored=offsetFile(false,&offset);
+ const int64_t calendar=(int64_t)secs+(stored?offset:0);
+ const bool plausible=(ctrl&0x80) && calendar>=1704067200 && calendar<2208988800;   // 2024-01-01 .. 2040-01-01
+ if(plausible)clock_set_calendar_microtime((clock_sec_t)calendar,0);
+ fuxi_rtc_stats[0]=plausible?2u:1u;
+ IOLog("fuxi rtc: apid %d ctrl %#x rtc %u offset %lld (%s) -> %s\n",apid,(unsigned)ctrl,secs,(long long)offset,
+     stored?"stored":"none",plausible?"calendar set":"left alone");
+}
 bool setup(){
  gArb.ee=0;
  if(!mapWindow(gCore,kCore,0x3000)||!mapWindow(gCnfg,kCnfg,0x4000)){fail(1,-12);return false;}
@@ -73,6 +158,7 @@ bool setup(){
  }
  fuxi_buttons_stats[0]=3;
  IOLog("[FuxiButtons] ready mode=edge-poll2ms version=%x apids=%u pon=%d gpio=%d\n",version,count,gPon,gGpio);
+ readRtc(count);
  return true;
 }
 void buttonsThread(void *,wait_result_t){
@@ -111,7 +197,14 @@ void buttonsThread(void *,wait_result_t){
    IOLog("[FuxiButtons] report mask=%x pon=%x gpio=%x error=%d\n",mask,(unsigned)pon,(unsigned)gpio,rc);
    last=mask;seen=generation;
   }
+  if((rounds+1)%15000==0 && unixnu_sample_task)unixnu_sample_task("bluetoothd");
   if(++rounds%15000==0)IOLog("[FuxiButtons] alive polls=%d reports=%d mask=%x errors=%d sink=%u\n",(int)fuxi_buttons_stats[1],(int)fuxi_buttons_stats[2],mask,(int)fuxi_buttons_stats[6],sink?1u:0u);
+  if(__atomic_load_n(&gOffsetPending,__ATOMIC_ACQUIRE)){
+   __atomic_store_n(&gOffsetPending,false,__ATOMIC_RELEASE);
+   int64_t offset=gPendingOffset;
+   const bool ok=offsetFile(true,&offset);
+   IOLog("fuxi rtc: offset %lld %s\n",(long long)offset,ok?"stored":"not stored");
+  }
   IOSleep(2);
  }
 }
@@ -121,6 +214,15 @@ extern "C" void native_buttons_set_sink(void (*sink)(void *,uint32_t),void *cont
  gSinkContext=context;
  __atomic_store_n(&gSink,sink,__ATOMIC_RELEASE);
  __atomic_fetch_add(&gSinkGeneration,1,__ATOMIC_RELEASE);
+}
+// zz-calendar-hook.patch: a user-set calendar (Settings, timed) stores offset = calendar - RTC for the next boots.
+extern "C" void unixnu_calendar_set_hook(uint64_t seconds){
+ uint32_t secs=0;uint8_t ctrl=0;
+ if(rtcSeconds(&secs,&ctrl)){IOLog("fuxi rtc: calendar set to %llu before the RTC is ready; offset not stored\n",(unsigned long long)seconds);return;}
+ // The setting process is sandboxed (its context may not write /private/var/db): the buttons kernel thread stores the offset.
+ gPendingOffset=(int64_t)seconds-(int64_t)secs;
+ __atomic_store_n(&gOffsetPending,true,__ATOMIC_RELEASE);
+ IOLog("fuxi rtc: calendar set to %llu, rtc %u, offset %lld queued\n",(unsigned long long)seconds,secs,(long long)gPendingOffset);
 }
 extern "C" void fuxi_buttons_probe(void){
  unsigned enabled=0;

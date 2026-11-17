@@ -1,0 +1,44 @@
+From 5d56587b301ed42b4742528aac9d3a40774ad9aa Mon Sep 17 00:00:00 2001
+From: Kerfand <Kerfand@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 06:32:58 +0800
+Subject: [PATCH 1/2] iOS 17 arm64e (21H16): keep the 24A446 QuartzCore address
+ writes out of the NATIVE_ADRENO_IOS17_ARM64E build
+
+---
+ NativeAdrenoMetalPlugin.mm | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
+index ffa797d..4f0434c 100644
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -468,8 +468,10 @@ static id deviceForPort(unsigned port) {
+         setenv("CA_DISPLAY_EDR_HEADROOM", "1", 1);
+         setenv("CA_FP16_MIN_HEADROOM", "1e30", 1);
+         setenv("CA_ALLOW_EDR_MIRRORING", "0", 1);
+-#if !TARGET_OS_OSX
+-        // The stored option values and the framebuffer branch are addresses of iPadOS 27's QuartzCore (24A446).
++#if !TARGET_OS_OSX && !defined(NATIVE_ADRENO_IOS17_ARM64E)
++        // The stored option values and the framebuffer branch are addresses of iPadOS 27's QuartzCore (24A446). The iOS 17 arm64e
++        // build (21H16, NATIVE_ADRENO_IOS17_ARM64E) has another cache: writing them there corrupted the render server, so it keeps
++        // the environment settings above only.
+         if (void *start = dlsym(RTLD_DEFAULT, "CARenderServerStart")) {
+             const uintptr_t slide = (uintptr_t)ptrauth_strip(start, ptrauth_key_function_pointer) - 0x1846dce88;
+             const float one = 1.0f, never = 1e30f;
+@@ -510,11 +512,11 @@ static id deviceForPort(unsigned port) {
+             }, gpu) == 0)
+                 pthread_detach(reader);
+         }
+-#else
++#elif TARGET_OS_OSX
+         // macOS: the framebuffer format is changed as a fixup of signed text (the board's payload text_fixups), applied when the page
+         // passes code signing validation. A write into the mapped page from here made the page invalid, and code signing killed
+         // WindowServer at its next validation of that page.
+-#endif  // !TARGET_OS_OSX
++#endif  // !TARGET_OS_OSX && !NATIVE_ADRENO_IOS17_ARM64E
+ #endif
+         // The runtime's creation log reports each VkPipeline making's time to the device's sink, which the telemetry's V row sums
+         // (diag=1).
+-- 
+2.53.0
+

@@ -168,6 +168,16 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
   if (type == 0x86dd) { k.ip6++; return; }
   if (type != 0x0800 || n < 34) { k.other++; return; }
   k.ip4++; const uint8_t *ip = e + 14; const unsigned ihl = (ip[0] & 15) * 4;
+  {  // fuxi 2026-11-14: joined with an address but nearly no traffic; the first IPv4 packets of each direction, DHCP aside
+    static unsigned shown4[2];
+    const unsigned proto = ip[9];
+    unsigned sport = 0, dport = 0;
+    if ((proto == 6 || proto == 17) && n >= 14 + ihl + 4) { sport = ip[ihl] << 8 | ip[ihl + 1]; dport = ip[ihl + 2] << 8 | ip[ihl + 3]; }
+    const bool dhcp4 = proto == 17 && (sport == 67 || sport == 68);
+    if (!dhcp4 && shown4[out]++ < 48)
+      log(6, "wifi-net: ip4 %s proto %u %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len %u%s", dir, proto, ip[12], ip[13], ip[14], ip[15], sport,
+          ip[16], ip[17], ip[18], ip[19], dport, (unsigned)n, proto == 6 && n >= 14 + ihl + 14 ? ((ip[ihl + 13] & 0x02) ? (ip[ihl + 13] & 0x10 ? " syn-ack" : " syn") : (ip[ihl + 13] & 0x04 ? " rst" : "")) : "");
+  }
   if (ip[9] != 17 || n < 14 + ihl + 8) return;
   const uint8_t *udp = ip + ihl; const unsigned sp = udp[0] << 8 | udp[1], dp = udp[2] << 8 | udp[3];
   if (!((sp == 67 || sp == 68) && (dp == 67 || dp == 68))) return;

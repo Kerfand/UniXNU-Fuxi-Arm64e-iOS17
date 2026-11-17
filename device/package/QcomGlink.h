@@ -51,7 +51,7 @@ typedef struct {
 struct QcomGlinkChannel {
     char name[QCOM_GLINK_NAME];
     uint16_t lcid, rcid;
-    uint8_t used, initiator, open_sent, open_acked, remote_open, up, intent_asked;
+    uint8_t used, initiator, open_sent, open_acked, remote_open, up, intent_asked, ack_due;
     QcomGlinkClient client;
     void *context;
     /* Our receive intents: count buffers of size bytes in storage (count * size). */
@@ -74,6 +74,10 @@ typedef struct {
     uint32_t rx_messages, tx_messages, rx_data, unknown_opens, dropped;
     char last_unknown[QCOM_GLINK_NAME];
     char unknown_names[96];  /* the distinct names of those opens, space separated, as many as fit */
+    /* Remote opens nobody had registered yet: a channel registered later by the same name answers it then (the DSP sends OPEN once, so a
+     * service that registers after the DSP is up, such as the battery, would otherwise never come up). */
+    struct {char name[QCOM_GLINK_NAME]; uint16_t rcid; uint8_t used;} pending[8];
+    uint32_t replayed;
 } QcomGlink;
 
 /* Sets up the link on its FIFOs (rx may have no data yet: the remote makes its FIFO later) and resets the indices we own. */

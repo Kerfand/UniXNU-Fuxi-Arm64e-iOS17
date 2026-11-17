@@ -96,6 +96,13 @@ __attribute__((noreturn, noinline)) void native_legacy_backend_guard(unsigned sl
 {
 	panic("NativeLegacyDisplay: unimplemented leaf %u object %p caller %p stage %u", slot, object, caller, native_legacy_stage);
 }
+// An abstract Legacy slot this backend does not implement (NativeLegacyDisplay.cpp LEAF): reported on its first call, answered 0.
+volatile uint32_t native_legacy_unimplemented_calls[400];
+void native_legacy_backend_unimplemented(unsigned slot, void *object, void *caller)
+{
+	if (slot < 400 && native_legacy_unimplemented_calls[slot]++ == 0)
+		printf("NativeLegacyDisplay: unimplemented leaf %u object %p caller %p stage %u: answered 0\n", slot, object, caller, native_legacy_stage);
+}
 void native_legacy_pm_observed(unsigned stage_, IOReturn status, unsigned long ordinal)
 {
 	native_legacy_pm_stage = stage_; native_legacy_pm_status = status;
@@ -252,6 +259,7 @@ extern "C" void native_touch_probe(void);
 // The fuxi buttons (kits/sheng/FuxiButtons.cpp, boot-arg fuxi-buttons=1): PMK8550 PON/RESIN and PM8550 GPIO6 over the SPMI
 // observer, reported through NativeHidInput report 2.
 extern "C" void fuxi_buttons_probe(void);
+extern "C" void sheng_bluetooth_probe(void);   // FuxiBluetooth.cpp (QcaBluetooth, fuxi 2026-11-15)
 extern "C" void fuxi_wifi_probe(void);        // fuxi-wifi=1: read-only look at the WCN7850 path
 extern "C" void sheng_audio_probe(void);      // sheng-audio=N: speakers, microphone, audio service (AudioProbe.cpp)
 extern "C" void sheng_adsp_probe(void);       // sheng-adsp=1/2: the audio DSP (AdspProbe.cpp), power.md section 3
@@ -271,6 +279,7 @@ void native_legacy_display_late_probe(void)
 	sheng_adsp_probe();
 	sheng_audio_probe();
 	fuxi_buttons_probe();
+	sheng_bluetooth_probe();
 	fuxi_wifi_probe();
 	fuxi_wifi_link_probe();
 	// Panel brightness runs before the display-object check: it does not need the GOP nub, and returning early

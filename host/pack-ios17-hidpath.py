@@ -31,7 +31,12 @@ previous = Path('/mnt/f/UniXNU-FUXI-work/outputs/fuxi17-usb-local-20261102')
 # persisted and no UFS write path is armed. DATA_SEED=none packs the image without it.
 # The iPadOS seed with its migration build string set to 21H16 (scratchpad seed21h16.py): otherwise data migration runs on every
 # boot, fails, and SpringBoard never leaves the boot logo.
-DATA_SEED = os.environ.get('DATA_SEED', '/mnt/f/UniXNU-FUXI-work/ios17-cache/scratch-data-21H16.img')
+# Data migration runs (MIGRATION=1, default since 2026-11-14): the original seed, whose com.apple.migration records 21H461, and no
+# /chosen/ephemeral-storage (with it datamigrator skips every migration). MIGRATION=0 keeps the old skip: the seed rewritten to 21H16
+# and the RAM disk marked ephemeral.
+MIGRATION = os.environ.get('MIGRATION', '1') == '1'
+DATA_SEED = os.environ.get('DATA_SEED', '/mnt/f/UniXNU-FUXI-work/gpu4/fat/Payloads/scratch-data.img' if MIGRATION
+                           else '/mnt/f/UniXNU-FUXI-work/ios17-cache/scratch-data-21H16.img')
 DATA_SEED = Path(DATA_SEED) if ROOT_MODE and DATA_SEED != 'none' else None
 # GPU addon (make-gpu-addon.py --publish of the ios17e Metal plugin): the loader hands it to the kernel as
 # /chosen/memory-map/GpuAddon, the kernel writes it below /private/var/ngpu on the Data volume and mounts it over
@@ -49,7 +54,11 @@ if DATA_SEED:
     _apsb = _seed.find(b'APSB') - 32
     assert _apsb >= 0 and str(_uuid.UUID(bytes=_seed[_apsb + 0xF0:_apsb + 0x100])).upper() == 'FEE1FE9D-1C1D-42F9-9A12-0732FA326C30'
     _nxsb = _seed.find(b'NXSB') - 32
-    assert _nxsb >= 0 and struct.unpack_from('<I', _seed, _nxsb + 36)[0] * struct.unpack_from('<Q', _seed, _nxsb + 40)[0] <= 0x80000000
+    # A volatile seed lives in memory: at most 2 GiB. With the Data store writing (PERSIST=2) NativeRamBlock serves a larger seed from
+    # its nonzero pages plus the userdata window (isBig, direct), so up to 64 GiB (scratch-data-48g.img, 2026-11-14: the 1 GiB seed
+    # filled up once data migration installed the staged system apps).
+    _seed_limit = (64 << 30) if os.environ.get('PERSIST') == '2' else 0x80000000
+    assert _nxsb >= 0 and struct.unpack_from('<I', _seed, _nxsb + 36)[0] * struct.unpack_from('<Q', _seed, _nxsb + 40)[0] <= _seed_limit
 work = base / 'pack-work-ios17-hid-digitizer'
 out.mkdir(parents=True, exist_ok=True)
 work.mkdir(exist_ok=True)
@@ -115,9 +124,10 @@ subprocess.run(['python3', str(base / 'device-ios17/scripts/make-fuxi-adt.py'), 
                 '--dram-size', '0x80000000', '--owned-memory-size', '0x130000000',
                 '--root-match-volume-uuid', OS_VOLUME if ROOT_MODE else NO_ROOT,
                 '--unique-chip-id', 'ce854c9ae043320b', '--chip-id', '207',
-                '--cpu-regs', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700',
+                '--cpu-regs', os.environ.get('CPU_REGS', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700'),   # CPU_REGS: trial core sets (fuxi 2026-11-15)
                 '--phone-identity', '--phone-model', 'iPhone15,2', '--trust-cache',
                 *(['--packed-data-ramdisk'] if DATA_SEED else []),
+                *(['--persistent-data'] if DATA_SEED and MIGRATION else []),
                 *(['--gpu-addon'] if GPU_ADDON else []),
                 *[a for f in STATUSBAR_FIXUPS for a in ('--text-fixup', f)],
                 # vmm-present: the original AMFI developer-mode init waits 30 s for ApplePMGRNub and panics
@@ -130,7 +140,7 @@ if ROOT_MODE:
     assert nodes['/defaults']['vmm-present'] == struct.pack('<I', 1)
 assert nodes['/']['model'] == b'iPhone15,2\0', nodes['/']['model']
 assert nodes['/chosen'].get('text-fixups', b'') == b''.join(f.encode() + b'\0' for f in STATUSBAR_FIXUPS)
-assert len([n for n in nodes if n.startswith('/cpus/')]) == 8
+assert len([n for n in nodes if n.startswith('/cpus/')]) == len(os.environ.get('CPU_REGS', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700').split(','))
 
 args = ('serial=3 debug=0x14c kt_fixed_zones=120 qcom-usb-debug=1 armcpu-spi-ipi=1 sheng-smp=1 '
         '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0 fuxi-panic-fastboot=30 fuxi-wifi=5 sheng-adsp=2 sheng-audio=1 offline-legacy-logical-width=1125 offline-legacy-logical-height=2436 log-gpu=1 sheng-cpufreq=3 cpumask=0xf9 sheng-fb-gpu=1 '
@@ -186,9 +196,54 @@ if ROOT_MODE and os.environ.get('NO_QUD') == '1':
     out = out.with_name(out.name.replace('ufs-root', 'ufs-root-noqud'))
     out.mkdir(parents=True, exist_ok=True)
     TITLE = TITLE.replace('ROOT', 'ROOT NOQUD')
+# PERSIST=<mode>: the Data store window at the end of userdata (sheng-data-persist, NativeUfs.cpp). 1 only reads: proves the window and
+# reads its header. 2 (user approved 2026-11-14) also writes: the Data disk's changes go to the window with forced unit access and come
+# back on the next boot. Room in the 1000-byte boot-args: fuxi-wifi=5 and log-gpu=1 go for these images.
+PERSIST = os.environ.get('PERSIST', '0')
+assert PERSIST in ('0', '1', '2'), PERSIST
+if PERSIST != '0':
+    # Room in the 1000-byte boot-args (2026-11-14): log-gpu=1 and the IOKit probe go, Wi-Fi (fuxi-wifi=5) stays; with the Data store the
+    # deletable system apps are staged too (sheng-staged-apps=1, zzy-staged-system-apps.patch: copied once into Data for the first-boot
+    # migration's SystemAppMigrator; without it they stay cloud placeholders or "waiting").
+    args = (' '.join(a for a in args.split() if a not in ('log-gpu=1', 'unixnu-iokit-probe=1'))
+            + ' sheng-data-persist=' + PERSIST + ' sheng-staged-apps=1')
+# RESET=1 (one boot): the Data store starts again from the seed (sheng-data-reset=1), so the first-boot migration runs once more;
+# fuxi-panic-fastboot=30 goes for the room.
+if os.environ.get('RESET') == '1':
+    args = ' '.join(a for a in args.split() if a != 'fuxi-panic-fastboot=30') + ' sheng-data-reset=1'
+# PP=<process name, 16 characters at most>: the unixnu-pp thread report of that process (init-hang-probe.patch: every 40 s, 6 rounds,
+# kernel and user frames of each thread; log only). fuxi-panic-fastboot=30 goes for the room.
+if os.environ.get('PP'):
+    args = ' '.join(a for a in args.split() if a != 'fuxi-panic-fastboot=30') + ' unixnu-pp=' + os.environ['PP'][:16]
+# PURGE0=1 (fuxi 2026-11-15): gpu-purge=0, the Metal bridge discards nothing callers declare Volatile (a GPU translation fault froze
+# the UI after WebKit was killed under memory pressure); fuxi-panic-fastboot=30 goes for the room.
+if os.environ.get('PURGE0') == '1':
+    args = ' '.join(a for a in args.split() if a != 'fuxi-panic-fastboot=30') + ' gpu-purge=0'
+# BTD=1 (fuxi 2026-11-15): bluetoothd is no longer in sheng-disable-jobs (the iOS 17 native stack meets /dev/uart.bluetooth).
+if os.environ.get('BTD') == '1':
+    args = args.replace(',com.apple.bluetoothd', '')
+# HOT=<process>: the 1 kHz hot sampler of that process (zz-hot-sampler.patch, "unixnu hot:" tables; log only).
+# fuxi-panic-fastboot=30 goes for the room.
+if os.environ.get('HOT'):
+    args = ' '.join(a for a in args.split() if a != 'fuxi-panic-fastboot=30') + ' unixnu-hot=' + os.environ['HOT'][:16]
+# DISABLE_JOBS=<label>[,<label>...] (fuxi 2026-11-16, keyboard work): one launchd job disabled for a controlled
+# experiment, through BootWatchdogPolicy.c sheng-disable-jobs. Labels allow only [A-Za-z0-9.-,] and the kernel
+# buffer is jobs[200], so a long list would be truncated silently. Unset, the image is unchanged and the A/B
+# comparison costs no rebuild.
+if os.environ.get('DISABLE_JOBS'):
+    _labels = os.environ['DISABLE_JOBS']
+    assert len(_labels) < 190, 'jobs buffer is 200 bytes, refusing a list this long'
+    assert all(c.isalnum() or c in '.-,' for c in _labels), 'label characters only: [A-Za-z0-9.-,]'
+    # The boot-args variable is 1000 bytes. fuxi-panic-fastboot=30 stays (it is the only way back to
+    # fastboot after a hang); the two log-only flags go instead. They add console output only, so the
+    # keyboard measurement is unaffected, and fewer lines keep the evidence readable.
+    args = ' '.join(a for a in args.split() if a not in ('log-gpu=1', 'unixnu-iokit-probe=1'))
+    args = args + ' sheng-disable-jobs=' + _labels
+    print('disable-jobs: freeing log flags for the room, %d bytes' % len(args.encode()))
 print('boot-args bytes', len(args.encode()))
 assert len(args.encode()) <= 1000
-assert 'sheng-log' not in args and 'sheng-data-persist' not in args, 'checkpoint 2a must not arm a UFS write path'
+assert 'sheng-log' not in args, 'the UFS log window stays off'
+assert ('sheng-data-persist=2' in args) == (PERSIST == '2'), 'the store writes only when asked for'
 template = (previous / 'pack-work/unixnu.toml').read_text()
 first = template.index('[[entry]]')
 reset = template.index('[[entry]]\nid = "reset"') if '[[entry]]\nid = "reset"' in template else None
@@ -247,8 +302,15 @@ if ROOT_MODE:
         audio_trust = _TREE / 'build/sheng-audio-hal/trust.json'
         if audio_trust.is_file():
             hashes = sorted(hashes + [bytes.fromhex(json.loads(audio_trust.read_text())['cdhash'])])
+        btd_hash = None
+        # The patched bluetoothd (device-ios17/scripts/build-fuxi-bluetoothd.py, addon btd/bluetoothd), only with BTD_PATCHED=1.
+        if os.environ.get('BTD_PATCHED') == '1':
+            btd_trust = _TREE / 'build/fuxi-bluetoothd/trust.json'
+            btd_hash = bytes.fromhex(json.loads(btd_trust.read_text())['cdhash'])
+            hashes = sorted(hashes + [btd_hash])
         owner = struct.pack('<I16sI', 2, hashlib.sha256(b'unixnu-fuxi-ios17-gpu-owner').digest()[:16], len(hashes))
-        owner += b''.join(h + bytes([2, 0, 0, 0]) for h in hashes)
+        # Launch-constraint category per entry: 0, except the patched bluetoothd, which keeps the stock entry's category 1.
+        owner += b''.join(h + bytes([2, 0, 1 if h == btd_hash else 0, 0]) for h in hashes)
         modules.insert(0, owner)
     for module in modules:
         version, count = struct.unpack_from('<I', module)[0], struct.unpack_from('<I', module, 20)[0]

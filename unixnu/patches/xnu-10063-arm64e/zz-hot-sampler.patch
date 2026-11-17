@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737554105 +0800
 +++ b/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737671005 +0800
-@@ -1966,11 +1966,238 @@
+@@ -1966,11 +1966,247 @@
  	unixnu_pp_schedule();
  }
  
@@ -23,6 +23,7 @@
 +/* from the heap at arm time: in bss the 96 KiB took the fileset kernel's native __DATA past its room */
 +static struct unixnu_hot_slot *unixnu_hot_u, *unixnu_hot_k, *unixnu_hot_c, *unixnu_hot_l, *unixnu_hot_f;
 +static uint32_t unixnu_hot_samples, unixnu_hot_user, unixnu_hot_kernel, unixnu_hot_other, unixnu_hot_lost, unixnu_hot_ticks;
++static uint32_t unixnu_hot_cpu[8];   /* the sampled process's samples per CPU (SM8550: cpu0-2 A510, 3-6 A715/A710, 7 X3) */
 +static task_t unixnu_hot_task;
 +static char unixnu_hot_name[32];
 +static thread_call_t unixnu_hot_tick_call, unixnu_hot_report_call;
@@ -68,6 +69,7 @@
 +		return;
 +	}
 +	os_atomic_inc(&unixnu_hot_samples, relaxed);
++	os_atomic_inc(&unixnu_hot_cpu[cpu_number() & 7], relaxed);
 +	uint64_t pc = (uint64_t)ptrauth_strip((void *)get_saved_state_pc(state), ptrauth_key_return_address);
 +	if (get_saved_state_cpsr(state) & 0xc) {      /* interrupted at EL1: in a trap, a fault or an interrupt */
 +		os_atomic_inc(&unixnu_hot_kernel, relaxed);
@@ -159,6 +161,13 @@
 +		uint32_t kernel = os_atomic_xchg(&unixnu_hot_kernel, 0, relaxed), other = os_atomic_xchg(&unixnu_hot_other, 0, relaxed);
 +		uint32_t lost = os_atomic_xchg(&unixnu_hot_lost, 0, relaxed), ticks = unixnu_hot_ticks;
 +		unixnu_hot_ticks = 0;
++		{
++			uint32_t c[8];
++			for (int i = 0; i < 8; i++) {
++				c[i] = os_atomic_xchg(&unixnu_hot_cpu[i], 0, relaxed);
++			}
++			printf("unixnu hot: cpus %u %u %u %u %u %u %u %u\n", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
++		}
 +		uint64_t slide = 0;
 +		if (unixnu_hot_task) {
 +			mach_vm_address_t infos = task_get_all_image_info_addr(unixnu_hot_task);

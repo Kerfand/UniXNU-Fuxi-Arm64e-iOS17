@@ -122,30 +122,118 @@ static int sheng_boot_data_skel(proc_t p,uint64_t scratch) {
 // -[UIKeyboardInputMode dictationLanguage] (each keyboard layout, each AFDictationConnection availability callback) falls into it and
 // recomputes every input mode through TextInput (TIGetDefaultInputModesForLanguage): the app's main thread at 100 % while typing
 // (zz-hot-sampler inclusive frames, 2026-11-13). The managed layer only answers reads of this key and leaves the user's own
-// com.apple.Preferences alone; the file is written once, when absent.
-static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
+// com.apple.Preferences alone; the file is rewritten at every boot. Keys: every spelling of the English and Chinese languages a
+// keyboard may report (a missing one takes the slow path again; the user switched the system language on 2026-11-14).
+static const char dictation_body[] =
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+  "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+  "<plist version=\"1.0\"><dict><key>DictationLanguagesEnabled</key><dict>"
+  "<key>en_US</key><true/><key>en</key><true/><key>en_CN</key><true/><key>en_GB</key><true/><key>en-US</key><true/><key>en-CN</key><true/><key>zh-Hans_CN</key><true/><key>zh_Hans_CN</key><true/><key>zh_Hans-CN</key><true/><key>zh-Hans-CN</key><true/><key>zh_CN</key><true/><key>zh-CN</key><true/><key>zh-Hans</key><true/><key>zh_Hans</key><true/><key>zh</key><true/><key>yue_CN</key><true/><key>yue-Hant_CN</key><true/><key>zh-Hant_TW</key><true/><key>zh-Hant_HK</key><true/><key>zh_TW</key><true/><key>zh_HK</key><true/>"
+  "</dict></dict></plist>\n";
+// copyin lands here: scratch is a user address and cannot be read directly.
+static char dictation_rbuf[sizeof(dictation_body)];
+// Same bytes as the writer above, compared by hand so this needs no string header.
+static int fuxi_same_bytes(const char *a,const char *b,unsigned n) {
+ for(unsigned i=0;i<n;++i)if(a[i]!=b[i])return 0;
+ return 1;
+}
+
+// Removes the two managed plists only when they are still exactly the body this file writes. The
+// writer used O_TRUNC, so an identical file is ours alone; a different one may carry other managed
+// settings and is left in place (reported as kept). Reading sizeof(body) bytes and expecting one
+// less proves the file ends there instead of merely starting with our text.
+// No copyout to scratch+0x200 happens here, so the scratch+0x400 cache-mount slot is untouched.
+static int fuxi_boot_dictation_cleanup(proc_t p,uint64_t scratch) {
  int on=0;int32_t result=0;
  if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
  static const char *const paths[]={
   "/private/var/Managed Preferences/mobile/com.apple.Preferences.plist",
   "/private/var/Managed Preferences/mobile/com.apple.keyboard.preferences.plist"};
- static const char body[]=
+ int last=0,removed=0,kept=0,absent=0;
+ for(unsigned i=0;i<sizeof(paths)/sizeof(paths[0]);++i) {
+  int error=copyout(paths[i],scratch,strlen(paths[i])+1);
+  struct open_args op={.path=scratch,.flags=O_RDONLY|O_NOFOLLOW,.mode=0};
+  if(!error)error=open(p,&op,&result);
+  if(!error) {
+   int fd=result;int ours=0;
+   struct read_args rd={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(dictation_body)};
+   user_ssize_t n=0;error=read(p,&rd,&n);
+   if(!error && n==(user_ssize_t)(sizeof(dictation_body)-1)) {
+    error=copyin(scratch+0x200,dictation_rbuf,sizeof(dictation_body)-1);
+    if(!error)ours=fuxi_same_bytes(dictation_rbuf,dictation_body,sizeof(dictation_body)-1);
+   }
+   struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;
+   if(!error && ours) {
+    error=copyout(paths[i],scratch,strlen(paths[i])+1);
+    if(!error){struct unlink_args ul={.path=scratch};error=unlink(p,&ul,&result);}
+    if(!error)++removed; else ++kept;
+   } else if(!error) ++kept;
+  } else if(error==ENOENT) {error=0;++absent;}
+  if(error)last=error;
+ }
+ printf("fuxi dictation cleanup: removed %d kept %d absent %d rc %d\n",removed,kept,absent,last);
+ return last;
+}
+
+// Keyboard lag C group (2026-11-17): stop the AFDictationConnection availability callbacks at the
+// source instead of feeding DictationLanguagesEnabled. The dictation master switch lives in
+// com.apple.assistant.support ("Dictation Enabled"; Siri is "Assistant Enabled"). The 2026-11-15 log shows
+// cfprefsd looking for the managed copy of that domain and getting ENOENT at every keyboard bring-up, so a
+// managed file answers the read with "off" and UIKeyboardInputMode stops asking for dictation availability.
+// Default on with sheng-data-skel=1; sheng-dictation-off=0 skips it for an A/B image. A separate file from
+// the two the B-group cleanup removes, so the cleanup never touches it. Rewritten every boot.
+static const char dictation_off_body[] =
   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
   "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-  "<plist version=\"1.0\"><dict><key>DictationLanguagesEnabled</key><dict>"
-  "<key>en_US</key><true/><key>en</key><true/><key>zh-Hans_CN</key><true/><key>zh_CN</key><true/><key>zh-Hans</key><true/>"
-  "</dict></dict></plist>\n";
+  "<plist version=\"1.0\"><dict>"
+  "<key>Dictation Enabled</key><false/>"
+  "<key>Assistant Enabled</key><false/>"
+  "<key>Siri Data Sharing Opt-In Status</key><integer>2</integer>"
+  "</dict></plist>\n";
+static int fuxi_boot_dictation_off(proc_t p,uint64_t scratch) {
+ int on=0,off=1;int32_t result=0;
+ if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
+ PE_parse_boot_argn("sheng-dictation-off",&off,sizeof(off));
+ if(off!=1){printf("fuxi dictation off: skipped\n");return 0;}
+ static const char path[]="/private/var/Managed Preferences/mobile/com.apple.assistant.support.plist";
+ int error=copyout(path,scratch,sizeof(path));
+ int fd=-1;
+ if(!error){struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,.mode=0644};error=open(p,&op,&result);if(!error)fd=result;}
+ if(!error)error=copyout(dictation_off_body,scratch+0x200,sizeof(dictation_off_body)-1);
+ if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(dictation_off_body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
+  if(!error && n!=(user_ssize_t)(sizeof(dictation_off_body)-1))error=EIO;}
+ if(!error){struct fchown_args own={.fd=fd,.uid=0,.gid=0};error=fchown(p,&own,&result);}
+ if(fd>=0){struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;}
+ printf("fuxi dictation off: managed assistant.support rc %d\n",error);
+ return error;
+}
+
+static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
+ // Keyboard lag B group (2026-11-16): the managed DictationLanguagesEnabled experiment is
+ // withdrawn by default. It never stopped the updateEnabledDictationLanguages loop (input stayed
+ // slow with all 21 keys present), and stopping the write does not remove what earlier boots put
+ // on Data while cfprefsd keeps serving it. sheng-dictation-prefs=1 restores the old write so the
+ // two groups can be compared with a single image.
+ int optin=0;
+ if(!PE_parse_boot_argn("sheng-dictation-prefs",&optin,sizeof(optin)) || optin!=1)
+  return fuxi_boot_dictation_cleanup(p,scratch);
+ int on=0;int32_t result=0;
+ if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
+ static const char *const paths[]={
+  "/private/var/Managed Preferences/mobile/com.apple.Preferences.plist",
+  "/private/var/Managed Preferences/mobile/com.apple.keyboard.preferences.plist"};
+
  int last=0;unsigned written=0,present=0;
  for(unsigned i=0;i<sizeof(paths)/sizeof(paths[0]);++i) {
   int error=copyout(paths[i],scratch,strlen(paths[i])+1);
-  struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0644};
+  // Rewritten every boot (2026-11-14): the language list grew, and a file from an earlier boot keeps the old one.
+  struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,.mode=0644};
   if(!error)error=open(p,&op,&result);
-  if(error==EEXIST){++present;continue;}
   if(!error) {
    int fd=result;
-   error=copyout(body,scratch+0x200,sizeof(body)-1);
-   if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
-    if(!error && n!=(user_ssize_t)(sizeof(body)-1))error=EIO;}
+   error=copyout(dictation_body,scratch+0x200,sizeof(dictation_body)-1);
+   if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(dictation_body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
+    if(!error && n!=(user_ssize_t)(sizeof(dictation_body)-1))error=EIO;}
    if(!error){struct fchown_args own={.fd=fd,.uid=0,.gid=0};error=fchown(p,&own,&result);}
    struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;
    if(!error)++written;
@@ -154,6 +242,27 @@ static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
  }
  printf("fuxi dictation prefs: written %u present %u rc %d\n",written,present,last);
  return last;
+}
+
+// fuxi 2026-11-14 (experiment): GPU stalls (one hung FitnessWidget submission froze the UI: the reset left backboardd with a lost
+// device and Turnip wrote through a NULL command stream) sat at Turnip's GMEM resolve. TU_DEBUG=sysmem for every Metal process
+// (/private/var/ngpu/tu_debug, read by NativeAdrenoMetalPlugin.mm) renders without GMEM tiles and resolves. Rewritten every boot.
+static int fuxi_boot_tu_debug(proc_t p,uint64_t scratch) {
+ int32_t result=0;
+ static const char dir[]="/private/var/ngpu";
+ static const char path[]="/private/var/ngpu/tu_debug";
+ static const char body[]="\n";   // 2026-11-15: sysmem did not stop the stalls; an empty TU_DEBUG (the file stays on Data)
+ int error=copyout(dir,scratch,sizeof(dir));
+ if(!error){struct mkdir_args md={.path=scratch,.mode=0755};error=mkdir(p,&md,&result);if(error==EEXIST)error=0;}
+ if(!error)error=copyout(path,scratch,sizeof(path));
+ int fd=-1;
+ if(!error){struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,.mode=0644};error=open(p,&op,&result);if(!error)fd=result;}
+ if(!error)error=copyout(body,scratch+0x200,sizeof(body)-1);
+ if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
+  if(!error && n!=(user_ssize_t)(sizeof(body)-1))error=EIO;}
+ if(fd>=0){struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;}
+ printf("fuxi tu_debug: cleared rc %d\n",error);
+ return error;
 }
 
 // One comma-separated label at *c into the policy as a disabled key; advances *c past it.
@@ -190,9 +299,19 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
  (void)sheng_boot_data_skel(p,scratch);
  (void)sheng_boot_keychains(p,scratch);
  (void)fuxi_boot_dictation_prefs(p,scratch);
- if(!enabled && !jobs[0] && !lite)return 0;
+ (void)fuxi_boot_dictation_off(p,scratch);
+ (void)fuxi_boot_tu_debug(p,scratch);
+ // fuxi (2026-11-14): fairplayd.H2 needs the Apple AES engine's UID/GID keys (FairPlayIOKit generateSeed through
+ // IOAESAccelerator::performAES), which this SoC does not have, so it exits at every start without checking in its Mach
+ // services; launchd keeps com.apple.fairplayd.versioned, locationd's migration call waits on it forever and data
+ // migration (datamigrator) never finishes. Disabled, the lookup fails at once and the migration plugins return.
+ // sheng-fairplay=1 leaves it enabled.
+ int fairplay=0;PE_parse_boot_argn("sheng-fairplay",&fairplay,sizeof(fairplay));
+ const int no_fairplay=fairplay!=1;
+ if(!enabled && !jobs[0] && !lite && !no_fairplay)return 0;
  policy[0]=0;strlcat(policy,policy_head,sizeof(policy));
  if(enabled)strlcat(policy,policy_watchdogd,sizeof(policy));
+ if(no_fairplay)strlcat(policy,"<key>com.apple.fairplayd.H2</key><true/>",sizeof(policy));
  if(lite)for(const char *c=lite_jobs;*c;) {if((error=append_job(&c)))return error;}
  for(const char *c=jobs;*c;) {if((error=append_job(&c)))return error;}
  strlcat(policy,policy_tail,sizeof(policy));

@@ -705,6 +705,11 @@ void adspLogThread(void *, wait_result_t) {
               s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15], native_adsp_text);
         IOLog("fuxi qrtr: stage %d in %d data %d bad %d out %d refused %d loc %d/%d node %d svcs %d up %d down %d unrouted %d \"%s\"\n",
               q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10], q[11], q[12], native_qrtr_text);
+        // remote opens answered when their channel registered later, and the last open nobody had registered (the name list above holds 96 bytes)
+        char lastUnknown[QCOM_GLINK_NAME];
+        memcpy(lastUnknown, (const void *)gGlink.last_unknown, sizeof lastUnknown);
+        lastUnknown[sizeof lastUnknown - 1] = 0;
+        IOLog("fuxi glink: replayed %u last unknown \"%s\" clients %u\n", gGlink.replayed, lastUnknown, gClientCount);
     }
 }
 }  // namespace

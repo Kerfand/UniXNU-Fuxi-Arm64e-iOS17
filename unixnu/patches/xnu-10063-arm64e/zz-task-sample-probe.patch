@@ -1,0 +1,83 @@
+diff --git a/osfmk/kern/task.c b/osfmk/kern/task.c
+--- a/osfmk/kern/task.c
++++ b/osfmk/kern/task.c
+@@ -10285,3 +10285,79 @@
+ 	char *name = proc_best_name(task_get_proc_raw(task));
+ 	strlcpy(buf, name, size);
+ }
++
++
++/* zz-task-sample-probe.patch (fuxi 2026-11-15): where a daemon waits (bluetoothd never opens its UART). Reads only. */
++extern int unixnu_thread_user_state(thread_t thread, uint64_t *out);
++extern int unixnu_thread_user_regs(thread_t thread, uint64_t *out);
++void unixnu_sample_task(const char *name);
++void
++unixnu_sample_task(const char *name)
++{
++	task_t found = TASK_NULL;
++	lck_mtx_lock(&tasks_threads_lock);
++	task_t t;
++	queue_iterate(&tasks, t, task_t, tasks) {
++		void *bsd = get_bsdtask_info(t);
++		if (bsd && strncmp(proc_name_address(bsd), name, 32) == 0) {
++			task_reference(t);
++			found = t;
++			break;
++		}
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	if (found == TASK_NULL) {
++		printf("unixnu sample %s: no task\n", name);
++		return;
++	}
++	struct {
++		uint64_t tid, ev, pc, lr, fp, sp;
++		int state;
++	} th[24];
++	int n = 0, total = 0;
++	task_lock(found);
++	thread_t thr;
++	queue_iterate(&found->threads, thr, thread_t, task_threads) {
++		total++;
++		if (n >= 24) {
++			continue;
++		}
++		uint64_t st[9] = {0}, r[29] = {0};
++		th[n].tid = thr->thread_id;
++		th[n].ev = (uint64_t)VM_KERNEL_UNSLIDE_OR_PERM(thr->wait_event);
++		th[n].state = thr->state;
++		unixnu_thread_user_state(thr, st);
++		unixnu_thread_user_regs(thr, r);
++		th[n].pc = st[0]; th[n].lr = st[1]; th[n].sp = st[2]; th[n].fp = r[0];
++		n++;
++	}
++	uint64_t slide = found->mach_header_vm_address - 0x100000000ULL;
++	task_unlock(found);
++	vm_map_t map = get_task_map_reference(found);
++	printf("unixnu sample %s: %d threads, slide %#llx\n", name, total, slide);
++	for (int i = 0; i < n; i++) {
++		char line[256];
++		int at = snprintf(line, sizeof(line), "unixnu sample %s t%llx st%x ev%llx pc %#llx lr %#llx |", name, th[i].tid, th[i].state,
++		    th[i].ev, th[i].pc - slide, th[i].lr - slide);
++		/* no frame pointer in the helpers: words on the first 4 KiB of the stack that point into the main image text */
++		int shown = 0;
++		for (uint64_t sp = th[i].sp; map && sp && sp < th[i].sp + 4096 && shown < 14; sp += 256) {
++			uint64_t words[32];
++			if (vm_map_read_user(map, (vm_map_address_t)sp, words, sizeof(words)) != KERN_SUCCESS) {
++				break;
++			}
++			for (int w = 0; w < 32 && shown < 14 && at < (int)sizeof(line) - 20; w++) {
++				uint64_t v = (uint64_t)ptrauth_strip((void *)words[w], ptrauth_key_return_address) - slide;
++				if (v >= 0x100004000ULL && v < 0x1007a0000ULL) {
++					at += snprintf(line + at, sizeof(line) - at, " %llx", v);
++					shown++;
++				}
++			}
++		}
++		printf("%s\n", line);
++	}
++	if (map) {
++		vm_map_deallocate(map);
++	}
++	task_deallocate(found);
++}

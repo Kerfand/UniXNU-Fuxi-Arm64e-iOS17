@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 --- a/iokit/Kernel/IOUserClient.cpp
 +++ b/iokit/Kernel/IOUserClient.cpp
-@@ -2694,6 +2694,192 @@
+@@ -2694,6 +2694,194 @@
  	return internal_io_service_match_property_table(service, matching, matchingCnt, matches);
  }
  
@@ -17,18 +17,20 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +		uint32_t v = 0;
 +		unixnu_iokit_probe_mode = PE_parse_boot_argn("unixnu-iokit-probe", &v, sizeof(v)) ? (int)v : 0;
 +	}
-+	if (unixnu_iokit_probe_mode <= 0) {
-+		return false;
-+	}
 +	name[0] = 0;
 +	proc_selfname(name, size);
++	/* fuxi 2026-11-15: bluetoothd exits with status 1 before opening /dev/uart.bluetooth: its IOKit lookups always (no boot-argument room). */
++	if (unixnu_iokit_probe_mode <= 0 && strcmp(name, "bluetoothd") && strcmp(name, "BlueTool") && strcmp(name, "securityd")) {
++		return false;
++	}
 +	return true;
 +}
 +
 +static bool
 +unixnu_iokit_probe_watched(const char * name)
 +{
-+	return !strcmp(name, "backboardd") || !strcmp(name, "SpringBoard");
++	return !strcmp(name, "backboardd") || !strcmp(name, "SpringBoard") || !strcmp(name, "fairplayd.H2") || !strcmp(name, "bluetoothd") ||
++	       !strcmp(name, "BlueTool") || !strcmp(name, "securityd");
 +}
 +
 +/* fuxi 2026-11-13: lookups naming "Sheng" (the audio server plug-in's beacons, ShengAudioService) are always logged; everything else
@@ -37,7 +39,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +unixnu_iokit_probe_always(const char * s)
 +{
 +	return s && (strnstr(s, "Sheng", strlen(s)) != NULL || strnstr(s, "Audio", strlen(s)) != NULL ||
-+	    strnstr(s, "FSB:", strlen(s)) != NULL);
++	    strnstr(s, "FSB:", strlen(s)) != NULL || strnstr(s, "FairPlay", strlen(s)) != NULL);
 +}
 +
 +static bool
@@ -115,7 +117,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +	buf[0] = 0;
 +	unixnu_iokit_probe_value(buf, sizeof(buf), dict, 0);
 +	if ((!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(buf)) ||
-+	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(buf))) {
++	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(buf) && strcmp(name, "fairplayd.H2") && strcmp(name, "bluetoothd") && strcmp(name, "BlueTool") && strcmp(name, "securityd"))) {
 +		return;
 +	}
 +	IOService * now = IOService::copyMatchingService(dict);
@@ -135,7 +137,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +	}
 +	const char * cls = service->getMetaClass()->getClassName();
 +	if ((!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) ||
-+	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(cls))) {
++	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(cls) && strcmp(name, "fairplayd.H2") && strcmp(name, "bluetoothd") && strcmp(name, "BlueTool") && strcmp(name, "securityd"))) {
 +		return;
 +	}
 +	unixnu_iokit_probe_lines++;
@@ -162,7 +164,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +	const OSMetaClass * meta = client->getMetaClass();
 +	const char * cls = meta->getClassName();
 +	if ((!unixnu_iokit_probe_watched(name) && !unixnu_iokit_probe_keyword(cls)) ||
-+	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(cls))) {
++	    (unixnu_iokit_probe_lines >= 1200 && !unixnu_iokit_probe_always(cls) && strcmp(name, "fairplayd.H2") && strcmp(name, "bluetoothd") && strcmp(name, "BlueTool") && strcmp(name, "securityd"))) {
 +		return;
 +	}
 +	unsigned i;

@@ -1,2 +1,2 @@
-ddb7afa0046668b3d44efe0cc5c986f1c442644d Fileset support for the iPhone15,2 iOS 17.7 (21H16) arm64e kernelcache
+0161b5298adb55267b0b2937112098a105c7e71e fuxi: prelink and fileset emit updates for the 21H16 kernel collection
 https://github.com/UniXNU/XnuPrelink.git

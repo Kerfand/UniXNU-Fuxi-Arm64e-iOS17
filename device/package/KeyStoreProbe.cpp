@@ -56,6 +56,21 @@ uint32_t native_aks_lock_state(void) {
     }
     return (uint32_t)cached;
 }
+// The identity that keys software wrapping (AppleKeyStoreState aks_wrap_key/aks_unwrap_key): /chosen/unique-chip-id, as UniXNU-sheng.
+// Zero when the platform has none, which fails wrapping. fuxi 2026-11-15: without wrapping securityd could store no keychain item.
+extern "C" size_t native_aks_device_id(uint8_t *out, size_t capacity) {
+    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+    OSData *id = chosen ? OSDynamicCast(OSData, chosen->getProperty("unique-chip-id")) : nullptr;
+    size_t n = 0;
+    if (id && id->getLength() >= 8 && id->getLength() <= capacity) {
+        const uint8_t *bytes = static_cast<const uint8_t *>(id->getBytesNoCopy());
+        bool nonzero = false;
+        for (unsigned i = 0; i < id->getLength(); ++i) { out[i] = bytes[i]; nonzero |= bytes[i] != 0; }
+        if (nonzero) n = id->getLength();
+    }
+    if (chosen) chosen->release();
+    return n;
+}
 // sheng-aks-ss=<n> overrides the DER "ss" state flags (default 4).
 uint32_t native_aks_state_flags(void) {
     static int cached = -1;

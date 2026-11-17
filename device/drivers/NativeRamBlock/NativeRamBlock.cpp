@@ -142,6 +142,11 @@ public:
         native_data_persist_present = overlay.present;
         native_data_persist_gpt_after = native_ufs_store_gpt_check();
       }
+      // fuxi: the store's state on the serial log too (BootProgress shows it on screen only)
+      IOLog("NativeRamBlock: persistent store mode %u state %u header %u gpt %#x/%#x first lba %#llx window %llu blocks pages %llu present %llu\n",
+            mode, (unsigned)native_data_persist_state, (unsigned)native_data_persist_header, (unsigned)native_data_persist_gpt,
+            (unsigned)native_data_persist_gpt_after, (unsigned long long)native_data_persist_first_lba,
+            (unsigned long long)persist::windowBlocks(pages), (unsigned long long)pages, (unsigned long long)native_data_persist_present);
     }
     IOLockUnlock(gate);
   }

@@ -13,6 +13,8 @@
 #include <IOKit/IODeviceMemory.h>
 
 extern "C" {
+bool native_adreno_preempt_stats(uint32_t *out) __attribute__((weak_import));
+extern volatile uint32_t native_gpu_preempt[8] __attribute__((weak_import));
 extern char native_cpufreq_row[120];
 extern volatile uint32_t native_cpufreq_stage;
 void sheng_cpufreq_probe(void);
@@ -55,6 +57,19 @@ void gpuRow(char *last, size_t size) {
     if (strncmp(last, row, size)) {
         strlcpy(last, row, size);
         IOLog("fuxi gpu dcvs: %s\n", row);
+    }
+    {
+        static uint32_t lastp[26];
+        uint32_t p[26] = {};
+        const bool on = &native_adreno_preempt_stats && native_adreno_preempt_stats(p);
+        if (on && memcmp(p, lastp, sizeof p)) {
+            memcpy(lastp, p, sizeof p);
+            IOLog("fuxi gpu preempt: setup %x cpsw %u int %x | trig %u done %u skip %u fault %u disj %u wptr %u last %uus ring %u flight %u cntl %x "
+                  "dead %u rescue %u | r0 %x/%x e%x i%x r1 %x/%x e%x i%x | chk %x %x %x %x %x %x\n",
+                  &native_gpu_preempt ? native_gpu_preempt[0] : 0xdead, &native_gpu_preempt ? native_gpu_preempt[1] : 0,
+                  &native_gpu_preempt ? native_gpu_preempt[2] : 0, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[16], p[17],
+                  p[18], p[19], p[20], p[21], p[22], p[23], p[24], p[25], p[10], p[11], p[12], p[13], p[14], p[15]);
+        }
     }
     if (&native_gpu_idle_sleeps && &native_gpu_idle_spins && &native_gpu_idle_timeouts) {
         static uint64_t s0, p0, t0;

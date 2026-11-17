@@ -42,14 +42,32 @@
   - **仍无声**：播放路由要求 HAL 级扬声器保护（`spac`），尚未满足。
 - **内核探针**：1 kHz 热点采样器增加 LR 与整栈包含式统计（`zz-hot-sampler.patch`），线程探针、IOKit 探针常驻关键词。
 
+## 进度更新（2026-11-17）
+
+- **扬声器出声**：两颗 CS35L41 的 PLL 锁定，DSP 周期 4395 发 / 4395 回，无错误。
+  - 根因：VirtualAudio 的扬声器路由检查（`0x24f2d4`，Playback / Broadcast / 录音路由处理器都会调用）只有在 `0x8f698` 为真时才要求 HAL 扬声器保护；`0x8f698` = 机型在列表内 **且** `os_feature_enabled("VirtualAudio", "siri_ducking_for_speaker")`。
+  - 插件只回答 `'spac'` 无效（HAL 不会把这个选择器转给插件）。现在插件在 arm64e 上额外改写 VirtualAudio 对 `__os_feature_enabled_impl` 的导入，**只**对这一个开关返回 false，其余 102 处照常。日志信标：`ShengVA:fuxi: feature siri_ducking_for_speaker forced off`。
+  - 没有扬声器保护 DSP，请用中低音量。
+- **日用打包**：`UFS_PROBE=0 PERSIST=2 DATA_SEED=<scratch-data-48g.img> GPU_ADDON=<含新插件的 addon> BTD_PATCHED=1 BTD=1`。
+  - `PERSIST=2` 必须配 48G 种子；用默认 1G 种子会写坏 userdata 末尾已有的 48G 存储（APFS 校验和错误，挂载 Data 时 panic）。
+  - `PERSIST` 会为启动参数腾位置去掉 `unixnu-iokit-probe=1`，此时看不到插件的 `ShengVA:` / `ShengHAL:` 信标；诊断时不开 `PERSIST`。
+  - `pack-ios17-hidpath.py` 默认的 `GPU_ADDON` 仍是 11-11 的旧包；带补丁 bluetoothd 的 addon 要同时给 `BTD_PATCHED=1`，否则 bluetoothd 因签名被反复杀掉。
+- **用户态编译**（HAL 插件、GPU 插件、Turnip）：`CROSS_EXTRA_FLAGS` 不带内核参数、`CROSS_CLANG` 指向 UniXNU 的 clang、`-B` 指向 CommandLineTools 以使用 ld64，并使用真正的 ad hoc `codesign`（工具链里的 `codesign` 是空实现，拿不到 CDHash）。
+- **键盘卡顿（未修复）**：
+  - 写入托管偏好关闭听写（`com.apple.assistant.support` 的 `Dictation Enabled=false`，`BootWatchdogPolicy.c`）、禁用 assistantd / siriknowledged 均无效，听写不是原因。
+  - 热点采样：Preferences 在键盘弹出时持续 100%，用户态约 66% 在 `AutoreleasePoolPage::releaseUntil`；搜索框与普通文本框分布相同，是键盘在场时一直运行的循环。下一步需要采样器记录完整调用栈。
+- **GPU**：键盘弹出时出现过一次 GPU 页错误，恢复后 backboardd 被插件按设计重启（`scanout copy failed 30 times`）。按官方默认值试 `TU_DEBUG=gmem,nocb` 会在首次迁移中整机卡死，已回退为空值。
+- **蓝牙 / 电池 / RTC**：QcaBluetooth tty、补丁版 bluetoothd 与启动约束、电池服务、RTC 时间（见 `unixnu/commits/` 与 `device/package/`）。
+
 ## 已知问题
 
-- 扬声器无声（见上），打字卡顿。
+- 打字卡顿（见上）；键盘弹出偶发 GPU 页错误导致界面重启。
+- 开机早期偶发 USB 断开并回到 fastboot（无 panic 文本），原因未明。
 - ADT 中 iPhone15,2 的 `target-type` 仍为 `D72`，真机为 `D73`。
 
 ## 构建概要
 
-1. 准备 UniXNU（SadNutWall/UniXNU），先 `git am` `unixnu/commits/UniXNU`（主仓库）和 `unixnu/commits/kits_XnuPrelink`（子模块），再应用 `unixnu/diffs/*.diff`（基准见 `*.HEAD.txt`），拷入 `unixnu/files/`、`unixnu/patches/`。
+1. 准备 UniXNU（SadNutWall/UniXNU），先 `git am` `unixnu/commits/UniXNU`（主仓库），再在各子模块里 `git am` `unixnu/commits/<子模块>`（`kits_XnuPrelink`、`drivers_Adreno740`、`drivers_AdrenoMetal`、`drivers_ArmCpu`、`drivers_AppleKeyStoreState`、`drivers_GopFramebuffer`；基准见各目录的 `HEAD.txt`，AdrenoMetal 先导入官方 51b7003 源码），再应用 `unixnu/diffs/*.diff`（基准见 `*.HEAD.txt`），拷入 `unixnu/files/`、`unixnu/patches/`。`unixnu/commits/device` 是 `device/` 的提交记录，`device/` 已是最终源码。
 2. 把 `device/` 放在 UniXNU 旁边，`ios17/` 作为 `device-ios17/`。
 3. 准备你自己的 21H16 IPSW 输入（内核缓存、系统卷 dmg、信任缓存）与 SDK，生成 `device/package/DataSkel21H16.h`（`tools/mkskel.py`）和壁纸覆盖文件（`tools/mkwallpaper.ps1`）。
 4. `host/build-ios17-kernel.sh` 编译内核，`host/pack-ios17-hidpath.py`（`UFS_PROBE=0`）打包 boot.img，`fastboot boot` 临时启动（不刷写 userdata）。

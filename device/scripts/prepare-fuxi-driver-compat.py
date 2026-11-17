@@ -6,7 +6,8 @@ import subprocess
 root=Path(__file__).resolve().parents[1]
 driver=root/'drivers/Adreno740'
 revision=subprocess.check_output(['git','-C',driver,'rev-parse','HEAD'],text=True).strip()
-if revision!='a9a2cbb43b89d672e2921e19721a6438b738b17f':
+# e8ef803: fuxi 2026-11-15 commit on a9a2cbb that already contains the compatibility patch (it then reverse-applies cleanly).
+if revision not in ('a9a2cbb43b89d672e2921e19721a6438b738b17f', 'e8ef8031bdfd356478c9ad8cd3b83dfa3bb0e8f8'):
     raise SystemExit('Unexpected Adreno740 revision; requalify the compatibility patch')
 patch=root/'patches/drivers/adreno740-darwin23-task-role.patch'
 def check(*args):

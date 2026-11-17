@@ -268,7 +268,12 @@ def main():
               # The radio, for launchd: com.apple.wifid.plist (21H461) is _LimitLoadToDeviceTree ["wlan", "marconi-wifi"], so without a
               # device-tree node of that name wifid is never loaded and Settings shows Wi-Fi greyed out (log 204929: wifid absent all
               # session). As UniXNU-sheng dts/sheng.dts exports it; FuxiWifiNw21.cpp owns the PCIe resources and fills local-mac-address.
-              node('wlan', [('compatible', b'qcom,wcn7850\0'), ('device_type', b'wlan\0')])]),
+              node('wlan', [('compatible', b'qcom,wcn7850\0'), ('device_type', b'wlan\0')]),
+              # Bluetooth (fuxi 2026-11-15): docs/zh/porting/bluetooth.md section 4, as UniXNU-sheng exports it. H4 (encoding 1) at
+              # 3.2 Mbaud, four-byte little-endian; FuxiBluetooth.cpp adds local-mac-address and registers the matching "bluetooth"
+              # IOService once this node exists. iOS 17 bluetoothd then opens /dev/uart.bluetooth (qbt_transport.c).
+              node('bluetooth', [('compatible', b'qcom,wcn7850-bt\0'), ('device_type', b'bluetooth\0'),
+                                   ('transport-encoding', struct.pack('<I', 1)), ('transport-speed', struct.pack('<I', 3200000))])]),
     ])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(tree)

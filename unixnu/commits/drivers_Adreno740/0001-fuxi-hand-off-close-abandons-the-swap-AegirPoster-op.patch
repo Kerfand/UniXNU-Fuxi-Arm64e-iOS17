@@ -1,0 +1,376 @@
+From e8ef8031bdfd356478c9ad8cd3b83dfa3bb0e8f8 Mon Sep 17 00:00:00 2001
+From: prettymebenneth <prettymebenneth@gmail.com>
+Date: Sun, 15 Nov 2026 21:56:47 +0800
+Subject: [PATCH] fuxi: hand-off close abandons the swap, AegirPoster open
+ refused, call/BO failure and IB scan probes
+
+---
+ NativeAdrenoMemory.cpp     | 21 ++++++++++++-----
+ NativeAdrenoPublish.cpp    | 45 +++++++++++++++++++++++++++++++-----
+ NativeAdrenoSubmit.cpp     | 47 ++++++++++++++++++++++++++++++++++++++
+ NativeAdrenoUserClient.cpp | 44 ++++++++++++++++++++++++++++++-----
+ 4 files changed, 139 insertions(+), 18 deletions(-)
+
+diff --git a/NativeAdrenoMemory.cpp b/NativeAdrenoMemory.cpp
+index d47f08d..a93d0e4 100644
+--- a/NativeAdrenoMemory.cpp
++++ b/NativeAdrenoMemory.cpp
+@@ -158,8 +158,12 @@ IOReturn NativeAdrenoMemory::prepareSystem(size_t bytes,bool write_combined,Nati
+     if(!made)made=wired=mach_absolute_time();   /* a contiguous run: made and wired in one step */
+     if(descriptor->getLength()!=bytes) {descriptor->complete();descriptor->release();return kIOReturnUnsupported;}
+     bool cleaned=false;
+-    /* Default-attribute pages may still hold the zero fill in a CPU's cache: written back here, by physical runs, as allocateSystem would. */
+-    if(!write_combined) {
++    /* The pages may still hold the zero fill in a CPU's cache: written back here, by physical runs, as allocateSystem would. XNU zeroes
++     * through the cacheable physical aperture and, on this coherent-I/O build, pmap_sync_wimg's flush_dcache is only a DSB, so a
++     * write-combined page keeps dirty zero lines too: they are cleaned and dropped, or their write-back would later land over the
++     * client's write-combined stores (the first Turnip IB executed zeros on 21H16). */
++    const NativeAdrenoCacheOperation fill=write_combined?NativeAdrenoCleanInvalidate:NativeAdrenoClean;
++    {
+         cleaned=true;
+         for(size_t offset=0;offset<bytes && cleaned;) {
+             IOByteCount length=0;
+@@ -167,7 +171,7 @@ IOReturn NativeAdrenoMemory::prepareSystem(size_t bytes,bool write_combined,Nati
+             if(!physical || (physical&4095) || length<4096) {cleaned=false;break;}
+             if(length>bytes-offset)length=bytes-offset;
+             length&=~IOByteCount(4095);
+-            if(NativeAdrenoMaintainPhysicalPages(physical,length,NativeAdrenoClean)!=kIOReturnSuccess)cleaned=false;
++            if(NativeAdrenoMaintainPhysicalPages(physical,length,fill)!=kIOReturnSuccess)cleaned=false;
+             offset+=length;
+         }
+         if(cleaned)NativeAdrenoNotePhase(NativeAdrenoPhaseAllocate,bytes);
+@@ -197,9 +201,10 @@ IOReturn NativeAdrenoMemory::allocateSystem(size_t bytes,unsigned bits,size_t bu
+     if(status==kIOReturnSuccess) {
+         system_=true;prepared_=true;bytes_=bytes;write_combined_=write_combined;noteSystem((int64_t)bytes);
+         status=descriptor_->getLength()==bytes?takeSegments(descriptor_,bytes,UINT64_C(1)<<bits,false):kIOReturnUnsupported;
+-        /* Default-attribute pages may still hold the zero fill in this CPU's cache: written back before the GPU reads them. */
+-        if(status==kIOReturnSuccess && !write_combined && !cleaned) {
+-            status=maintainImported(0,bytes,NativeAdrenoClean);
++        /* The pages may still hold the zero fill in a CPU's cache (write-combined ones too, see prepareSystem): written back, and for
++         * write-combined pages dropped, before the client or the GPU touches them. */
++        if(status==kIOReturnSuccess && !cleaned) {
++            status=maintainImported(0,bytes,write_combined?NativeAdrenoCleanInvalidate:NativeAdrenoClean);
+             NativeAdrenoNotePhase(NativeAdrenoPhaseAllocate,bytes);
+         }
+         if(status!=kIOReturnSuccess) {write_combined_=false;(void)release();}
+@@ -308,7 +313,9 @@ IOReturn NativeAdrenoMemory::makeWriteCombined()
+ }
+ /* Frees of an owned BO whose first pages a user task still maps: [0] count, [1] the last mapping's page number. */
+ extern "C" {volatile uint32_t native_adreno_free_user_mapped[2];}
++#if defined(NATIVE_ADRENO_PMAP_MAPPING_DIAGNOSTICS)
+ extern "C" unsigned int native_pmap_user_mappings(ppnum_t,void **,uint64_t *,char *) __attribute__((weak_import));
++#endif
+ IOReturn NativeAdrenoMemory::release()
+ {
+     native_adreno_trace_stage=30;
+@@ -329,6 +336,7 @@ IOReturn NativeAdrenoMemory::release()
+         }
+         imported_->release();imported_=nullptr;
+     }
++#if defined(NATIVE_ADRENO_PMAP_MAPPING_DIAGNOSTICS)
+     if(descriptor_ && !system_ && native_pmap_user_mappings && spans_) {
+         /* A page a user task still maps (a BO view over physical pages holds no reference to them) is counted before the pages are freed:
+          * the first page of up to 64 spans, then which process maps it. XNU frees such a page under the mapping (pmap_assert_free). A view
+@@ -342,6 +350,7 @@ IOReturn NativeAdrenoMemory::release()
+             }
+         }
+     }
++#endif
+     if(descriptor_) {
+         if(prepared_) {
+             native_adreno_trace_stage=31;
+diff --git a/NativeAdrenoPublish.cpp b/NativeAdrenoPublish.cpp
+index f3e781f..c8ad95d 100644
+--- a/NativeAdrenoPublish.cpp
++++ b/NativeAdrenoPublish.cpp
+@@ -52,7 +52,7 @@ enum : UInt32 {NativeAdrenoPluginOpenType=0x4147,NativeAdrenoTunnelMagic=0x4e544
+  * original sandbox profiles admit this class but not the presenter's own service. Methods 0x7000 + the presenter's NGP_METHOD numbers (mode,
+  * wait for a frame, complete it) are forwarded unchanged, without the GPU lock (a wait sleeps); memory type NativeAdrenoScanoutType is the
+  * writable scanout. Nothing here touches the GPU. */
+-enum : UInt32 {NativeAdrenoHandoffBase=0x7000,NativeAdrenoHandoffLast=0x7003,NativeAdrenoScanoutType=0x5343,
++enum : UInt32 {NativeAdrenoHandoffBase=0x7000,NativeAdrenoHandoffLast=0x7004,NativeAdrenoScanoutType=0x5343,
+                NativeAdrenoHandoffOpenType=0x4148};
+ /* Open type 0x4148 is a connection that serves only the hand-off: it does not mount a GPU core, so it does not need (or take) a
+  * GPU connection slot (the Vulkan driver holds one for as long as the Metal device lives). Same class, so the same sandbox admission. */
+@@ -64,6 +64,7 @@ enum : UInt32 {NativeAdrenoExportMethod=0x7100,NativeAdrenoExportMaxPiece=3968};
+ extern "C" int boot_log_export_put(uint32_t generation,uint32_t total,uint32_t offset,const void *data,uint32_t size) __attribute__((weak_import));
+ extern "C" {volatile uint32_t native_adreno_export_stats[4];}   /* [0] pieces taken, [1] refused, [2] last generation, [3] its total bytes */
+ extern "C" IOMemoryDescriptor *native_gop_handoff_memory(void);
++extern "C" void native_gop_handoff_abandon(task_t task);
+ 
+ /* Mailbox: a last-resort command channel for a sandbox that admits no external-method selector at all. It is one shared page (memory
+  * type NativeAdrenoMailboxType through IOConnectMapMemory64, which the selector filter does not cover) and a kernel poller that runs
+@@ -248,6 +249,7 @@ class AGXDeviceUserClient : public IOUserClient {
+     OSDeclareDefaultStructors(AGXDeviceUserClient)
+     bool live_=false;
+     bool handoffOnly_=false;
++    task_t handoffTask_=TASK_NULL;   // fuxi 2026-11-15: the task that used the hand-off tunnel (compared only)
+     bool kernel_=false;
+     NativeAdrenoUserClient *core_=nullptr;   /* own core; deleted in free(), so a call that raced the close sees live_ false, never freed memory */
+     NativeAdrenoProcessVm *space_=nullptr;   /* a user connection's own address space */
+@@ -422,6 +424,7 @@ bool AGXDeviceUserClient::growViews(uint32_t token)
+ }
+ IOReturn AGXDeviceUserClient::clientClose()
+ {
++    if(handoffTask_) {native_gop_handoff_abandon(handoffTask_);handoffTask_=TASK_NULL;}
+     dropViews(0);
+     IOLockLock(g.lock);
+     IOReturn status=kIOReturnSuccess;
+@@ -459,6 +462,17 @@ void AGXDeviceUserClient::free()
+     if(core_ && !live_) {delete core_;core_=nullptr;}
+     IOUserClient::free();
+ }
++/* The cache mode of the uncached views a client maps (the scanout and the BO views below). Write-combining is normal non-cacheable memory:
++ * the CPU still never caches the pages (so nothing changes for the GPU's non-cacheable PTEs or for the scan-out), but unlike device memory
++ * (kIOMapInhibitCache) it allows the unaligned accesses and DC ZVA that memcpy/bzero use. On fuxi backboardd's software renderer died in
++ * bzero clearing the primary display surface, an alignment fault (EXC_BAD_ACCESS 0x101, CA::OGL::SWContext::set_surface; log 203236).
++ * agx-inhibit=1 restores device memory for comparison. */
++static IOOptionBits clientUncachedMode()
++{
++    static int inhibit=-1;
++    if(inhibit<0) {unsigned value=0;PE_parse_boot_argn("agx-inhibit",&value,sizeof value);inhibit=value==1;}
++    return inhibit?kIOMapInhibitCache:kIOMapWriteCombineCache;
++}
+ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory)
+ {
+     if(memory)*memory=nullptr;
+@@ -469,7 +483,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
+         IOMemoryDescriptor *scanout=native_gop_handoff_memory();
+         if(!scanout)return kIOReturnNotReady;
+         *memory=scanout;                        /* already retained for the caller */
+-        *options=kIOMapAnywhere|kIOMapInhibitCache;   /* firmware framebuffer: device memory, never cached by the CPU */
++        *options=kIOMapAnywhere|clientUncachedMode();   /* firmware framebuffer: never cached by the CPU */
+         return kIOReturnSuccess;
+     }
+     if(type==NativeAdrenoMailboxType) {
+@@ -489,7 +503,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
+     if(!growViews(type)) {IOLockUnlock(g.lock);return kIOReturnNoMemory;}
+     View *v=viewSlot(type);
+     if(v && v->descriptor && v->token==type) {
+-        v->descriptor->retain();*memory=v->descriptor;*options=kIOMapAnywhere|kIOMapInhibitCache;
++        v->descriptor->retain();*memory=v->descriptor;*options=kIOMapAnywhere|clientUncachedMode();
+         native_adreno_view_diag[2]=native_adreno_view_diag[2]+1;
+         IOLockUnlock(g.lock);
+         return kIOReturnSuccess;
+@@ -533,7 +547,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *opti
+                         status=kIOReturnNoResources;
+                     } else {
+                         *memory=descriptor;
+-                        *options=kIOMapAnywhere|kIOMapInhibitCache;
++                        *options=kIOMapAnywhere|clientUncachedMode();
+                         native_adreno_view_diag[1]=native_adreno_view_diag[1]+1;
+                         status=kIOReturnSuccess;
+                     }
+@@ -733,8 +747,10 @@ static volatile uint32_t *noteRows(volatile uint32_t **slot)
+ }
+ IOReturn AGXDeviceUserClient::runTimed(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size,uint64_t *lockWait)
+ {
+-    if(method>=NativeAdrenoHandoffBase && method<=NativeAdrenoHandoffLast)
++    if(method>=NativeAdrenoHandoffBase && method<=NativeAdrenoHandoffLast) {
++        handoffTask_=current_task();   // fuxi 2026-11-15: abandoned at close
+         return native_gop_handoff_call(method-NativeAdrenoHandoffBase,current_task(),input,input_size,output,output_size);
++    }
+     if(method==NativeAdrenoExportMethod) {
+         struct Piece {uint32_t generation,total,offset,bytes;};
+         char caller[20]={};proc_selfname(caller,sizeof caller);
+@@ -819,8 +835,16 @@ IOReturn AGXDeviceUserClient::action(OSObject *target,void *,IOExternalMethodArg
+ {
+     AGXDeviceUserClient *connection=OSDynamicCast(AGXDeviceUserClient,target);
+     if(!connection || !arguments)return kIOReturnBadArgument;
+-    return connection->run(arguments->selector,arguments->structureInput,arguments->structureInputSize,
++    const IOReturn status=connection->run(arguments->selector,arguments->structureInput,arguments->structureInputSize,
+         arguments->structureOutput,arguments->structureOutputSize);
++    static volatile int left=64;
++    if(status!=kIOReturnSuccess && arguments->selector!=5 && left>0) {
++        left=left-1;
++        char name[20]={};proc_selfname(name,sizeof name);
++        IOLog("fuxi gpu call fail: %s selector %u status %#x in %u out %u\n",name,arguments->selector,status,
++            (unsigned)arguments->structureInputSize,(unsigned)arguments->structureOutputSize);
++    }
++    return status;
+ }
+ IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector,IOExternalMethodArguments *arguments,
+     IOExternalMethodDispatch *,OSObject *target,void *reference)
+@@ -989,6 +1013,15 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
+      * (patches/xnu/native-adreno-sandbox-grant.patch) honours in place of the sandbox verdict. The verdict is still taken above and logged.
+      * Which processes run the plugin at all is the plugin's allow-list (NativeAdrenoMetal.clients). */
+     const bool kernel=owningTask==kernel_task;
++    {   // fuxi 2026-11-15: no GPU for AegirPoster (its pipelines never build here; its submissions hung the GPU)
++        char who[20]={};proc_selfname(who,sizeof who);
++        if(!kernel && !strncmp(who,"AegirPoster",sizeof who)) {
++            static volatile int told=4;
++            if(told>0){told=told-1;IOLog("fuxi gpu: open refused for %s (denied client)\n",who);}
++            connection->release();
++            return kIOReturnNotPermitted;
++        }
++    }
+     char opener[20]={};
+     proc_selfname(opener,sizeof opener);
+     if(!kernel && (macf || resolver!=uint32_t(kIOReturnSuccess))) {
+diff --git a/NativeAdrenoSubmit.cpp b/NativeAdrenoSubmit.cpp
+index df7035e..f366236 100644
+--- a/NativeAdrenoSubmit.cpp
++++ b/NativeAdrenoSubmit.cpp
+@@ -29,6 +29,52 @@ extern "C" {volatile uint32_t native_adreno_fence_wait[8];}
+  * The last 4: the map handle that was next when the stalled job was submitted, then the handles of the mappings under the BR IB1, the BV IB1
+  * and the BV IB2 (0: unmapped). A handle at or above the first was mapped after the submission: its memory was freed and reused under the GPU. */
+ extern "C" {volatile uint32_t native_adreno_stall[2+NativeAdrenoRingStallWords];volatile uint32_t native_adreno_stall_mem[4+3*17+4];}
++/* fuxi 2026-11-15 probe: IB2 calls and draw-state groups whose address is below the user window (high word 0): a truncated
++ * 64-bit GPU address (an SMMU translation fault at 0x1bec0000 froze the GPU under Safari). Read-only; the first 32 are logged. */
++extern "C" void proc_selfname(char *,int);
++static volatile int fuxi_low_left=32;
++static void fuxi_scan_ib(const NativeAdrenoVm *vm,uint64_t iova,size_t bytes,unsigned ib)
++{
++    if(fuxi_low_left<=0 || !vm)return;
++    /* Only the processes that met the fault (Safari, its WebKit processes): peekWords reads a BO without a kernel mapping word by
++     * word from DRAM, which at every submission of every process stalled the boot (ibscan-boot-03873c6d). */
++    {char who[20]={};proc_selfname(who,sizeof who);if(strncmp(who,"MobileSafari",12) && strncmp(who,"com.apple.WebKit",16))return;}
++    uint32_t w[512];
++    const size_t total=bytes/4<2048?bytes/4:2048;
++    size_t base=0,at=0;
++    while(at<total && fuxi_low_left>0) {
++        if(at>=base+512 || at<base) {
++            base=at;const size_t n=total-base<512?total-base:512;
++            if(vm->peekWords(iova+4*base,w,n))return;
++        }
++        const uint32_t h=w[at-base];
++        const uint32_t type=h>>28;
++        size_t count=0;
++        if(type==7) {
++            count=h&0x3fff;const uint32_t op=(h>>16)&0x7f;
++            if((op==0x3f || op==0x43) && count>=3) {
++                uint32_t p[24]={};const size_t take=count<24?count:24;
++                for(size_t k=0;k<take;++k) {
++                    const size_t idx=at+1+k;if(idx>=total)break;
++                    if(idx>=base+512 || idx<base) {base=idx;const size_t n=total-base<512?total-base:512;if(vm->peekWords(iova+4*base,w,n))return;}
++                    p[k]=w[idx-base];
++                }
++                bool low=false;
++                if(op==0x3f) low=p[0] && !p[1];
++                else for(size_t g=0;g+2<take;g+=3) if(p[g+1] && !p[g+2] && (p[g]&0xffff)) low=true;
++                if(low && fuxi_low_left>0) {
++                    fuxi_low_left=fuxi_low_left-1;
++                    char name[20]={};proc_selfname(name,sizeof name);
++                    IOLog("fuxi gpu low address: %s ib%u %llx +%u op %#x n %u: %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",name,ib,
++                        (unsigned long long)iova,(unsigned)at,op,(unsigned)count,p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8]);
++                }
++                if(at>=base+512 || at<base) {base=at;const size_t n=total-base<512?total-base:512;if(vm->peekWords(iova+4*base,w,n))return;}
++            }
++        } else if(type==4) count=h&0x7f;
++        else return;   /* not a packet: stop */
++        at+=1+count;
++    }
++}
+ /* 16 words of the IB at start, from 12 dwords before the dword the thread has reached (size minus what remains). */
+ static void peekIb(const NativeAdrenoVm *vm,uint64_t start,uint32_t size,uint32_t remaining,volatile uint32_t *slot)
+ {
+@@ -465,6 +511,7 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
+     /* The ring this job goes to (the first ring alone unless the board turned the switch on). */
+     const unsigned index=preemption()?ringForPriority():0;
+     NativeAdrenoRing *const target=ring(index);
++    for(size_t i=0;i<count;++i)fuxi_scan_ib(vm_,buffers[i].iova,buffers[i].bytes,(unsigned)i);
+     {
+         const uint32_t slot=native_adreno_ib_log_count&3;uint32_t head[28];
+         (void)vm_->peekWords(buffers[0].iova,head,28);
+diff --git a/NativeAdrenoUserClient.cpp b/NativeAdrenoUserClient.cpp
+index a983266..48e376a 100644
+--- a/NativeAdrenoUserClient.cpp
++++ b/NativeAdrenoUserClient.cpp
+@@ -2,6 +2,24 @@
+ #include "NativeAdrenoUserClient.h"
+ #include <kern/task.h>
+ #include <sys/resource_private.h>   /* PRIO_DARWIN_GPU_*: the process's GPU role, set by the system */
++// Darwin 23 has task background policy, but predates the separate GPU role API.
++// Preserve queue priorities using that real policy; report the unavailable GPU
++// role as -1 in diagnostics rather than fabricate a task_get_gpu_role export.
++#if !defined(PRIO_DARWIN_GPU_BACKGROUND) || !defined(PRIO_DARWIN_GPU_UTILITY)
++#include <sys/kdebug.h>
++// Exact XNU 10063 policy_internal.h prototype; its full header is C-only.
++extern "C" int proc_get_effective_task_policy(task_t, int);
++static int32_t nativeAdrenoTaskGpuRole(task_t) { return -1; }
++static bool nativeAdrenoTaskGpuBackground(task_t task) {
++    return proc_get_effective_task_policy(task, IMP_TASK_POLICY_DARWIN_BG) != 0;
++}
++#else
++static int32_t nativeAdrenoTaskGpuRole(task_t task) { return task_get_gpu_role(task); }
++static bool nativeAdrenoTaskGpuBackground(task_t task) {
++    const auto role = task_get_gpu_role(task);
++    return role == PRIO_DARWIN_GPU_BACKGROUND || role == PRIO_DARWIN_GPU_UTILITY;
++}
++#endif
+ extern "C" volatile uint32_t native_adreno_trace_stage;
+ /* 0 keeps user BOs cacheable and maintained before every submission (int-070..097); the board sets it from the sheng-gpu-wc boot argument. */
+ /* sheng-gpu-owned-coherent=1: the GPU's own BOs use the IO-coherent path (CPU write-back view, GPU write-back inner-shareable mapping) instead of
+@@ -231,6 +249,18 @@ IOReturn NativeAdrenoUserClient::allocBo(const NativeAdrenoAbiBoAlloc *request,
+     if(entry_count_)noteLive(stats_slot_,liveObjects());
+     return status;
+ }
++/* Probe (fuxi 2026-11-14): backboardd died in Turnip (tu_init_hw) on a NULL command stream after VK_ERROR_OUT_OF_DEVICE_MEMORY at
++ * screen-on. Each failed BO allocation is logged (first 48): process, branch, bytes, the client's owned bytes and live handles. */
++extern "C" void proc_selfname(char *,int);
++static volatile int native_adreno_bo_fail_left=48;
++static void native_adreno_bo_fail_note(const char *why,uint64_t bytes,uint64_t owned,uint64_t live,int status)
++{
++    if(native_adreno_bo_fail_left<=0)return;
++    native_adreno_bo_fail_left=native_adreno_bo_fail_left-1;
++    char name[20]={};proc_selfname(name,sizeof name);
++    IOLog("fuxi gpu bo fail: %s %s bytes %llu owned %llu MiB live %llu status %#x\n",name,why,
++        (unsigned long long)bytes,(unsigned long long)(owned>>20),(unsigned long long)live,status);
++}
+ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *request,
+     NativeAdrenoAbiBoAllocReply *reply)
+ {
+@@ -238,10 +268,12 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
+     if(!open_)return kIOReturnNotReady;
+     const uint64_t limit=maxBoBytes();
+     if(!request->bytes || (request->bytes&4095) || request->bytes>limit ||
+-        request->align_log2<12 || request->align_log2>24 || request->contiguous>1)
++        request->align_log2<12 || request->align_log2>24 || request->contiguous>1) {
++        native_adreno_bo_fail_note("args",request->bytes,owned_bytes_,live_,kIOReturnBadArgument);
+         return kIOReturnBadArgument;
++    }
+     Entry *entry=free();
+-    if(!entry)return kIOReturnNoResources;
++    if(!entry) {native_adreno_bo_fail_note("handles",request->bytes,owned_bytes_,live_,kIOReturnNoResources);return kIOReturnNoResources;}
+     /* User BOs are write-combined for the CPU, as the GPU maps them non-cacheable: no per-submission cache maintenance.
+      * int-147 kept them cacheable under IO coherence and mapped the GPU side write-back: the first Turnip IB executed zeros and the GPU hung
+      * (the kernel's cacheable alias read zeros past the first line too). A coherent own BO needs a client that asks for a write-back view. */
+@@ -254,6 +286,7 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
+     }
+     else status=entry->memory.allocateSystem((size_t)request->bytes,output_bits_,(size_t)request->bytes,write_combined,offered_pages_);
+     if(status) {
++        native_adreno_bo_fail_note(request->contiguous?"contig":"system",request->bytes,owned_bytes_,live_,status);
+         /* A failed allocation can leave quarantine behind; never reuse it. */
+         clear(*entry);
+         if(entry->memory.release()!=kIOReturnSuccess) {
+@@ -384,8 +417,7 @@ extern "C" uint64_t native_adreno_now_us(void) __attribute__((weak));
+ int32_t NativeAdrenoUserClient::submitPriority() const
+ {
+     if(priority_foreground_<0 && priority_background_<0)return -1;
+-    const int32_t role=task_get_gpu_role(current_task());
+-    const bool background=role==PRIO_DARWIN_GPU_BACKGROUND || role==PRIO_DARWIN_GPU_UTILITY;
++    const bool background=nativeAdrenoTaskGpuBackground(current_task());
+     return background?(priority_background_>=0?priority_background_:priority_foreground_)
+                      :(priority_foreground_>=0?priority_foreground_:priority_background_);
+ }
+@@ -398,7 +430,7 @@ IOReturn NativeAdrenoUserClient::setPriority(uint32_t foreground,uint32_t backgr
+     {
+         const uint32_t n=native_adreno_prio_count;
+         volatile uint32_t *row=native_adreno_prio_log[n&31];
+-        row[0]=uint32_t(proc_selfpid());row[1]=foreground;row[2]=background;row[3]=uint32_t(task_get_gpu_role(current_task()));
++        row[0]=uint32_t(proc_selfpid());row[1]=foreground;row[2]=background;row[3]=uint32_t(nativeAdrenoTaskGpuRole(current_task()));
+         row[4]=&native_adreno_now_us?uint32_t(native_adreno_now_us()/1000):0;row[5]=priority_told_;
+         native_adreno_prio_count=n+1;
+         if(priority_told_<0xffffffffu)++priority_told_;
+@@ -435,7 +467,7 @@ IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
+     ring_->useContext(context_);
+     submit_->nextOwner(proc_selfpid());
+     submit_->nextPriority(submitPriority());
+-    submit_->nextRole(task_get_gpu_role(current_task()));
++    submit_->nextRole(nativeAdrenoTaskGpuRole(current_task()));
+     const IOReturn status=submit_->submit(vm_,buffers,request->buffer_count,
+         queue_base_+request->queue,&fence,clock);
+     if(status)return status;
+-- 
+2.53.0
+

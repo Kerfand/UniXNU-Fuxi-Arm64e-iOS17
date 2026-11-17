@@ -1,8 +1,118 @@
+From fd67bf572742736b857a3abc554f121203e3dac9 Mon Sep 17 00:00:00 2001
+From: prettymebenneth <prettymebenneth@gmail.com>
+Date: Sun, 15 Nov 2026 21:56:48 +0800
+Subject: [PATCH] fuxi: present note method, hand-off abandon, fixed 120 Hz
+ refresh by default (sheng-vsync-fixed)
+
+---
+ NativeGOPPresenter.cpp  |  30 +++++-
+ NativeGOPWire.h         |   3 +-
+ NativeLegacyDisplay.cpp | 220 ++++++++++++++++++++++++++++++++++++----
+ 3 files changed, 232 insertions(+), 21 deletions(-)
+
+diff --git a/NativeGOPPresenter.cpp b/NativeGOPPresenter.cpp
+index 72ee4eb..59bb22e 100644
+--- a/NativeGOPPresenter.cpp
++++ b/NativeGOPPresenter.cpp
+@@ -41,6 +41,7 @@ class NativeGOPPresenter : public IOService {
+     IOService *memorySource=nullptr;
+     // GPU hand-off (sheng-fb-gpu=1): one offered frame at a time, from the display driver to the privileged client.
+     bool gpuMode=false,gpuClient=false;
++    task_t clientTask=TASK_NULL;   // fuxi 2026-11-15: the task that waits for frames (not referenced: compared only)
+     struct {bool offered,delivered;uint64_t sequence;void *display;IOMemoryDescriptor *memory;IOMemoryMap *map;
+             uint64_t stride;uint32_t width,height,format;} swap={};
+     uint64_t swapSequence=0;
+@@ -55,6 +56,13 @@ class NativeGOPPresenter : public IOService {
+     IOReturn waitSwap(task_t,uint64_t timeoutMs,NGPSwap *);
+     IOReturn completeSwap(uint64_t sequence,int status);
+     void abandonSwap();
++public:
++    void abandonIfClient(task_t task) {
++        if(!gate)return;
++        IOLockLock(gate);const bool mine=clientTask==task;if(mine)clientTask=TASK_NULL;IOLockUnlock(gate);
++        if(mine) {IOLog("NativeGOPPresenter: GPU client closed with the hand-off; outstanding swap abandoned\n");abandonSwap();}
++    }
++protected:
+ public:
+     void setMemorySource(IOService *source) {memorySource=source;}
+     static IOReturn handoffCall(uint32_t op,task_t task,const void *in,size_t inSize,void *out,size_t outSize);
+@@ -160,7 +168,7 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
+     const uint64_t began=mach_absolute_time();
+     native_gop_wait_stats[0]=native_gop_wait_stats[0]+1;native_gop_wait_stats[2]=timeoutMs;
+     IOLockLock(gate);
+-    gpuClient=true;
++    gpuClient=true;clientTask=task;
+     while(online && (!swap.offered || swap.delivered)) {
+         const wait_result_t woke=IOLockSleepDeadline(gate,&swap,deadline,THREAD_ABORTSAFE);
+         if(woke!=THREAD_AWAKENED) {
+@@ -249,6 +257,13 @@ void NativeGOPPresenter::abandonSwap() {
+     __atomic_fetch_add(&native_gop_gpu_abandoned,1,__ATOMIC_RELAXED);
+     native_legacy_gpu_complete(done.display,kIOReturnAborted);
+ }
++// fuxi 2026-11-15: the GPU client that waited for frames through the Adreno tunnel closed (its process ended): its swap is abandoned,
++// so the display driver takes its own path for that frame instead of waiting for it forever.
++extern "C" void native_gop_handoff_abandon(task_t task) {
++    NativeGOPPresenter *p=gHandoff;
++    if(!p || !task)return;
++    p->abandonIfClient(task);
++}
+ extern "C" void native_gop_presenter_set_source(IOService *presenter,IOService *nub) {
+     if(NativeGOPPresenter *p=OSDynamicCast(NativeGOPPresenter,presenter))p->setMemorySource(nub);
+ }
+@@ -259,6 +274,7 @@ extern "C" bool native_gop_gpu_offer(IOService *presenter,void *display,IOMemory
+ // Entry points for the GPU client that reaches the hand-off through an already admitted connection (the Adreno accelerator's user client, which
+ // the original sandbox profiles allow where they do not allow this service): op 0 mode, 2 wait for a frame, 3 complete it (the NGP_METHOD_*
+ // numbers). Same checks as the service's own methods; sizes are the wire records'.
++extern "C" void proc_selfname(char *, int);
+ IOReturn NativeGOPPresenter::handoffCall(uint32_t op,task_t task,const void *in,size_t inSize,void *out,size_t outSize) {
+     NativeGOPPresenter *p=gHandoff;
+     if(!p || !p->gpuMode || !p->online)return kIOReturnNotReady;
+@@ -277,6 +293,18 @@ IOReturn NativeGOPPresenter::handoffCall(uint32_t op,task_t task,const void *in,
+         NGPComplete q={};memcpy(&q,in,sizeof(q));
+         return p->completeSwap(q.sequence,(int)q.status);
+     }
++    case NGP_METHOD_NOTE: {
++        if(!in || !inSize || inSize>160 || outSize)return kIOReturnBadArgument;
++        static volatile int left=64;
++        if(left>0) {
++            left=left-1;
++            char text[161]={};memcpy(text,in,inSize);
++            for(size_t i=0;i<inSize;++i)if(text[i]=='\n' || text[i]=='\r')text[i]=' ';
++            char name[20]={};proc_selfname(name,sizeof name);
++            IOLog("fuxi gpu present note: %s %s\n",name,text);
++        }
++        return kIOReturnSuccess;
++    }
+     default:return kIOReturnUnsupported;
+     }
+ }
+diff --git a/NativeGOPWire.h b/NativeGOPWire.h
+index 0ce3c04..58a89b6 100644
+--- a/NativeGOPWire.h
++++ b/NativeGOPWire.h
+@@ -11,7 +11,8 @@ struct NGPTransfer {uint64_t sequence,bytes;};
+ // GPU hand-off (boot-arg sheng-fb-gpu=1): the display driver offers a finished frame instead of copying it. A privileged client waits for it
+ // (selector 2: the frame's pages are mapped read/write into the caller, at address), lets the GPU copy it into the scanout mapping (client
+ // memory type 1, writable) and then completes it (selector 3), which retires the swap. Nothing here copies pixels.
+-enum { NGP_METHOD_MODE=0,NGP_METHOD_PRESENT=1,NGP_METHOD_WAIT_SWAP=2,NGP_METHOD_COMPLETE_SWAP=3,NGP_MEMORY_SCANOUT_RW=1 };
++// NGP_METHOD_NOTE (fuxi 2026-11-15): a short text (at most 160 bytes) from the GPU client for the kernel log: why a copy failed.
++enum { NGP_METHOD_MODE=0,NGP_METHOD_PRESENT=1,NGP_METHOD_WAIT_SWAP=2,NGP_METHOD_COMPLETE_SWAP=3,NGP_METHOD_NOTE=4,NGP_MEMORY_SCANOUT_RW=1 };
+ struct NGPWait {uint64_t timeout_ms;};
+ struct NGPSwap {uint64_t sequence,address,bytes,stride;uint32_t width,height,format,reserved;};
+ struct NGPComplete {uint64_t sequence;uint32_t status,reserved;};
 diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
-index 2f3e363..f022bcf 100644
+index 2f3e363..27fd840 100644
 --- a/NativeLegacyDisplay.cpp
 +++ b/NativeLegacyDisplay.cpp
-@@ -72,6 +72,10 @@ static void noteSurface(OSObject *surface,IOMemoryDescriptor *memory)
+@@ -18,6 +18,7 @@
+ #include <libkern/c++/OSNumber.h>
+ #include <pexpert/pexpert.h>
+ extern "C" __attribute__((noreturn)) void native_legacy_backend_guard(unsigned,void *,void *);
++extern "C" void native_legacy_backend_unimplemented(unsigned,void *,void *);
+ extern "C" IOService *native_legacy_display_allocate(void);
+ extern "C" bool native_legacy_gop_mapping_observed(IOService *,IOMemoryMap *,uint32_t,uint32_t);
+ extern "C" void native_legacy_registration_observed(IOService *);
+@@ -72,6 +73,10 @@ static void noteSurface(OSObject *surface,IOMemoryDescriptor *memory)
      native_legacy_surfaces[0]=k+1;
      if(k>=4)return;
      seen[k]=surface;
@@ -13,7 +123,7 @@ index 2f3e363..f022bcf 100644
      if(memory->prepare()!=kIOReturnSuccess)return;
      uint32_t segments=0;uint64_t largest=0;
      for(IOByteCount offset=0,length=0;offset<memory->getLength() && segments<100000;offset+=length,++segments) {
-@@ -110,7 +114,21 @@ static inline bool nativeBgra(uint32_t format,uint32_t planes) {
+@@ -110,7 +115,21 @@ static inline bool nativeBgra(uint32_t format,uint32_t planes) {
  // 64-bit RGBA half float ('RGhA', one plane): iPadOS 27's render server picks it for this panel's framebuffer once a Metal device renders
  // (every Metal frame was refused while only BGRA was taken). The copy converts it to the scanout's BGRA (convertHalfRows below).
  static inline bool nativeHalf(uint32_t format,uint32_t planes) {return format==0x52476841 && !planes;}
@@ -36,7 +146,7 @@ index 2f3e363..f022bcf 100644
  // One byte per positive half bit pattern (32768); negative values and NaNs give 0, values of 1.0 and above 255.
  static uint8_t *halfTable() {
      static uint8_t *table;
-@@ -145,6 +163,148 @@ static bool convertHalfRows(volatile void *dst,uint64_t dstLength,uint64_t dstSt
+@@ -145,6 +164,148 @@ static bool convertHalfRows(volatile void *dst,uint64_t dstLength,uint64_t dstSt
      }
      return true;
  }
@@ -185,7 +295,7 @@ index 2f3e363..f022bcf 100644
  class NativeLegacyDisplay;
  static NativeLegacyDisplay *gDirectDisplay=nullptr;
  extern "C" void native_legacy_direct_snapshot(void);
-@@ -267,7 +427,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+@@ -267,7 +428,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
      // visible width) so the picture shows what the panel shows.
      friend void native_legacy_direct_snapshot(void);
      void snapshot() {
@@ -194,7 +304,7 @@ index 2f3e363..f022bcf 100644
          IOMemoryDescriptor *source=directSlots[shownSlot].memory;
          PE_Video video={};uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
          if(!source || PE_current_console(&video) || video.v_baseAddr!=bootMapping->getPhysicalAddress() || video.v_width!=width || video.v_height!=height)return;
-@@ -430,8 +590,14 @@ public:
+@@ -430,8 +591,14 @@ public:
      // of the state pair) is meant to say; the platform subclass that normally writes it is not part of this
      // port, so without it the user client's wait (selector 6) answers kIOReturnBusy forever and the compositor never presents. This is the
      // original state setter (the virtual the original code calls with this same request shape) with only the powered word named.
@@ -209,7 +319,16 @@ index 2f3e363..f022bcf 100644
          applyStateRequest(&request,false);
      }
      bool start(IOService *provider) override {
-@@ -549,14 +715,14 @@ public:
+@@ -504,7 +671,7 @@ public:
+         if(!IOMobileFramebufferLegacy::getRefreshAttributes(words,fixed) || !words)return false;
+         unsigned hz=native_legacy_refresh_hz();
+         if(hz<=60 || hz>240)return true;
+-        unsigned locked=0;PE_parse_boot_argn("sheng-vsync-fixed",&locked,sizeof(locked));
++        unsigned locked=1;PE_parse_boot_argn("sheng-vsync-fixed",&locked,sizeof(locked));   // fuxi: fixed by default
+         const uint64_t interval=(1ull<<32)/hz;
+         uint64_t machTime=0;nanoseconds_to_absolutetime(interval*1000000000ull>>32,&machTime);
+         words[0]=interval;words[1]=machTime;
+@@ -549,14 +716,14 @@ public:
              uint32_t bw=0,bh=0;getDisplayDimensions(&bw,&bh);
              uint64_t blankLength=(uint64_t)bw*bh*4;
              if(PE_current_console(&blank) || blank.v_baseAddr!=bootMapping->getPhysicalAddress() ||
@@ -227,7 +346,7 @@ index 2f3e363..f022bcf 100644
                  native_legacy_transfer_observed(kIOReturnBadArgument,request,0);return;
              }
              __asm__ volatile("dsb sy" ::: "memory");
-@@ -574,14 +740,15 @@ public:
+@@ -574,14 +741,15 @@ public:
          PE_Video video={};
          uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
          uint64_t length=(uint64_t)width*height*4;
@@ -246,7 +365,7 @@ index 2f3e363..f022bcf 100644
              native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
          }
          // The diagnostic renderer repaints the page over the scanout until it is told the system owns the display; the GPU path needs that as much
-@@ -591,8 +758,9 @@ public:
+@@ -591,8 +759,9 @@ public:
          }
          noteSurface(surface,memory);
          const bool half=nativeHalf(native_legacy_surface_format(surface),native_legacy_surface_planes(surface));
@@ -258,7 +377,7 @@ index 2f3e363..f022bcf 100644
              if(!gpuWrote(request)) {transferred=true;return;}
              const int slot=directSlot(surface,memory);
              if(slot>=0) {
-@@ -608,7 +776,9 @@ public:
+@@ -608,7 +777,9 @@ public:
          }
          directToBoot();
          stat(7);note(7,-1,request);
@@ -269,7 +388,7 @@ index 2f3e363..f022bcf 100644
              // The GPU writes the scanout memory behind the CPU's back: the differential copy's picture of it is stale from now on.
              native_legacy_swap_stage(1);
              shadowValid=false;gpuRequest=request;gpuLength=length;transferred=true;
-@@ -629,10 +799,13 @@ public:
+@@ -629,10 +800,13 @@ public:
              OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNoMemory,request,0);return;
          }
          flush_dcache64((addr64_t)source->getVirtualAddress(),(unsigned)source->getLength(),false);
@@ -285,7 +404,7 @@ index 2f3e363..f022bcf 100644
                  reinterpret_cast<const void *>(source->getVirtualAddress()),source->getLength(),sourceStride,width,height)) {
                  OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnBadArgument,request,0);return;
              }
-@@ -783,7 +956,8 @@ public:
+@@ -783,7 +957,8 @@ public:
                      if(native_legacy_surface_width(surface)>=width && native_legacy_surface_height(surface)>=height &&
                         nativeScanoutFormat(native_legacy_surface_format(surface),native_legacy_surface_planes(surface)) &&
                         memory && memory->metaCast("IOMemoryDescriptor") &&
@@ -295,7 +414,7 @@ index 2f3e363..f022bcf 100644
                             native_legacy_surface_allocation(surface),memory->getLength())) {
                          reason=0;accepted=true;
                      } else {
-@@ -845,12 +1019,15 @@ public:
+@@ -845,12 +1020,15 @@ public:
          bool valid=mapping->getVirtualAddress() && mapping->getPhysicalAddress()==video.v_baseAddr &&
                     mapping->getLength()==video.v_rowBytes*video.v_height;
          if(valid) {
@@ -314,3 +433,19 @@ index 2f3e363..f022bcf 100644
  #if defined(NATIVE_LEGACY_DEFAULT_SURFACE) && NATIVE_LEGACY_DEFAULT_SURFACE
                  // The family calls its void slot 316 after startHardware. Our backend supplies the client's default surface.
                  if(valid)valid=installDefaultSurface(width,height);
+@@ -859,7 +1037,11 @@ public:
+         }
+         OSSafeReleaseNULL(mapping);return valid;
+     }
+-#define LEAF(n) __attribute__((noreturn,noinline)) void opaque##n() override { native_legacy_backend_guard(n,this,__builtin_return_address(0)); }
++// fuxi iOS 17 (2026-11-14): an abstract Legacy slot the family calls that this backend does not implement is reported once and
++// answers 0 (x0 cleared: success / false / NULL) instead of panicking - changing the language reached slot 345 (the caller
++// only formats a log line after it and ignores the result) and froze the device.
++#define LEAF(n) __attribute__((noinline)) void opaque##n() override { native_legacy_backend_unimplemented(n,this,__builtin_return_address(0)); \
++    __asm__ volatile("mov x0, xzr" ::: "x0"); }
+     NATIVE_LEGACY_LEAVES(LEAF)
+ #undef LEAF
+ };
+-- 
+2.53.0
+

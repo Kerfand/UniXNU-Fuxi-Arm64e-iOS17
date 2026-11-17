@@ -1,0 +1,111 @@
+diff --git a/bsd/kern/kern_descrip.c b/bsd/kern/kern_descrip.c
+--- a/bsd/kern/kern_descrip.c
++++ b/bsd/kern/kern_descrip.c
+@@ -127,6 +127,22 @@
+ #include <os/overflow.h>
+ #include <IOKit/IOBSD.h>
+ 
++#if CONFIG_PROTECT
++/* zz-protection-class-none.patch (log): who asked, and the error the volume gave (at most 60 lines). */
++static void
++unixnu_cp_none(const char *what, int error)
++{
++	static int left = 60;
++	if (left > 0) {
++		char name[MAXCOMLEN + 1];
++		left--;
++		proc_selfname(name, sizeof(name));
++		printf("unixnu cp none: %s %s error %d -> class D\n", name, what, error);
++	}
++}
++#endif
++
++
+ #define IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
+ kern_return_t ipc_object_copyin(ipc_space_t, mach_port_name_t,
+     mach_msg_type_name_t, ipc_port_t *, mach_port_context_t, mach_msg_guard_flags_t *, uint32_t);
+@@ -4321,6 +4337,19 @@
+ 				error = ENOTSUP;
+ 			}
+ 		}
++		/*
++		 * zz-protection-class-none.patch: a volume without content protection (the fuxi Data seed is unencrypted) answers
++		 * class D (None) instead of ENOTSUP. PosterBoard's data store insists on NSFileProtectionNone and otherwise is never
++		 * created: no poster, a black wallpaper and an empty Wallpaper settings page (fuxi, 2026-11-06 iPadOS and 2026-11-14 iOS 17).
++		 */
++		if (!(vfs_flags(vnode_mount(vp)) & MNT_CPROTECT)) {
++			/* the volume may also answer 0 without error: that is not class D either */
++			if (error || *retval != 4) {
++				unixnu_cp_none(error ? "get" : "get0", error ? error : (int)*retval);
++			}
++			*retval = 4;   /* PROTECTION_CLASS_D (None) */
++			error = 0;
++		}
+ 
+ 		vnode_put(vp);
+ 		break;
+@@ -4357,6 +4386,11 @@
+ 		VATTR_SET(&va, va_dataprotect_class, tmp);
+ 
+ 		error = VNOP_SETATTR(vp, &va, ctx);
++		/* zz-protection-class-none.patch: without content protection every file is class D already; setting a class succeeds. */
++		if (error && !(vfs_flags(vnode_mount(vp)) & MNT_CPROTECT)) {
++			unixnu_cp_none("set", error);
++			error = 0;
++		}
+ 
+ 		vnode_put(vp);
+ 		break;
+diff --git a/bsd/vfs/vfs_attrlist.c b/bsd/vfs/vfs_attrlist.c
+--- a/bsd/vfs/vfs_attrlist.c
++++ b/bsd/vfs/vfs_attrlist.c
+@@ -2037,7 +2037,25 @@
+ 		}
+ 	}
+ 	if (alp->commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) {
+-		if (VATTR_IS_SUPPORTED(vap, va_dataprotect_class)) {
++		mount_t cp_mp = vp ? vnode_mount(vp) : mp;
++		if (cp_mp && !(vfs_flags(cp_mp) & MNT_CPROTECT)) {
++			/*
++			 * zz-protection-class-none.patch: a volume without content protection (the fuxi Data seed) answers 0 or
++			 * nothing; every file on it is class D (None), which PosterBoard's data store checks before it creates its
++			 * store (otherwise -[PBFModalRootViewController initWithScene:dataStore:...] asserts on a nil dataStore).
++			 */
++			if (VATTR_IS_SUPPORTED(vap, va_dataprotect_class) && vap->va_dataprotect_class != 4) {
++				static int unixnu_attr_get_left = 40;
++				if (unixnu_attr_get_left > 0) {
++					char g_name[MAXCOMLEN + 1];
++					unixnu_attr_get_left--;
++					proc_selfname(g_name, sizeof(g_name));
++					printf("unixnu cp none: %s getattrlist class %u -> class D\n", g_name, vap->va_dataprotect_class);
++				}
++			}
++			ATTR_PACK4((*abp), 4);
++			abp->actual.commonattr |= ATTR_CMN_DATA_PROTECT_FLAGS;
++		} else if (VATTR_IS_SUPPORTED(vap, va_dataprotect_class)) {
+ 			ATTR_PACK4((*abp), vap->va_dataprotect_class);
+ 			abp->actual.commonattr |= ATTR_CMN_DATA_PROTECT_FLAGS;
+ 		} else if (!return_valid || pack_invalid) {
+@@ -4618,7 +4636,21 @@
+ 	/* Support setattrlist of data protection class */
+ 	if (al.commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) {
+ 		ATTR_UNPACK(va.va_dataprotect_class);
+-		VATTR_SET_ACTIVE(&va, va_dataprotect_class);
++		if (vfs_flags(vnode_mount(vp)) & MNT_CPROTECT) {
++			VATTR_SET_ACTIVE(&va, va_dataprotect_class);
++		} else {
++			/*
++			 * zz-protection-class-none.patch: a volume without content protection would fail the whole call (EPERM);
++			 * every file on it is class D already, so the class is accepted and not passed down.
++			 */
++			static int unixnu_attr_cp_none = 40;
++			if (unixnu_attr_cp_none > 0) {
++				char cp_name[MAXCOMLEN + 1];
++				unixnu_attr_cp_none--;
++				proc_selfname(cp_name, sizeof(cp_name));
++				printf("unixnu cp none: %s setattrlist class %u -> class D\n", cp_name, va.va_dataprotect_class);
++			}
++		}
+ 	}
+ 
+ 	/* volume */

@@ -323,6 +323,10 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         // 'cfsz' (fuxi): a UInt32 (CoreAudio type code 3) VirtualAudio asks the Codec device while it builds the speaker's DSP chain
         // (DSPChainUtilities, VirtualAudio 0x35804c), which then dereferenced a null graph and crashed the audio server. One period.
         case 'cfsz': REPLY(UInt32, SHENG_AUDIO_PERIOD_FRAMES);
+        // 'spac' (fuxi 2026-11-17): VirtualAudio's speaker route check (0x24f2d4: a 'pspk' port in the route, then this UInt32 on its
+        // HAL device, address {'spac', 2, 0} at 0x457b70) fails the route with "HAL Speaker Protection is missing" unless it is non-zero
+        // (RoutingHandler_Playback_GenericConfig1.cpp:206), so playback never started. Present.
+        case 'spac': REPLY(UInt32, 1);
         case kFuxiDevicePropertyMute:
             if (a->mScope != kAudioObjectPropertyScopeOutput) return kAudioHardwareUnknownPropertyError;
             REPLY(UInt32, gOutMute);
@@ -736,6 +740,20 @@ static void hookOsLog(void *dso, void *log, uint8_t type, const char *format, ui
     }
     if (gRealOsLog) gRealOsLog(dso, log, type, format, buf, size);
 }
+// fuxi 2026-11-17: VirtualAudio's speaker route check (0x24f2d4, called by the playback, broadcast and record handlers) asks for HAL
+// speaker protection ('spac' on the speaker port's HAL object) only when 0x8f698 is true: a product in its list and
+// os_feature_enabled("VirtualAudio", "siri_ducking_for_speaker"). With no protection the route failed ("HAL Speaker Protection is
+// missing. Failing route", RoutingHandler_Playback_GenericConfig1.cpp:206), the volume control was grey and IO never started. Only this
+// one feature answers false here, and only for VirtualAudio's import; every other feature keeps the real answer.
+static bool (*gRealFeature)(const char *, const char *);
+static bool hookFeature(const char *domain, const char *feature) {
+    if (domain && feature && !strcmp(domain, "VirtualAudio") && !strcmp(feature, "siri_ducking_for_speaker")) {
+        static atomic_uint said;
+        if (!atomic_fetch_add(&said, 1)) vaBeacon("fuxi: feature siri_ducking_for_speaker forced off");
+        return false;
+    }
+    return gRealFeature ? gRealFeature(domain, feature) : false;
+}
 static void rebindMG(const struct mach_header_64 *h, intptr_t slide) {
     const struct load_command *lc = (const void *)(h + 1);
     const struct segment_command_64 *linkedit = NULL;
@@ -758,13 +776,14 @@ static void rebindMG(const struct mach_header_64 *h, intptr_t slide) {
     if (!gRealFopen) gRealFopen = (FILE *(*)(const char *, const char *))dlsym(RTLD_DEFAULT, "fopen");
     if (!gRealIorPath) gRealIorPath = (io_registry_entry_t (*)(mach_port_t, const char *))dlsym(RTLD_DEFAULT, "IORegistryEntryFromPath");
     if (!gRealOsLog) gRealOsLog = (void (*)(void *, void *, uint8_t, const char *, uint8_t *, uint32_t))dlsym(RTLD_DEFAULT, "_os_log_impl");
+    if (!gRealFeature) gRealFeature = (bool (*)(const char *, const char *))dlsym(RTLD_DEFAULT, "_os_feature_enabled_impl");
     static const char *const names[] = {"_MGGetBoolAnswer", "_AudioObjectGetPropertyData", "_AudioObjectGetPropertyDataSize",
                                         "_AudioObjectHasProperty", "___cxa_throw", "_MGGetProductType", "_fopen", "_IORegistryEntryFromPath",
-                                        "__os_log_impl"};
+                                        "__os_log_impl", "__os_feature_enabled_impl"};
     void *const fns[] = {(void *)hookMG, (void *)hookGet, (void *)hookGetSize, (void *)hookHas, (void *)hookThrow, (void *)hookPT,
-                         (void *)hookFopen, (void *)hookIorPath, (void *)hookOsLog};
+                         (void *)hookFopen, (void *)hookIorPath, (void *)hookOsLog, (void *)hookFeature};
     void *const have[] = {(void *)gRealMG, (void *)gRealGet, (void *)gRealGetSize, (void *)gRealHas, (void *)gRealThrow, (void *)gRealPT,
-                          (void *)gRealFopen, (void *)gRealIorPath, (void *)gRealOsLog};
+                          (void *)gRealFopen, (void *)gRealIorPath, (void *)gRealOsLog, (void *)gRealFeature};
     const uintptr_t base = (uintptr_t)slide + linkedit->vmaddr - linkedit->fileoff;
     const struct nlist_64 *syms = (const void *)(base + symtab->symoff);
     const char *strs = (const char *)(base + symtab->stroff);
@@ -782,8 +801,8 @@ static void rebindMG(const struct mach_header_64 *h, intptr_t slide) {
                 if (index & (INDIRECT_SYMBOL_ABS | INDIRECT_SYMBOL_LOCAL)) continue;
                 const char *name = strs + syms[index].n_un.n_strx;
                 unsigned n = 0;
-                while (n < 9 && strcmp(name, names[n])) ++n;
-                if (n == 9 || !have[n]) continue;
+                while (n < 10 && strcmp(name, names[n])) ++n;
+                if (n == 10 || !have[n]) continue;
                 void *const hook = ptrauth_sign_unauthenticated(ptrauth_strip(fns[n], ptrauth_key_function_pointer), ptrauth_key_asia,
                                                                 &slots[k]);
                 if (slots[k] == hook) continue;

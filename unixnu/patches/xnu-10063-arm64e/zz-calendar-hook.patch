@@ -1,0 +1,25 @@
+diff --git a/bsd/kern/kern_time.c b/bsd/kern/kern_time.c
+--- a/bsd/kern/kern_time.c
++++ b/bsd/kern/kern_time.c
+@@ -98,6 +98,7 @@
+ static LCK_GRP_DECLARE(tz_slock_grp, "tzlock");
+ static LCK_SPIN_DECLARE(tz_slock, &tz_slock_grp);
+ 
++extern void unixnu_calendar_set_hook(uint64_t seconds) __attribute__((weak));
+ static void             setthetime(
+ 	struct timeval  *tv);
+ 
+@@ -219,6 +220,13 @@
+ 			return EPERM;
+ 		}
+ 		setthetime(&atv);
++		/*
++		 * zz-calendar-hook.patch (fuxi 2026-11-14): the board keeps the calendar as RTC + offset (the PMK8550 RTC counts from an
++		 * arbitrary origin); a user-set time (Settings, timed) updates the stored offset.
++		 */
++		if (unixnu_calendar_set_hook) {
++			unixnu_calendar_set_hook((uint64_t)atv.tv_sec);
++		}
+ 	}
+ 	if (uap->tzp) {
+ 		lck_spin_lock(&tz_slock);

@@ -329,6 +329,9 @@ for old_text, new_text in (
         ('    if (volatile uint32_t *db = mapWords(kCmdDbBase, kCmdDbBytes, gCmdDbMap)) {',
          '    if (!gCmdDb) gCmdDb = static_cast<uint8_t *>(IOMallocAligned(kCmdDbBytes, 8));\n'
          '    if (volatile uint32_t *db = gCmdDb ? mapWords(kCmdDbBase, kCmdDbBytes, gCmdDbMap) : nullptr) {'),
+        # fuxi 2026-11-14: the GPU stall line prints the driver's SMMU fault record (NativeAdrenoSubmit.cpp).
+        ('#include <IOKit/IOService.h>\n',
+         'extern "C" volatile uint32_t native_adreno_stall_mem[] __attribute__((weak));\n#include <IOKit/IOService.h>\n'),
         # No boot-progress screen on iOS 17: each diagnostic row also goes to the kernel log (USB console) when its text changes.
         ('&gDeviceInfo, 32, 40);', '&gDeviceInfo, ios17PublishInputBits(), 40);'),
         ('            setRow(2, stall);\n',
@@ -344,6 +347,29 @@ for old_text, new_text in (
          '                    for (unsigned i = 0; pa && i < 8; ++i) dramRead32(pa + 4 * i, &w[i]);\n'
          '                    printf("gpu stall ib1 %llx rem %x desc %llx pa %llx dram: %08x %08x %08x %08x %08x %08x %08x %08x\\n", ib, gpuRd(0x092a),\n'
          '                           desc, pa, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);\n'
+         '                    {   // fuxi 2026-11-14: the whole stuck IB (IB1 two pages, IB2 one page) to decode the packet the CP waits in\n'
+         '                        const uint64_t ib2 = (uint64_t(gpuRd(0x092c)) << 32) | gpuRd(0x092b);\n'
+         '                        printf("gpu stall regs ib1 %llx rem %x ib2 %llx rem %x\\n", ib, gpuRd(0x092a), ib2, gpuRd(0x092d));\n'
+         '                        printf("gpu stall rbbm %08x %08x %08x %08x cp %08x\\n", gpuRd(0x0210), gpuRd(0x0211), gpuRd(0x0212), gpuRd(0x0213), gpuRd(0x0201));\n'
+         '                        if (&native_adreno_stall_mem) {\n'
+         '                            const volatile uint32_t *m = native_adreno_stall_mem;\n'
+         '                            printf("gpu stall vm fault %08x %08x %08x %08x next %u br %u bv %u fetch %u\\n", m[0], m[1], m[2], m[3], m[55], m[56], m[57], m[58]);\n'
+         '                        }\n'
+         '                        for (unsigned which = 0; which < 3; ++which) {\n'
+         '                            const uint64_t va = which < 2 ? ib + 0x1000 * which : ib2;\n'
+         '                            if (!va) continue;\n'
+         '                            uint64_t ppa = 0;\n'
+         '                            gpuWalk(va & ~0xfffull, &ppa);\n'
+         '                            if (!ppa) { printf("gpu ibdump %s va %llx unmapped\\n", which < 2 ? "ib1" : "ib2", va); continue; }\n'
+         '                            for (unsigned off = 0; off < 1024; off += 8) {\n'
+         '                                uint32_t d[8] = {};\n'
+         '                                for (unsigned i = 0; i < 8; ++i) dramRead32(ppa + 4 * (off + i), &d[i]);\n'
+         '                                if (!(d[0] | d[1] | d[2] | d[3] | d[4] | d[5] | d[6] | d[7])) continue;\n'
+         '                                printf("gpu ibdump %s %llx +%03x: %08x %08x %08x %08x %08x %08x %08x %08x\\n", which < 2 ? "ib1" : "ib2",\n'
+         '                                       va & ~0xfffull, off, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);\n'
+         '                            }\n'
+         '                        }\n'
+         '                    }\n'
          '                }\n'
          '            }\n'),
         ('    boot_progress_ext[slot][47] = 0;\n}\n',
@@ -640,6 +666,42 @@ while m_k < len(m_args):
 subprocess.run(m_cmd + ['-mgeneral-regs-only', '-I', str(ROOT / '.cache/xnu-work/osfmk'), '-I', str(ROOT / 'kits/sheng')],
                cwd=startup_record['directory'], check=True)
 wifi_objs.append(mhi_obj)
+# ---- Bluetooth (fuxi 2026-11-15): QcaBluetooth (UniXNU/QcaBluetooth 22ff97f, Linux btqca.c from sm8550-mainline 1fb56e6, locked) over
+# QUP2 SE6, the SM8550 UART/GCC/QUP-DMA pieces of UniXNU-sm8550-common, and the board probe ported from UniXNU-sheng ce0c600
+# (kits/sheng/FuxiBluetooth.cpp). C takes the startup record's command (as MhiBoot.c), C++ the probe's (as the Wi-Fi board code).
+qbt_root = ROOT.parents[2] / 'drivers/QcaBluetooth'
+require((qbt_root / 'include/qbt.h').is_file(), f'{qbt_root}: QcaBluetooth missing')
+bt_includes = ['-I', str(qbt_root / 'include'), '-I', str(qbt_root / 'src'), '-I', str(qbt_root / 'shim'), '-I', str(qbt_root / 'out/linux'),
+               '-I', str(ROOT / 'kits/sheng'), '-I', str(ROOT / 'kits/ArmSmmu4K')]
+def bt_c(src):
+    obj = OUT / (src.stem + '.bt.o')
+    args, c, k = policy_record['arguments'], [], 0
+    while k < len(args):
+        a = args[k]
+        if a == policy_record['file']:
+            c.append(str(src))
+        elif a == '-o':
+            c += ['-o', str(obj)]; k += 1
+        elif a in ('-MF', '-MT', '-MJ'):
+            k += 1
+        elif a == '-Xclang' and args[k + 1].startswith('-W'):
+            k += 1
+        elif not a.startswith('-W'):
+            c.append(a)
+        k += 1
+    subprocess.run(c + ['-mgeneral-regs-only'] + bt_includes + ['-Wno-sign-compare'],
+                   cwd=policy_record['directory'], check=True)
+    return obj
+for src in (qbt_root / 'src/qbt_core.c', qbt_root / 'src/qbt_linux.c', qbt_root / 'src/qbt_geni.c', qbt_root / 'src/qbt_transport.c', qbt_root / 'out/linux/btqca.c',
+            ROOT / 'kits/sheng/Sm8550GeniUart.c', ROOT / 'kits/sheng/Sm8550Gcc.c', ROOT / 'kits/sheng/Sm8550QupDma.c',
+            ROOT / 'kits/sheng/FuxiWcnPower.c'):
+    wifi_objs.append(bt_c(src))
+for src in (ROOT / 'kits/sheng/FuxiBluetooth.cpp', ROOT / 'kits/sheng/FuxiBtFirmware.cpp'):
+    obj = OUT / (src.stem + '.ios17.o')
+    subprocess.run([str(src) if a == str(probe_src) else str(obj) if a == str(probe_obj) else a for a in cmd] + wifi_includes + bt_includes,
+                   cwd=record['directory'], check=True)
+    wifi_objs.append(obj)
+print('bluetooth: QcaBluetooth + board probe built')
 # The WCN7850 files are not in the kernel: the fileset __DATA has no room for them (0x171070 bytes ahead of the retained kexts).
 # FuxiWifiFwPart.cpp reads them from the WFW1 container in the partition named "oops" (scripts/make-wifi-fw.py), the
 # official layout (https://unixnu.com/zh/porting/network).
@@ -647,6 +709,25 @@ wifi_module_out = subprocess.check_output(['python3', str(ROOT / 'scripts/build-
                                           str(OUT / 'ath12k-wifi-legacy-ios17'), cmd[0]], text=True, timeout=900)
 wifi_module_objs = [Path(l.split(' ', 1)[1]) for l in wifi_module_out.splitlines() if l.startswith('OBJ ')]
 require(len(wifi_module_objs) >= 50, 'Ath12kWifi f6bf561 objects')
+# The native kernel's __DATA_CONST has no room left (fileset layout: "Native __LASTDATA_CONST overlaps a retained segment" once the
+# battery service's vtables were added, 2026-11-13). ath12k_wmi's constant tables (7.6 KB of __DATA_CONST,__const, pointer-free use)
+# move to __DATA,__data: the object's section header names are rewritten in a copy (llvm-objcopy cannot rename a Mach-O segment).
+def demote_const(obj):
+    data = bytearray(obj.read_bytes())
+    old_s, old_g = b'__const'.ljust(16, b'\0'), b'__DATA_CONST'.ljust(16, b'\0')
+    new_s, new_g = b'__data'.ljust(16, b'\0'), b'__DATA'.ljust(16, b'\0')
+    at, n = 0, 0
+    while True:
+        at = data.find(old_s + old_g, at)
+        if at < 0:
+            break
+        data[at:at + 32] = new_s + new_g
+        n += 1
+    require(n == 1, f'{obj.name}: one __DATA_CONST,__const section')
+    out = OUT / (obj.stem + '.data.o')
+    out.write_bytes(bytes(data))
+    return out
+wifi_module_objs = [demote_const(o) if o.name == 'ath12k_wmi.o' else o for o in wifi_module_objs]
 wifi_objs += wifi_module_objs
 print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_objs) - len(wifi_module_objs)} board objects')
 
@@ -657,10 +738,17 @@ print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_
 adsp_objs = []
 for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmware.cpp',
             # the speaker/microphone path and the audio service (sheng-audio): AudioProbe.cpp on fuxi's CS35L41
-            ROOT / 'kits/sheng/AudioProbe.cpp', ROOT / 'kits/sheng/ShengAudioService.cpp'):
+            ROOT / 'kits/sheng/AudioProbe.cpp', ROOT / 'kits/sheng/ShengAudioService.cpp',
+            # the battery (power.md section 4): PMIC GLINK battery manager on the ADSP, an IOPMPowerSource for powerd
+            ROOT / 'kits/sheng/BatteryProbe.cpp', ROOT / 'kits/sheng/ShengBattery.cpp'):
     obj = OUT / (src.stem + '.ios17.o')
     subprocess.run([str(src) if a == str(probe_src) else str(obj) if a == str(probe_obj) else a for a in cmd] + touch_includes,
                    cwd=record['directory'], check=True)
+    if src.stem == 'ShengBattery':
+        # its metaclass registers late (BatteryProbe.cpp calls __GLOBAL__sub_I_ShengBattery.cpp between pre/postModLoad)
+        late_obj = OUT / 'ShengBattery.late.o'
+        run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_ShengBattery.cpp', obj, late_obj])
+        obj = late_obj
     if src.stem == 'ShengAudioService':
         # its metaclass registers late (AudioProbe.cpp publishService calls __GLOBAL__sub_I_ShengAudioService.cpp)
         late_obj = OUT / 'ShengAudioService.late.o'
@@ -668,7 +756,7 @@ for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmwa
         obj = late_obj
     adsp_objs.append(obj)
 for src in ('QcomGlink.c', 'QcomMdt.c', 'QcomQmp.c', 'QcomSmem.c', 'QcomSmp2p.c', 'QcomQrtr.c', 'ShengQrtr.c', 'FatVolume.c',
-            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c'):
+            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c', 'ShengBattmgr.c'):
     src = ROOT / 'kits/sheng' / src
     obj = OUT / (src.stem + '.ios17.o')
     sargs, scmd, k = startup_record['arguments'], [], 0

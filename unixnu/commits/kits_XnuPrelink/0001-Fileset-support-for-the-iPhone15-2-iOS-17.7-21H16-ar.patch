@@ -1,8 +1,8 @@
 From ddb7afa0046668b3d44efe0cc5c986f1c442644d Mon Sep 17 00:00:00 2001
-From: Kerfand <Kerfand@users.noreply.github.com>
+From: prettymebenneth <prettymebenneth@gmail.com>
 Date: Fri, 6 Nov 2026 14:39:38 +0800
-Subject: [PATCH] Fileset support for the iPhone15,2 iOS 17.7 (21H16) arm64e
- kernelcache
+Subject: [PATCH 1/2] Fileset support for the iPhone15,2 iOS 17.7 (21H16)
+ arm64e kernelcache
 
 - fileset_layout: UNIXNU_FILESET_KERNEL_FIRST places the native kernel's
   __TEXT_EXEC at the root of the collection's __TEXT_EXEC, as xnu-10063

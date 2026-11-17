@@ -1,0 +1,3 @@
+436c609bcc1551185dfb418a1aab94027083a548 fuxi: scanout present notes, abort after 30 failed setups, recovery refusal report, scanout scale
+https://github.com/UniXNU/AdrenoMetal.git
+base 9c4f9e9bc41edba125feccb197d8c72ffff54b34

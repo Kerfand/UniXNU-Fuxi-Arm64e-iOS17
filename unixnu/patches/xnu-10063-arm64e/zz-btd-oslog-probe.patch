@@ -1,0 +1,75 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6012,6 +6012,16 @@
+ 		}
+ 		imgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */
+ 		imgp->ip_envc++;
++	}
++	/* zz-btd-oslog-probe.patch (fuxi): bluetoothd mirrors its os_log to stderr (written to the serial log by write/writev). */
++	if (imgp->ip_strings && strncmp(imgp->ip_strings + strlen(EXECUTABLE_KEY), "/usr/sbin/bluetoothd", 21) == 0 &&
++	    imgp->ip_argspace >= 2 * new_ptr_size) {
++		static const char btd_dt_mode[] = "OS_ACTIVITY_DT_MODE=YES";
++		if (exec_add_user_string(imgp, CAST_USER_ADDR_T(btd_dt_mode), UIO_SYSSPACE, TRUE) == 0) {
++			imgp->ip_argspace -= new_ptr_size;
++			imgp->ip_envc++;
++			printf("fuxi btd oslog: OS_ACTIVITY_DT_MODE=YES added\n");
++		}
+ 	}
+ 
+ 	/* Save space for envv[] NULL terminator */
+diff --git a/bsd/kern/sys_generic.c b/bsd/kern/sys_generic.c
+--- a/bsd/kern/sys_generic.c
++++ b/bsd/kern/sys_generic.c
+@@ -696,9 +696,35 @@
+ 	return writev_internal(p, fd, uio, flags, puguard, retval);
+ }
+ 
++/* zz-btd-oslog-probe.patch (fuxi): what bluetoothd writes to stderr (its os_log with OS_ACTIVITY_DT_MODE). */
++static void
++fuxi_btd_stderr(struct proc *p, int fd, user_addr_t buf, user_size_t len)
++{
++	static int shown = 0;
++	if (fd != 2 || shown >= 6000 || strncmp(p->p_comm, "bluetoothd", 10) != 0 || !buf || !len) {
++		return;
++	}
++	char text[201];
++	size_t n = len < 200 ? (size_t)len : 200;
++	if (copyin(buf, text, n)) {
++		return;
++	}
++	text[n] = 0;
++	for (size_t i = 0; i < n; i++) {
++		if (text[i] == '\n' || text[i] == '\r') {
++			text[i] = ' ';
++		} else if ((unsigned char)text[i] < 32 || (unsigned char)text[i] > 126) {
++			text[i] = '.';
++		}
++	}
++	shown++;
++	printf("btd| %s\n", text);
++}
++
+ int
+ write_nocancel(struct proc *p, struct write_nocancel_args *uap, user_ssize_t *retval)
+ {
++	fuxi_btd_stderr(p, uap->fd, uap->cbuf, uap->nbyte);
+ 	return write_internal(p, uap->fd, uap->cbuf, uap->nbyte, (off_t)-1, 0,
+ 	           NULL, retval);
+ }
+@@ -796,6 +822,15 @@
+ int
+ writev_nocancel(struct proc *p, struct writev_nocancel_args *uap, user_ssize_t *retval)
+ {
++	if (uap->fd == 2 && uap->iovcnt > 0 && strncmp(p->p_comm, "bluetoothd", 10) == 0) {
++		struct user64_iovec iov[4];
++		int cnt = uap->iovcnt < 4 ? (int)uap->iovcnt : 4;
++		if (copyin(uap->iovp, iov, cnt * sizeof(iov[0])) == 0) {
++			for (int i = 0; i < cnt; i++) {
++				fuxi_btd_stderr(p, 2, (user_addr_t)iov[i].iov_base, (user_size_t)iov[i].iov_len);
++			}
++		}
++	}
+ 	return writev_uio(p, uap->fd, uap->iovp, uap->iovcnt, 0, 0, NULL, retval);
+ }
+ 

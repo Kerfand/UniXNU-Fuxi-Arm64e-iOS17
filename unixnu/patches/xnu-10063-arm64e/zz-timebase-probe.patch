@@ -1,0 +1,37 @@
+diff --git a/osfmk/arm/commpage/commpage.c b/osfmk/arm/commpage/commpage.c
+--- a/osfmk/arm/commpage/commpage.c
++++ b/osfmk/arm/commpage/commpage.c
+@@ -174,6 +174,8 @@
+ 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
+ 	*((uint32_t*)(_COMM_PAGE_DEV_FIRM + _COMM_PAGE_RO_OFFSET)) = (uint32_t)PE_i_can_has_debugger(NULL);
+ 	*((uint8_t*)(_COMM_PAGE_USER_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = user_timebase_type();
++	/* zz-timebase-probe.patch: user space reads the timebase itself only when this byte is not 0 (USER_TIMEBASE_NONE). */
++	printf("unixnu timebase: commpage user timebase %u cont hwclock %u\n", user_timebase_type(), (unsigned)user_cont_hwclock_allowed());
+ 
+ 	// Populate logical CPU -> logical cluster table
+ 	ml_map_cpus_to_clusters((uint8_t*)(_COMM_PAGE_CPU_TO_CLUSTER + _COMM_PAGE_RW_OFFSET));
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1912,8 +1912,21 @@
+ 	if (trap_no < 0) {
+ 		switch (trap_no) {
+ 		case MACH_ARM_TRAP_ABSTIME:
++		{
++			/* zz-timebase-probe.patch: user space should read CNTVCT_EL0 itself; count who still traps (first 12 reports). */
++			static volatile uint64_t unixnu_abstime_traps;
++			static volatile int unixnu_abstime_reports = 12;
++			uint64_t n = os_atomic_inc(&unixnu_abstime_traps, relaxed);
++			if ((n & 0x3fff) == 1 && unixnu_abstime_reports > 0) {
++				extern void proc_selfname(char *, int);
++				char tb_name[MAXCOMLEN + 1];
++				unixnu_abstime_reports--;
++				proc_selfname(tb_name, sizeof(tb_name));
++				printf("unixnu timebase: abstime trap %llu by %s\n", n, tb_name);
++			}
+ 			handle_mach_absolute_time_trap(state);
+ 			return;
++		}
+ 		case MACH_ARM_TRAP_CONTTIME:
+ 			handle_mach_continuous_time_trap(state);
+ 			return;

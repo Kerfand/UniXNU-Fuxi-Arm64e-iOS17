@@ -1,2 +1,2 @@
-433316d68a6fd3cf43aabe6d76cdf55540f2467b fuxi: arm64e xnu-10063 kernel for the iOS 17.7 21H16 kernelcache
+a0d817f9410e6959b0802058191c2ee2941e501d fuxi iOS 17: Bluetooth (QcaBluetooth tty, patched bluetoothd union and launch constraint), keychain, GPU and display probes
 https://github.com/SadNutWall/UniXNU.git

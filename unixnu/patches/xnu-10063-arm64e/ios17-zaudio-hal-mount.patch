@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7542,6 +7542,49 @@
+@@ -7542,6 +7542,57 @@
  	    &floating_stage, &floating_status);
  	printf("ios17 wallpaper 7565: background stage %d status %d, floating stage %d status %d\n", native_gpu_addon3_stage,
  	    native_gpu_addon3_status, floating_stage, floating_status);
@@ -14,6 +14,14 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +	    "/System/Library/Audio/Plug-Ins/HAL/BuiltinAudioPlugin.driver", "/System/Library/Audio/Plug-Ins/HAL/ShengAudio.driver/Info.plist",
 +	    &audio_stage, &audio_status);
 +	printf("fuxi audio hal mount: stage %d status %d\n", audio_stage, audio_status);
++	/* fuxi (zz-btd-mount.patch): the patched bluetoothd (device-ios17/scripts/build-fuxi-bluetoothd.py, addon btd/) over /usr/sbin.
++	 * iOS 17 launchd runs com.apple.bluetoothd from its launchd cache, and a program on the Data volume is refused (EPERM), so the
++	 * copy has to appear at the original path. The union keeps BlueTool visible. Scratch 0xc00..0xdff. */
++	static volatile int btd_stage = 0, btd_status = -1;
++	static const char btd_source[] = "/private/var/ngpu/btd", btd_point[] = "/usr/sbin";
++	native_gpu_addon_mount(p, scratch, 0xc00, btd_source, sizeof(btd_source), btd_point, sizeof(btd_point),
++	    "/usr/sbin/BlueTool", "/usr/sbin/bluetoothd", &btd_stage, &btd_status);
++	printf("fuxi btd mount: stage %d status %d\n", btd_stage, btd_status);
 +	/* fuxi probe (2026-11-13): what a readdir of the plug-in directory returns through the union (the audio server scans it with
 +	 * opendir/readdir for "*.driver"). */
 +	{

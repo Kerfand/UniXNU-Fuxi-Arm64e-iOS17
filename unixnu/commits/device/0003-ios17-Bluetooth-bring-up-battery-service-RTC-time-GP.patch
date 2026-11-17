@@ -1,0 +1,2670 @@
+From 053c67e453dcf26ab9fcba83d1dfd89eaf9dba42 Mon Sep 17 00:00:00 2001
+From: prettymebenneth <prettymebenneth@gmail.com>
+Date: Sun, 15 Nov 2026 21:57:57 +0800
+Subject: [PATCH 3/3] ios17: Bluetooth bring-up, battery service, RTC time, GPU
+ preemption port (off) and probes
+
+- Bluetooth: FuxiBluetooth (sheng BluetoothProbe port), firmware from the addon, WCN power votes, GENI UART/QUP DMA/GCC,
+  HWIdentifiers nub (BCM4387 c2) for bluetoothd and BlueTool, /arm-io/bluetooth ADT node, patched bluetoothd build script
+- Battery: ShengBattery/ShengBattmgr battery service
+- FuxiButtons: RTC calendar offset kept in /private/var/db/fuxi-rtc-offset
+- KeyStoreProbe: native_aks_device_id from /chosen/unique-chip-id (keychain software wrapping)
+- GpuPowerProbe: two-ring preemption and the CP SMMU aperture from sheng; preemption off by default (sheng-gpu-preempt)
+- FuxiCpuFreqLog: GPU preemption statistics; BootWatchdogPolicy: dictation prefs, TU_DEBUG file
+---
+ drivers/NativeRamBlock/NativeRamBlock.cpp     |   5 +
+ ios17/overlay/board.toml                      |   5 +
+ .../overlay/scripts/build-fuxi-bluetoothd.py  |  93 +++
+ .../scripts/build-ios17-legacy-display.py     |  92 ++-
+ .../scripts/data/Ios17LegacyDisplayProbe.cpp  |   9 +
+ ios17/overlay/scripts/make-fuxi-adt.py        |   7 +-
+ package/AdspProbe.cpp                         |   5 +
+ package/AppsSmmuLock.h                        |  15 +
+ package/BatteryProbe.cpp                      |  57 ++
+ package/BluetoothFirmware.h                   |  17 +
+ package/BootWatchdogPolicy.c                  |  41 +-
+ package/FuxiBluetooth.cpp                     | 529 ++++++++++++++++++
+ package/FuxiBtFirmware.cpp                    |  67 +++
+ package/FuxiButtons.cpp                       | 102 ++++
+ package/FuxiCpuFreqLog.cpp                    |  15 +
+ package/FuxiWcnPower.c                        |  17 +
+ package/FuxiWifiNet.cpp                       |  10 +
+ package/GpuPowerProbe.cpp                     |  82 ++-
+ package/KeyStoreProbe.cpp                     |  15 +
+ package/QcomGlink.c                           |  40 +-
+ package/QcomGlink.h                           |   6 +-
+ package/ShengBattery.cpp                      | 286 ++++++++++
+ package/ShengBattmgr.c                        | 256 +++++++++
+ package/ShengBattmgr.h                        |  91 +++
+ package/Sm8550Gcc.c                           |  50 ++
+ package/Sm8550GeniUart.c                      |  36 ++
+ package/Sm8550GeniUart.h                      |  28 +
+ package/Sm8550QupDma.c                        |  84 +++
+ package/Sm8550QupDma.h                        |  35 ++
+ package/WcnPower.h                            |  15 +
+ 30 files changed, 2095 insertions(+), 15 deletions(-)
+ create mode 100755 ios17/overlay/scripts/build-fuxi-bluetoothd.py
+ create mode 100644 package/AppsSmmuLock.h
+ create mode 100644 package/BatteryProbe.cpp
+ create mode 100644 package/BluetoothFirmware.h
+ create mode 100644 package/FuxiBluetooth.cpp
+ create mode 100644 package/FuxiBtFirmware.cpp
+ create mode 100644 package/FuxiWcnPower.c
+ create mode 100644 package/ShengBattery.cpp
+ create mode 100644 package/ShengBattmgr.c
+ create mode 100644 package/ShengBattmgr.h
+ create mode 100644 package/Sm8550Gcc.c
+ create mode 100644 package/Sm8550GeniUart.c
+ create mode 100644 package/Sm8550GeniUart.h
+ create mode 100644 package/Sm8550QupDma.c
+ create mode 100644 package/Sm8550QupDma.h
+ create mode 100644 package/WcnPower.h
+
+diff --git a/drivers/NativeRamBlock/NativeRamBlock.cpp b/drivers/NativeRamBlock/NativeRamBlock.cpp
+index 4b96ff8..8a361ad 100644
+--- a/drivers/NativeRamBlock/NativeRamBlock.cpp
++++ b/drivers/NativeRamBlock/NativeRamBlock.cpp
+@@ -142,6 +142,11 @@ public:
+         native_data_persist_present = overlay.present;
+         native_data_persist_gpt_after = native_ufs_store_gpt_check();
+       }
++      // fuxi: the store's state on the serial log too (BootProgress shows it on screen only)
++      IOLog("NativeRamBlock: persistent store mode %u state %u header %u gpt %#x/%#x first lba %#llx window %llu blocks pages %llu present %llu\n",
++            mode, (unsigned)native_data_persist_state, (unsigned)native_data_persist_header, (unsigned)native_data_persist_gpt,
++            (unsigned)native_data_persist_gpt_after, (unsigned long long)native_data_persist_first_lba,
++            (unsigned long long)persist::windowBlocks(pages), (unsigned long long)pages, (unsigned long long)native_data_persist_present);
+     }
+     IOLockUnlock(gate);
+   }
+diff --git a/ios17/overlay/board.toml b/ios17/overlay/board.toml
+index 94c0d17..54727e3 100644
+--- a/ios17/overlay/board.toml
++++ b/ios17/overlay/board.toml
+@@ -111,6 +111,11 @@ roots = [
+   # audio/AV/HDCP/DART/scaler dependencies; the largest __PRELINK_TEXT gap left is 0x139499, which fits native __TEXT
+   # only with assert-expr-strings.patch (0x164000 -> 0x120000).
+   "com.apple.iokit.IOMobileGraphicsFamily",
++  # FairPlay (2026-11-14): fairplayd.H2 looks up com_apple_driver_FairPlayIOKit first and exits 0 without it, so its Mach
++  # services (com.apple.fairplayd.versioned) stay with launchd; locationd's migration call waits on them forever and data
++  # migration (datamigrator) never finishes. Software only: IOResources provider, KPI libraries only, 288800 bytes.
++  # "com.apple.driver.FairPlayIOKit",   # out again 2026-11-14: fairplayd.H2 stays disabled (no UID/GID AES keys), and with the kext
++  # in the collection the sandbox panics in strlen on a freed string (Kernel data abort, lr in com.apple.security.sandbox).
+ ]
+ 
+ [firmware]
+diff --git a/ios17/overlay/scripts/build-fuxi-bluetoothd.py b/ios17/overlay/scripts/build-fuxi-bluetoothd.py
+new file mode 100755
+index 0000000..99a7764
+--- /dev/null
++++ b/ios17/overlay/scripts/build-fuxi-bluetoothd.py
+@@ -0,0 +1,93 @@
++#!/usr/bin/env python3
++"""Patched iOS 17 21H16 bluetoothd for fuxi, delivered through the boot GPU addon.
++
++  build-fuxi-bluetoothd.py BLUETOOTHD PLIST ADDON_IN ADDON_OUT
++
++BLUETOOTHD / PLIST: the OS volume's /usr/sbin/bluetoothd and /System/Library/LaunchDaemons/com.apple.bluetoothd.plist (local copies;
++Apple files are never committed).
++1. Apply PATCHES (file offset, expected bytes, new bytes) - each one is checked against the original bytes first.
++2. Sign ad hoc with 4 KiB pages, the original identifier and the original entitlements; trust.json gets its CDHash
++   (pack-ios17-hidpath.py adds it to the owner trust module with BTD_PATCHED=1).
++3. ADDON_OUT = ADDON_IN + btd/bluetoothd (lands at /private/var/ngpu/btd/bluetoothd) + daemons/com.apple.bluetoothd.plist whose
++   ProgramArguments point there (the addon's daemons/ is unioned over /System/Library/LaunchDaemons).
++"""
++import importlib.util, json, os, plistlib, re, subprocess, sys
++from pathlib import Path
++
++BASE = Path('/home/xiaomi/sadnut-fuxi-local-20261103')
++OUT = BASE / 'UniXNU/out-ios17/fuxi/tree/build/fuxi-bluetoothd'
++TARGET = '/private/var/ngpu/btd/bluetoothd'
++env = dict(os.environ)
++env['PATH'] = ':'.join(['/home/xiaomi/.local/bin', str(BASE / 'bin'), '/home/xiaomi/unixnu-linux/CommandLineTools/usr/bin', env['PATH']])
++
++# (file offset, original bytes, patched bytes); empty = an unmodified copy (verifies the delivery chain).
++# fuxi 2026-11-15 trace (btdtrace.py): os_log sites of the power-on path call stat(format) instead; the kernel syscall probe prints it.
++PATCHES = [
++    (0x477b80, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x477b84, bytes.fromhex('df3a0c94'), bytes.fromhex('b3400c94')),
++    (0x477d14, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x477d18, bytes.fromhex('7a3a0c94'), bytes.fromhex('4e400c94')),
++    (0x477e1c, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x477e20, bytes.fromhex('383a0c94'), bytes.fromhex('0c400c94')),
++    (0x477e88, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x477e8c, bytes.fromhex('1d3a0c94'), bytes.fromhex('f13f0c94')),
++    (0x477f10, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x477f14, bytes.fromhex('fb390c94'), bytes.fromhex('cf3f0c94')),
++    (0x47826c, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x478270, bytes.fromhex('24390c94'), bytes.fromhex('f83e0c94')),
++    (0x49e008, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x49e00c, bytes.fromhex('bda10b94'), bytes.fromhex('91a70b94')),
++    (0x49e0e8, bytes.fromhex('45008052'), bytes.fromhex('e00303aa')),
++    (0x49e0ec, bytes.fromhex('85a10b94'), bytes.fromhex('59a70b94')),
++]
++
++
++def run(*cmd):
++    r = subprocess.run([str(c) for c in cmd], env=env, capture_output=True, text=True)
++    if r.returncode:
++        sys.exit(f'{cmd[0]} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}')
++    return r.stdout + r.stderr
++
++
++def entitlements_of(path):
++    xml = run('codesign', '-d', '--entitlements', ':-', path)
++    return xml[xml.index('<?xml'):xml.rindex('</plist>') + len('</plist>')] + '\n'
++
++
++def main():
++    if len(sys.argv) != 5:
++        sys.exit(__doc__)
++    src, plist, addon_in, addon_out = map(Path, sys.argv[1:])
++    OUT.mkdir(parents=True, exist_ok=True)
++    ents = OUT / 'entitlements.plist'
++    ents.write_text(entitlements_of(src))
++    want = plistlib.loads(ents.read_bytes())
++    data = bytearray(src.read_bytes())
++    for off, old, new in PATCHES:
++        assert len(old) == len(new) and data[off:off + len(old)] == old, hex(off)
++        data[off:off + len(new)] = new
++    exe = OUT / 'bluetoothd'
++    exe.write_bytes(bytes(data))
++    run('codesign', '--force', '--sign', '-', '--pagesize', '4096', '--identifier', 'com.apple.bluetoothd', '--entitlements', ents, exe)
++    detail = run('codesign', '--display', '--verbose=4', exe)
++    assert re.search(r'^Page size=4096$', detail, re.M)
++    h = re.search(r'^CDHash=([a-f0-9]{40})$', detail, re.M)[1]
++    assert plistlib.loads(entitlements_of(exe).encode()) == want, 'entitlements lost'
++    (OUT / 'trust.json').write_text(json.dumps({'cdhash': h, 'patches': len(PATCHES)}, indent=2) + '\n')
++    job = plistlib.loads(plist.read_bytes())
++    assert job['Label'] == 'com.apple.bluetoothd'
++    job['ProgramArguments'] = [TARGET] + job['ProgramArguments'][1:]
++    spec = importlib.util.spec_from_file_location('addfx', BASE / 'device-ios17/scripts/add-fuxi-wallpaper-to-addon.py')
++    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
++    mine = {'btd/bluetoothd': (0o755, exe.read_bytes()),
++            'daemons/com.apple.bluetoothd.plist': (0o644, plistlib.dumps(job, fmt=plistlib.FMT_XML))}
++    out = [(n, mode, d) for n, mode, d in m.read_addon(addon_in.read_bytes()) if n not in mine]
++    out += [(n, mode, d) for n, (mode, d) in mine.items()]
++    blob = m.write_addon(out)
++    assert m.read_addon(blob) == out
++    addon_out.write_bytes(blob)
++    print(f'bluetoothd cdhash {h}, {len(PATCHES)} patches; {addon_out}: {len(out)} files, {len(blob)} bytes')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ios17/overlay/scripts/build-ios17-legacy-display.py b/ios17/overlay/scripts/build-ios17-legacy-display.py
+index 949910e..67127d9 100644
+--- a/ios17/overlay/scripts/build-ios17-legacy-display.py
++++ b/ios17/overlay/scripts/build-ios17-legacy-display.py
+@@ -329,6 +329,9 @@ for old_text, new_text in (
+         ('    if (volatile uint32_t *db = mapWords(kCmdDbBase, kCmdDbBytes, gCmdDbMap)) {',
+          '    if (!gCmdDb) gCmdDb = static_cast<uint8_t *>(IOMallocAligned(kCmdDbBytes, 8));\n'
+          '    if (volatile uint32_t *db = gCmdDb ? mapWords(kCmdDbBase, kCmdDbBytes, gCmdDbMap) : nullptr) {'),
++        # fuxi 2026-11-14: the GPU stall line prints the driver's SMMU fault record (NativeAdrenoSubmit.cpp).
++        ('#include <IOKit/IOService.h>\n',
++         'extern "C" volatile uint32_t native_adreno_stall_mem[] __attribute__((weak));\n#include <IOKit/IOService.h>\n'),
+         # No boot-progress screen on iOS 17: each diagnostic row also goes to the kernel log (USB console) when its text changes.
+         ('&gDeviceInfo, 32, 40);', '&gDeviceInfo, ios17PublishInputBits(), 40);'),
+         ('            setRow(2, stall);\n',
+@@ -344,6 +347,29 @@ for old_text, new_text in (
+          '                    for (unsigned i = 0; pa && i < 8; ++i) dramRead32(pa + 4 * i, &w[i]);\n'
+          '                    printf("gpu stall ib1 %llx rem %x desc %llx pa %llx dram: %08x %08x %08x %08x %08x %08x %08x %08x\\n", ib, gpuRd(0x092a),\n'
+          '                           desc, pa, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);\n'
++         '                    {   // fuxi 2026-11-14: the whole stuck IB (IB1 two pages, IB2 one page) to decode the packet the CP waits in\n'
++         '                        const uint64_t ib2 = (uint64_t(gpuRd(0x092c)) << 32) | gpuRd(0x092b);\n'
++         '                        printf("gpu stall regs ib1 %llx rem %x ib2 %llx rem %x\\n", ib, gpuRd(0x092a), ib2, gpuRd(0x092d));\n'
++         '                        printf("gpu stall rbbm %08x %08x %08x %08x cp %08x\\n", gpuRd(0x0210), gpuRd(0x0211), gpuRd(0x0212), gpuRd(0x0213), gpuRd(0x0201));\n'
++         '                        if (&native_adreno_stall_mem) {\n'
++         '                            const volatile uint32_t *m = native_adreno_stall_mem;\n'
++         '                            printf("gpu stall vm fault %08x %08x %08x %08x next %u br %u bv %u fetch %u\\n", m[0], m[1], m[2], m[3], m[55], m[56], m[57], m[58]);\n'
++         '                        }\n'
++         '                        for (unsigned which = 0; which < 3; ++which) {\n'
++         '                            const uint64_t va = which < 2 ? ib + 0x1000 * which : ib2;\n'
++         '                            if (!va) continue;\n'
++         '                            uint64_t ppa = 0;\n'
++         '                            gpuWalk(va & ~0xfffull, &ppa);\n'
++         '                            if (!ppa) { printf("gpu ibdump %s va %llx unmapped\\n", which < 2 ? "ib1" : "ib2", va); continue; }\n'
++         '                            for (unsigned off = 0; off < 1024; off += 8) {\n'
++         '                                uint32_t d[8] = {};\n'
++         '                                for (unsigned i = 0; i < 8; ++i) dramRead32(ppa + 4 * (off + i), &d[i]);\n'
++         '                                if (!(d[0] | d[1] | d[2] | d[3] | d[4] | d[5] | d[6] | d[7])) continue;\n'
++         '                                printf("gpu ibdump %s %llx +%03x: %08x %08x %08x %08x %08x %08x %08x %08x\\n", which < 2 ? "ib1" : "ib2",\n'
++         '                                       va & ~0xfffull, off, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);\n'
++         '                            }\n'
++         '                        }\n'
++         '                    }\n'
+          '                }\n'
+          '            }\n'),
+         ('    boot_progress_ext[slot][47] = 0;\n}\n',
+@@ -640,6 +666,42 @@ while m_k < len(m_args):
+ subprocess.run(m_cmd + ['-mgeneral-regs-only', '-I', str(ROOT / '.cache/xnu-work/osfmk'), '-I', str(ROOT / 'kits/sheng')],
+                cwd=startup_record['directory'], check=True)
+ wifi_objs.append(mhi_obj)
++# ---- Bluetooth (fuxi 2026-11-15): QcaBluetooth (UniXNU/QcaBluetooth 22ff97f, Linux btqca.c from sm8550-mainline 1fb56e6, locked) over
++# QUP2 SE6, the SM8550 UART/GCC/QUP-DMA pieces of UniXNU-sm8550-common, and the board probe ported from UniXNU-sheng ce0c600
++# (kits/sheng/FuxiBluetooth.cpp). C takes the startup record's command (as MhiBoot.c), C++ the probe's (as the Wi-Fi board code).
++qbt_root = ROOT.parents[2] / 'drivers/QcaBluetooth'
++require((qbt_root / 'include/qbt.h').is_file(), f'{qbt_root}: QcaBluetooth missing')
++bt_includes = ['-I', str(qbt_root / 'include'), '-I', str(qbt_root / 'src'), '-I', str(qbt_root / 'shim'), '-I', str(qbt_root / 'out/linux'),
++               '-I', str(ROOT / 'kits/sheng'), '-I', str(ROOT / 'kits/ArmSmmu4K')]
++def bt_c(src):
++    obj = OUT / (src.stem + '.bt.o')
++    args, c, k = policy_record['arguments'], [], 0
++    while k < len(args):
++        a = args[k]
++        if a == policy_record['file']:
++            c.append(str(src))
++        elif a == '-o':
++            c += ['-o', str(obj)]; k += 1
++        elif a in ('-MF', '-MT', '-MJ'):
++            k += 1
++        elif a == '-Xclang' and args[k + 1].startswith('-W'):
++            k += 1
++        elif not a.startswith('-W'):
++            c.append(a)
++        k += 1
++    subprocess.run(c + ['-mgeneral-regs-only'] + bt_includes + ['-Wno-sign-compare'],
++                   cwd=policy_record['directory'], check=True)
++    return obj
++for src in (qbt_root / 'src/qbt_core.c', qbt_root / 'src/qbt_linux.c', qbt_root / 'src/qbt_geni.c', qbt_root / 'src/qbt_transport.c', qbt_root / 'out/linux/btqca.c',
++            ROOT / 'kits/sheng/Sm8550GeniUart.c', ROOT / 'kits/sheng/Sm8550Gcc.c', ROOT / 'kits/sheng/Sm8550QupDma.c',
++            ROOT / 'kits/sheng/FuxiWcnPower.c'):
++    wifi_objs.append(bt_c(src))
++for src in (ROOT / 'kits/sheng/FuxiBluetooth.cpp', ROOT / 'kits/sheng/FuxiBtFirmware.cpp'):
++    obj = OUT / (src.stem + '.ios17.o')
++    subprocess.run([str(src) if a == str(probe_src) else str(obj) if a == str(probe_obj) else a for a in cmd] + wifi_includes + bt_includes,
++                   cwd=record['directory'], check=True)
++    wifi_objs.append(obj)
++print('bluetooth: QcaBluetooth + board probe built')
+ # The WCN7850 files are not in the kernel: the fileset __DATA has no room for them (0x171070 bytes ahead of the retained kexts).
+ # FuxiWifiFwPart.cpp reads them from the WFW1 container in the partition named "oops" (scripts/make-wifi-fw.py), the
+ # official layout (https://unixnu.com/zh/porting/network).
+@@ -647,6 +709,25 @@ wifi_module_out = subprocess.check_output(['python3', str(ROOT / 'scripts/build-
+                                           str(OUT / 'ath12k-wifi-legacy-ios17'), cmd[0]], text=True, timeout=900)
+ wifi_module_objs = [Path(l.split(' ', 1)[1]) for l in wifi_module_out.splitlines() if l.startswith('OBJ ')]
+ require(len(wifi_module_objs) >= 50, 'Ath12kWifi f6bf561 objects')
++# The native kernel's __DATA_CONST has no room left (fileset layout: "Native __LASTDATA_CONST overlaps a retained segment" once the
++# battery service's vtables were added, 2026-11-13). ath12k_wmi's constant tables (7.6 KB of __DATA_CONST,__const, pointer-free use)
++# move to __DATA,__data: the object's section header names are rewritten in a copy (llvm-objcopy cannot rename a Mach-O segment).
++def demote_const(obj):
++    data = bytearray(obj.read_bytes())
++    old_s, old_g = b'__const'.ljust(16, b'\0'), b'__DATA_CONST'.ljust(16, b'\0')
++    new_s, new_g = b'__data'.ljust(16, b'\0'), b'__DATA'.ljust(16, b'\0')
++    at, n = 0, 0
++    while True:
++        at = data.find(old_s + old_g, at)
++        if at < 0:
++            break
++        data[at:at + 32] = new_s + new_g
++        n += 1
++    require(n == 1, f'{obj.name}: one __DATA_CONST,__const section')
++    out = OUT / (obj.stem + '.data.o')
++    out.write_bytes(bytes(data))
++    return out
++wifi_module_objs = [demote_const(o) if o.name == 'ath12k_wmi.o' else o for o in wifi_module_objs]
+ wifi_objs += wifi_module_objs
+ print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_objs) - len(wifi_module_objs)} board objects')
+ 
+@@ -657,10 +738,17 @@ print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_
+ adsp_objs = []
+ for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmware.cpp',
+             # the speaker/microphone path and the audio service (sheng-audio): AudioProbe.cpp on fuxi's CS35L41
+-            ROOT / 'kits/sheng/AudioProbe.cpp', ROOT / 'kits/sheng/ShengAudioService.cpp'):
++            ROOT / 'kits/sheng/AudioProbe.cpp', ROOT / 'kits/sheng/ShengAudioService.cpp',
++            # the battery (power.md section 4): PMIC GLINK battery manager on the ADSP, an IOPMPowerSource for powerd
++            ROOT / 'kits/sheng/BatteryProbe.cpp', ROOT / 'kits/sheng/ShengBattery.cpp'):
+     obj = OUT / (src.stem + '.ios17.o')
+     subprocess.run([str(src) if a == str(probe_src) else str(obj) if a == str(probe_obj) else a for a in cmd] + touch_includes,
+                    cwd=record['directory'], check=True)
++    if src.stem == 'ShengBattery':
++        # its metaclass registers late (BatteryProbe.cpp calls __GLOBAL__sub_I_ShengBattery.cpp between pre/postModLoad)
++        late_obj = OUT / 'ShengBattery.late.o'
++        run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_ShengBattery.cpp', obj, late_obj])
++        obj = late_obj
+     if src.stem == 'ShengAudioService':
+         # its metaclass registers late (AudioProbe.cpp publishService calls __GLOBAL__sub_I_ShengAudioService.cpp)
+         late_obj = OUT / 'ShengAudioService.late.o'
+@@ -668,7 +756,7 @@ for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmwa
+         obj = late_obj
+     adsp_objs.append(obj)
+ for src in ('QcomGlink.c', 'QcomMdt.c', 'QcomQmp.c', 'QcomSmem.c', 'QcomSmp2p.c', 'QcomQrtr.c', 'ShengQrtr.c', 'FatVolume.c',
+-            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c'):
++            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c', 'ShengBattmgr.c'):
+     src = ROOT / 'kits/sheng' / src
+     obj = OUT / (src.stem + '.ios17.o')
+     sargs, scmd, k = startup_record['arguments'], [], 0
+diff --git a/ios17/overlay/scripts/data/Ios17LegacyDisplayProbe.cpp b/ios17/overlay/scripts/data/Ios17LegacyDisplayProbe.cpp
+index 39fb367..40ed896 100644
+--- a/ios17/overlay/scripts/data/Ios17LegacyDisplayProbe.cpp
++++ b/ios17/overlay/scripts/data/Ios17LegacyDisplayProbe.cpp
+@@ -96,6 +96,13 @@ __attribute__((noreturn, noinline)) void native_legacy_backend_guard(unsigned sl
+ {
+ 	panic("NativeLegacyDisplay: unimplemented leaf %u object %p caller %p stage %u", slot, object, caller, native_legacy_stage);
+ }
++// An abstract Legacy slot this backend does not implement (NativeLegacyDisplay.cpp LEAF): reported on its first call, answered 0.
++volatile uint32_t native_legacy_unimplemented_calls[400];
++void native_legacy_backend_unimplemented(unsigned slot, void *object, void *caller)
++{
++	if (slot < 400 && native_legacy_unimplemented_calls[slot]++ == 0)
++		printf("NativeLegacyDisplay: unimplemented leaf %u object %p caller %p stage %u: answered 0\n", slot, object, caller, native_legacy_stage);
++}
+ void native_legacy_pm_observed(unsigned stage_, IOReturn status, unsigned long ordinal)
+ {
+ 	native_legacy_pm_stage = stage_; native_legacy_pm_status = status;
+@@ -252,6 +259,7 @@ extern "C" void native_touch_probe(void);
+ // The fuxi buttons (kits/sheng/FuxiButtons.cpp, boot-arg fuxi-buttons=1): PMK8550 PON/RESIN and PM8550 GPIO6 over the SPMI
+ // observer, reported through NativeHidInput report 2.
+ extern "C" void fuxi_buttons_probe(void);
++extern "C" void sheng_bluetooth_probe(void);   // FuxiBluetooth.cpp (QcaBluetooth, fuxi 2026-11-15)
+ extern "C" void fuxi_wifi_probe(void);        // fuxi-wifi=1: read-only look at the WCN7850 path
+ extern "C" void sheng_audio_probe(void);      // sheng-audio=N: speakers, microphone, audio service (AudioProbe.cpp)
+ extern "C" void sheng_adsp_probe(void);       // sheng-adsp=1/2: the audio DSP (AdspProbe.cpp), power.md section 3
+@@ -271,6 +279,7 @@ void native_legacy_display_late_probe(void)
+ 	sheng_adsp_probe();
+ 	sheng_audio_probe();
+ 	fuxi_buttons_probe();
++	sheng_bluetooth_probe();
+ 	fuxi_wifi_probe();
+ 	fuxi_wifi_link_probe();
+ 	// Panel brightness runs before the display-object check: it does not need the GOP nub, and returning early
+diff --git a/ios17/overlay/scripts/make-fuxi-adt.py b/ios17/overlay/scripts/make-fuxi-adt.py
+index 688d899..f42dbc6 100644
+--- a/ios17/overlay/scripts/make-fuxi-adt.py
++++ b/ios17/overlay/scripts/make-fuxi-adt.py
+@@ -268,7 +268,12 @@ def main():
+               # The radio, for launchd: com.apple.wifid.plist (21H461) is _LimitLoadToDeviceTree ["wlan", "marconi-wifi"], so without a
+               # device-tree node of that name wifid is never loaded and Settings shows Wi-Fi greyed out (log 204929: wifid absent all
+               # session). As UniXNU-sheng dts/sheng.dts exports it; FuxiWifiNw21.cpp owns the PCIe resources and fills local-mac-address.
+-              node('wlan', [('compatible', b'qcom,wcn7850\0'), ('device_type', b'wlan\0')])]),
++              node('wlan', [('compatible', b'qcom,wcn7850\0'), ('device_type', b'wlan\0')]),
++              # Bluetooth (fuxi 2026-11-15): docs/zh/porting/bluetooth.md section 4, as UniXNU-sheng exports it. H4 (encoding 1) at
++              # 3.2 Mbaud, four-byte little-endian; FuxiBluetooth.cpp adds local-mac-address and registers the matching "bluetooth"
++              # IOService once this node exists. iOS 17 bluetoothd then opens /dev/uart.bluetooth (qbt_transport.c).
++              node('bluetooth', [('compatible', b'qcom,wcn7850-bt\0'), ('device_type', b'bluetooth\0'),
++                                   ('transport-encoding', struct.pack('<I', 1)), ('transport-speed', struct.pack('<I', 3200000))])]),
+     ])
+     args.output.parent.mkdir(parents=True, exist_ok=True)
+     args.output.write_bytes(tree)
+diff --git a/package/AdspProbe.cpp b/package/AdspProbe.cpp
+index 3e472f6..f2fc440 100644
+--- a/package/AdspProbe.cpp
++++ b/package/AdspProbe.cpp
+@@ -705,6 +705,11 @@ void adspLogThread(void *, wait_result_t) {
+               s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15], native_adsp_text);
+         IOLog("fuxi qrtr: stage %d in %d data %d bad %d out %d refused %d loc %d/%d node %d svcs %d up %d down %d unrouted %d \"%s\"\n",
+               q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10], q[11], q[12], native_qrtr_text);
++        // remote opens answered when their channel registered later, and the last open nobody had registered (the name list above holds 96 bytes)
++        char lastUnknown[QCOM_GLINK_NAME];
++        memcpy(lastUnknown, (const void *)gGlink.last_unknown, sizeof lastUnknown);
++        lastUnknown[sizeof lastUnknown - 1] = 0;
++        IOLog("fuxi glink: replayed %u last unknown \"%s\" clients %u\n", gGlink.replayed, lastUnknown, gClientCount);
+     }
+ }
+ }  // namespace
+diff --git a/package/AppsSmmuLock.h b/package/AppsSmmuLock.h
+new file mode 100644
+index 0000000..e3868d4
+--- /dev/null
++++ b/package/AppsSmmuLock.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef SHENG_APPS_SMMU_LOCK_H
++#define SHENG_APPS_SMMU_LOCK_H
++extern "C" bool sm8550_apps_smmu_lock(void) __attribute__((weak_import));
++extern "C" void sm8550_apps_smmu_unlock(void) __attribute__((weak_import));
++class AppsSmmuLock {
++    bool held;
++public:
++    AppsSmmuLock():held(sm8550_apps_smmu_lock && sm8550_apps_smmu_unlock && sm8550_apps_smmu_lock()) {}
++    ~AppsSmmuLock(){if(held)sm8550_apps_smmu_unlock();}
++    bool ready() const {return held || !sm8550_apps_smmu_lock;}
++    AppsSmmuLock(const AppsSmmuLock&)=delete;
++    AppsSmmuLock& operator=(const AppsSmmuLock&)=delete;
++};
++#endif
+diff --git a/package/BatteryProbe.cpp b/package/BatteryProbe.cpp
+new file mode 100644
+index 0000000..34ea4c0
+--- /dev/null
++++ b/package/BatteryProbe.cpp
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// Starts the battery power source (ShengBattery.cpp) whenever the audio DSP runs (sheng-adsp=2: the values come from the DSP's battery
++// manager); sheng-battery=0 leaves it off, sheng-battery=1 asks for it without the DSP argument. It registers that file's classes with the
++// kernel's module (its static initializer, which the build takes out of __mod_init_func), then creates the service, which is published
++// once the first refresh is complete.
++#include <IOKit/IOService.h>
++#include <libkern/OSKextLib.h>
++#include <mach/kmod.h>
++#include <pexpert/pexpert.h>
++
++extern kmod_info_t g_kernel_kmod_info;
++extern "C" void native_battery_static_init(void) __asm__("__GLOBAL__sub_I_ShengBattery.cpp");
++extern "C" void sheng_battery_start(void);
++// See ShengBattery.cpp for the meaning of each entry.
++extern "C" {volatile int32_t native_battery_stats[16];}
++
++// fuxi: the [battery] and [charger] rows of sheng's boot log, as "fuxi battery:" kernel log rows whenever a value changes (every 2 s
++// for 4 minutes, then every 30 s; one row every 5 minutes regardless).
++extern "C" {extern volatile int32_t native_battery_raw[10]; extern volatile int32_t native_charger_stats[16];}
++extern "C" {extern volatile uint64_t armcpu_sgi_unexpected __attribute__((weak_import));
++            extern volatile uint32_t armcpu_sgi_unexpected_id __attribute__((weak_import)), armcpu_sgi_unexpected_core __attribute__((weak_import)),
++                                     armcpu_sgi_unexpected_mask __attribute__((weak_import));}
++#include <IOKit/IOLib.h>
++#include <kern/thread.h>
++#include <string.h>
++static void fuxiBatteryLog(void *, wait_result_t) {
++    int32_t last[16] = {}, lastC[16] = {};
++    for (unsigned tick = 0;; ++tick) {
++        IOSleep(tick < 120 ? 2000 : 30000);
++        int32_t s[16], c[16];
++        for (unsigned i = 0; i < 16; ++i) {s[i] = native_battery_stats[i]; c[i] = native_charger_stats[i];}
++        if (!memcmp(s, last, sizeof s) && !memcmp(c, lastC, sizeof c) && tick % (tick < 120 ? 15 : 2)) continue;
++        memcpy(last, s, sizeof s); memcpy(lastC, c, sizeof c);
++        IOLog("fuxi battery: stage %d pct %d mV %d mA %d temp %d flags %#x | %d %d %d %d %d %d %d %d %d %d\n", s[0], s[1], s[2], s[3], s[4], s[5],
++              s[6], s[7], s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]);
++        IOLog("fuxi battery raw: %d %d %d %d %d %d %d %d %d %d\n", native_battery_raw[0], native_battery_raw[1], native_battery_raw[2],
++              native_battery_raw[3], native_battery_raw[4], native_battery_raw[5], native_battery_raw[6], native_battery_raw[7],
++              native_battery_raw[8], native_battery_raw[9]);
++        if (&armcpu_sgi_unexpected)
++            IOLog("fuxi sgi: unexpected %llu last id %u core %u ids %#x\n", (unsigned long long)armcpu_sgi_unexpected, armcpu_sgi_unexpected_id,
++                  armcpu_sgi_unexpected_core, armcpu_sgi_unexpected_mask);
++        IOLog("fuxi charger: %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9],
++              c[10], c[11], c[12], c[13], c[14], c[15]);
++    }
++}
++extern "C" void sheng_battery_probe(void) {
++    unsigned enabled = 0, adsp = 0;
++    if (!PE_parse_boot_argn("sheng-battery", &enabled, sizeof enabled)) enabled = PE_parse_boot_argn("sheng-adsp", &adsp, sizeof adsp) && adsp == 2;
++    if (enabled != 1 || native_battery_stats[0]) return;
++    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
++    if (!handle) {native_battery_stats[0] = -10; return;}
++    native_battery_static_init();
++    if (OSMetaClass::postModLoad(handle)) {native_battery_stats[0] = -11; return;}
++    sheng_battery_start();
++    thread_t thread;
++    if (kernel_thread_start(fuxiBatteryLog, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
++}
+diff --git a/package/BluetoothFirmware.h b/package/BluetoothFirmware.h
+new file mode 100644
+index 0000000..227b4a2
+--- /dev/null
++++ b/package/BluetoothFirmware.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef SHENG_BLUETOOTH_FIRMWARE_H
++#define SHENG_BLUETOOTH_FIRMWARE_H
++#include <stddef.h>
++#include <stdint.h>
++/* stage-bluetooth-firmware.py consumes this exact addon-relative prefix. */
++#define SHENG_BT_FIRMWARE_PREFIX "firmware/qca"
++#define SHENG_BT_FIRMWARE_ROOT "/private/var/ngpu/" SHENG_BT_FIRMWARE_PREFIX
++#ifdef __cplusplus
++extern "C" {
++#endif
++int sheng_bt_firmware_read(const char *name, uint8_t **data, size_t *size);
++void sheng_bt_firmware_release(uint8_t *data, size_t size);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/package/BootWatchdogPolicy.c b/package/BootWatchdogPolicy.c
+index 91fbe1e..ca467ff 100644
+--- a/package/BootWatchdogPolicy.c
++++ b/package/BootWatchdogPolicy.c
+@@ -122,7 +122,8 @@ static int sheng_boot_data_skel(proc_t p,uint64_t scratch) {
+ // -[UIKeyboardInputMode dictationLanguage] (each keyboard layout, each AFDictationConnection availability callback) falls into it and
+ // recomputes every input mode through TextInput (TIGetDefaultInputModesForLanguage): the app's main thread at 100 % while typing
+ // (zz-hot-sampler inclusive frames, 2026-11-13). The managed layer only answers reads of this key and leaves the user's own
+-// com.apple.Preferences alone; the file is written once, when absent.
++// com.apple.Preferences alone; the file is rewritten at every boot. Keys: every spelling of the English and Chinese languages a
++// keyboard may report (a missing one takes the slow path again; the user switched the system language on 2026-11-14).
+ static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
+  int on=0;int32_t result=0;
+  if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
+@@ -133,14 +134,14 @@ static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
+   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+   "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+   "<plist version=\"1.0\"><dict><key>DictationLanguagesEnabled</key><dict>"
+-  "<key>en_US</key><true/><key>en</key><true/><key>zh-Hans_CN</key><true/><key>zh_CN</key><true/><key>zh-Hans</key><true/>"
++  "<key>en_US</key><true/><key>en</key><true/><key>en_CN</key><true/><key>en_GB</key><true/><key>en-US</key><true/><key>en-CN</key><true/><key>zh-Hans_CN</key><true/><key>zh_Hans_CN</key><true/><key>zh_Hans-CN</key><true/><key>zh-Hans-CN</key><true/><key>zh_CN</key><true/><key>zh-CN</key><true/><key>zh-Hans</key><true/><key>zh_Hans</key><true/><key>zh</key><true/><key>yue_CN</key><true/><key>yue-Hant_CN</key><true/><key>zh-Hant_TW</key><true/><key>zh-Hant_HK</key><true/><key>zh_TW</key><true/><key>zh_HK</key><true/>"
+   "</dict></dict></plist>\n";
+  int last=0;unsigned written=0,present=0;
+  for(unsigned i=0;i<sizeof(paths)/sizeof(paths[0]);++i) {
+   int error=copyout(paths[i],scratch,strlen(paths[i])+1);
+-  struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0644};
++  // Rewritten every boot (2026-11-14): the language list grew, and a file from an earlier boot keeps the old one.
++  struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,.mode=0644};
+   if(!error)error=open(p,&op,&result);
+-  if(error==EEXIST){++present;continue;}
+   if(!error) {
+    int fd=result;
+    error=copyout(body,scratch+0x200,sizeof(body)-1);
+@@ -156,6 +157,27 @@ static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
+  return last;
+ }
+ 
++// fuxi 2026-11-14 (experiment): GPU stalls (one hung FitnessWidget submission froze the UI: the reset left backboardd with a lost
++// device and Turnip wrote through a NULL command stream) sat at Turnip's GMEM resolve. TU_DEBUG=sysmem for every Metal process
++// (/private/var/ngpu/tu_debug, read by NativeAdrenoMetalPlugin.mm) renders without GMEM tiles and resolves. Rewritten every boot.
++static int fuxi_boot_tu_debug(proc_t p,uint64_t scratch) {
++ int32_t result=0;
++ static const char dir[]="/private/var/ngpu";
++ static const char path[]="/private/var/ngpu/tu_debug";
++ static const char body[]="\n";   // 2026-11-15: sysmem did not stop the stalls; an empty TU_DEBUG (the file stays on Data)
++ int error=copyout(dir,scratch,sizeof(dir));
++ if(!error){struct mkdir_args md={.path=scratch,.mode=0755};error=mkdir(p,&md,&result);if(error==EEXIST)error=0;}
++ if(!error)error=copyout(path,scratch,sizeof(path));
++ int fd=-1;
++ if(!error){struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,.mode=0644};error=open(p,&op,&result);if(!error)fd=result;}
++ if(!error)error=copyout(body,scratch+0x200,sizeof(body)-1);
++ if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
++  if(!error && n!=(user_ssize_t)(sizeof(body)-1))error=EIO;}
++ if(fd>=0){struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;}
++ printf("fuxi tu_debug: cleared rc %d\n",error);
++ return error;
++}
++
+ // One comma-separated label at *c into the policy as a disabled key; advances *c past it.
+ static int append_job(const char **cursor) {
+  const char *c=*cursor,*e=c;while(*e && *e!=',')++e;
+@@ -190,9 +212,18 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
+  (void)sheng_boot_data_skel(p,scratch);
+  (void)sheng_boot_keychains(p,scratch);
+  (void)fuxi_boot_dictation_prefs(p,scratch);
+- if(!enabled && !jobs[0] && !lite)return 0;
++ (void)fuxi_boot_tu_debug(p,scratch);
++ // fuxi (2026-11-14): fairplayd.H2 needs the Apple AES engine's UID/GID keys (FairPlayIOKit generateSeed through
++ // IOAESAccelerator::performAES), which this SoC does not have, so it exits at every start without checking in its Mach
++ // services; launchd keeps com.apple.fairplayd.versioned, locationd's migration call waits on it forever and data
++ // migration (datamigrator) never finishes. Disabled, the lookup fails at once and the migration plugins return.
++ // sheng-fairplay=1 leaves it enabled.
++ int fairplay=0;PE_parse_boot_argn("sheng-fairplay",&fairplay,sizeof(fairplay));
++ const int no_fairplay=fairplay!=1;
++ if(!enabled && !jobs[0] && !lite && !no_fairplay)return 0;
+  policy[0]=0;strlcat(policy,policy_head,sizeof(policy));
+  if(enabled)strlcat(policy,policy_watchdogd,sizeof(policy));
++ if(no_fairplay)strlcat(policy,"<key>com.apple.fairplayd.H2</key><true/>",sizeof(policy));
+  if(lite)for(const char *c=lite_jobs;*c;) {if((error=append_job(&c)))return error;}
+  for(const char *c=jobs;*c;) {if((error=append_job(&c)))return error;}
+  strlcat(policy,policy_tail,sizeof(policy));
+diff --git a/package/FuxiBluetooth.cpp b/package/FuxiBluetooth.cpp
+new file mode 100644
+index 0000000..795f056
+--- /dev/null
++++ b/package/FuxiBluetooth.cpp
+@@ -0,0 +1,529 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IODeviceMemory.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IODeviceTreeSupport.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSString.h>
++#include <kern/thread.h>
++#include <kern/clock.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
++#include <stdarg.h>
++#include "qbt.h"
++#include "qbt_geni.h"
++#include "qbt_transport.h"
++#include "Sm8550GeniUart.h"
++#include "SmmuBypass.h"
++#include "AppsSmmuLock.h"
++#include "WcnPower.h"
++#include "BluetoothFirmware.h"
++
++extern "C" int armcpu_spi_attach(uint32_t,bool,void(*)(void *),void *,uint32_t *,uint64_t *);
++// fuxi: ArmCpu has neither armcpu_spi_share nor armcpu_spi_mask (no RX-wake interrupt, a flag masks the UART handler).
++extern "C" volatile int native_gpu_addon_stage;
++extern "C" {
++volatile uint64_t native_bluetooth_stats[32];
++uint8_t native_bluetooth_boot_rx[512];
++volatile uint32_t native_bluetooth_boot_rx_length;
++uint8_t native_bluetooth_boot_tail[256];
++volatile uint32_t native_bluetooth_boot_tail_length;
++/* log-bluetooth=2: pins before TX, RX bytes before TX, then pins, engine status and download reports when startup returns. */
++volatile uint32_t native_bluetooth_boot_state[12];
++/* log-bluetooth=2: live pid and starts seen for bluetoothd, then for BlueTool. */
++volatile uint32_t native_bluetooth_processes[4];
++/* log-bluetooth=2: printable runs in controller output, which carry its assert text. */
++char *volatile native_bluetooth_boot_text;
++volatile uint32_t native_bluetooth_boot_text_length;
++}
++namespace {
++struct Region {IOMemoryMap *map;volatile uint32_t *va;};
++struct Bluetooth {
++    Region gcc,uart,wrapper,tlmm,smmu;
++    IOService *radio;
++    IOBufferMemoryDescriptor *dma;
++    struct smmu_plan domain;
++    uint64_t dma_address;
++    struct qbt_geni geni;
++    struct qbt *core;
++    uint64_t rx_sequence;
++    uint32_t pending,rx_wake,power_request,started;
++    unsigned log,baud;
++    uint8_t address[6];
++    bool resources,powered,gated,clocked,serial_irq,wake_irq,service,initializing,loopback;
++    uint8_t loop_rx[16];unsigned loop_length;
++} bt;
++constexpr unsigned kRx=79,kBtEnable=81,kSwCtrl=82;
++constexpr uint32_t kBtEnableCfg=(7u<<6)|(1u<<9); // bt-en-pins: 16 mA, no bias, output
++constexpr uint32_t kDmaBytes=32768;
++bool map(Region &r,uint64_t base,size_t bytes) {
++    if(r.va)return true;
++    IODeviceMemory *memory=IODeviceMemory::withRange(base,bytes);
++    r.map=memory?memory->map(kIOMapAnywhere|kIOMapInhibitCache):nullptr;
++    if(memory)memory->release();r.va=r.map?reinterpret_cast<volatile uint32_t *>(r.map->getVirtualAddress()):nullptr;
++    return r.va!=nullptr;
++}
++void barrier(){__asm__ volatile("dsb sy" ::: "memory");}
++uint64_t nowNs(void *){uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns;}
++void wake(void *){__atomic_store_n(&bt.pending,1u,__ATOMIC_RELEASE);thread_wakeup((event_t)&bt.pending);}
++void waitUntil(void *,uint64_t deadline) {
++    if(__atomic_exchange_n(&bt.pending,0u,__ATOMIC_ACQ_REL))return;
++    if(deadline==UINT64_MAX)assert_wait((event_t)&bt.pending,THREAD_UNINT);
++    else {uint64_t absolute;nanoseconds_to_absolutetime(deadline,&absolute);assert_wait_deadline((event_t)&bt.pending,THREAD_UNINT,absolute);}
++    if(__atomic_exchange_n(&bt.pending,0u,__ATOMIC_ACQ_REL))clear_wait(current_thread(),THREAD_AWAKENED);
++    else thread_block(THREAD_CONTINUE_NULL);
++}
++uint32_t urd(void *,uint32_t reg){return bt.uart.va[reg/4];}
++void uwr(void *,uint32_t reg,uint32_t value){bt.uart.va[reg/4]=value;barrier();}
++uint32_t grd(void *,uint32_t reg){return bt.gcc.va[reg/4];}
++void gwr(void *,uint32_t reg,uint32_t value){bt.gcc.va[reg/4]=value;barrier();}
++void delay(void *,unsigned us){IODelay(us);}
++void dmaBarrier(void *){barrier();}
++void dmaSync(void *,const struct qbt_dma_buffer *buffer,size_t bytes,bool device,bool tx) {
++    // fuxi port of UniXNU-sheng package/BluetoothProbe.cpp (ce0c600). Match the board's touch path: cached RAM behind the firmware bypass bank.
++    if(bytes && (device || !tx)) {
++        uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
++        size_t line=4u<<((ctr>>16)&15);
++        uintptr_t at=reinterpret_cast<uintptr_t>(buffer->bytes)&~(line-1);
++        uintptr_t end=reinterpret_cast<uintptr_t>(buffer->bytes)+bytes;
++        for(;at<end;at+=line) {
++            if(tx)__asm__ volatile("dc cvac, %0"::"r"(at):"memory");
++            else if(device)__asm__ volatile("dc civac, %0"::"r"(at):"memory");
++            else __asm__ volatile("dc ivac, %0"::"r"(at):"memory");
++        }
++    }
++    barrier();
++}
++uint32_t srd(void *,uint32_t reg){return bt.smmu.va[reg/4];}
++void swr(void *,uint32_t reg,uint32_t value){bt.smmu.va[reg/4]=value;barrier();}
++volatile bool irqMasked=true;
++void irqMask(void *,bool masked) {__atomic_store_n(&irqMasked,masked,__ATOMIC_RELEASE);}
++void serialIrq(void *){if(!__atomic_load_n(&irqMasked,__ATOMIC_ACQUIRE))qbt_geni_irq(&bt.geni);}
++void pin(unsigned gpio,uint32_t cfg,int output=-1) {
++    if(output>=0)bt.tlmm.va[(gpio*4096+4)/4]=output?2:0;
++    bt.tlmm.va[gpio*4096/4]=cfg;barrier();
++}
++void rxIrq(void *) {
++    volatile uint32_t *r=bt.tlmm.va+kRx*4096/4;
++    if(!(r[3]&1))return;
++    r[2]&=~1u;r[3]=0;barrier();
++    __atomic_store_n(&bt.rx_wake,1u,__ATOMIC_RELEASE);wake(nullptr);
++}
++void disarmRxWake(){bt.tlmm.va[(kRx*4096+8)/4]&=~1u;bt.tlmm.va[(kRx*4096+12)/4]=0;pin(kRx,3u|(1u<<2));}
++bool serialClock(bool enabled) {
++    if(!sm8550_geni_uart14_vote(bt.gcc.va+0x52010/4,enabled))return false;
++    if(!enabled){bt.clocked=false;return true;}
++    for(unsigned i=0;i<1000;i++){if(!(grd(nullptr,0x1e754)&(1u<<31))){bt.clocked=true;return true;}IODelay(1);}
++    return false;
++}
++size_t rxBytes(void *,const uint8_t *bytes,size_t n) {
++    if(bt.loopback) {
++        size_t count=sizeof(bt.loop_rx)-bt.loop_length;if(count>n)count=n;
++        memcpy(bt.loop_rx+bt.loop_length,bytes,count);bt.loop_length+=(unsigned)count;
++        return n;
++    }
++    if(bt.log>=2 && bt.initializing) {
++        uint32_t at=__atomic_load_n(&native_bluetooth_boot_rx_length,__ATOMIC_RELAXED);
++        size_t count=sizeof(native_bluetooth_boot_rx)-at;if(count>n)count=n;
++        if(count) {
++            memcpy(native_bluetooth_boot_rx+at,bytes,count);
++            __atomic_store_n(&native_bluetooth_boot_rx_length,at+(uint32_t)count,__ATOMIC_RELEASE);
++        }
++        static char run[96];static unsigned runLength;
++        for(size_t i=0;i<n;i++) {
++            uint8_t c=bytes[i];
++            if(c>=32 && c<127 && runLength<sizeof(run)-1){run[runLength++]=(char)c;continue;}
++            if(runLength>=12 && memchr(run,' ',runLength)) {
++                uint32_t at=native_bluetooth_boot_text_length;
++                if(native_bluetooth_boot_text && at+runLength+1<8192) {
++                    memcpy(native_bluetooth_boot_text+at,run,runLength);native_bluetooth_boot_text[at+runLength]='|';
++                    __atomic_store_n(&native_bluetooth_boot_text_length,at+runLength+1,__ATOMIC_RELEASE);
++                }
++            }
++            runLength=0;
++        }
++        uint32_t tail=__atomic_load_n(&native_bluetooth_boot_tail_length,__ATOMIC_RELAXED);
++        for(size_t i=0;i<n;i++)native_bluetooth_boot_tail[(tail+i)%sizeof(native_bluetooth_boot_tail)]=bytes[i];
++        __atomic_store_n(&native_bluetooth_boot_tail_length,tail+(uint32_t)n,__ATOMIC_RELEASE);
++    }
++    bt.rx_sequence+=n;return qbt_receive(bt.core,bytes,n);
++}
++size_t nativeRx(void *,const uint8_t *bytes,size_t n){return qbt_transport_receive(bytes,(uint32_t)n);}
++size_t writeUart(void *,const uint8_t *p,size_t n){return qbt_geni_write(&bt.geni,p,n);}
++bool drained(void *){return bt.gated || qbt_geni_drained(&bt.geni);}
++int flow(void *,bool enabled){qbt_geni_set_flow(&bt.geni,enabled);return 0;}
++void pump(void *) {
++    if(bt.log>=2 && bt.initializing) {
++        struct qbt_stats stats;qbt_get_stats(bt.core,&stats);
++        native_bluetooth_stats[3]=stats.tx_bytes;native_bluetooth_stats[4]=stats.rx_bytes;
++        native_bluetooth_boot_state[10]=(uint32_t)stats.tlv_acks|((uint32_t)stats.tlv_sent<<16);
++        native_bluetooth_boot_state[11]=(uint32_t)stats.hardware_errors|((uint32_t)stats.last_hardware_error<<8)|((uint32_t)stats.tlv_final_status<<16);
++    }
++    if(__atomic_exchange_n(&bt.rx_wake,0u,__ATOMIC_ACQ_REL) && bt.powered) {
++        qbt_rx_wake(bt.core);
++        /* The GPIO consumed the first IBS wake byte while the UART was gated. */
++        const uint8_t wakeByte=0xfd;(void)qbt_receive(bt.core,&wakeByte,1);
++    }
++    if(!bt.gated) {
++        if(qbt_geni_service(&bt.geni))wake(nullptr);
++        if(bt.geni.state==QBT_GENI_FAILED)qbt_fail(bt.core,bt.geni.error);
++    }
++}
++int quiesce() {
++    uint64_t end=nowNs(nullptr)+40000000ULL;
++    for(;;) {
++        int e=qbt_geni_quiesce(&bt.geni);if(!e)return 0;
++        if(e!=-EINPROGRESS && e!=-EBUSY)return e;
++        pump(nullptr);if(bt.geni.state==QBT_GENI_STOPPED)return 0;
++        if(nowNs(nullptr)>=end)return -ETIMEDOUT;
++        uint64_t next=qbt_geni_deadline(&bt.geni);if(next>end)next=end;waitUntil(nullptr,next);
++    }
++}
++int clockVote(void *,bool enabled) {
++    // fuxi: no RX-wake interrupt (ArmCpu cannot share the TLMM summary): the UART stays clocked; a sleep vote is answered
++    // without gating, and the controller's IBS wake byte reaches the running engine.
++    if(!enabled)return 0;
++    if(enabled) {
++        if(!bt.gated)return 0;
++        if(!serialClock(true))return -EIO;
++        disarmRxWake();IODelay(10);bt.gated=false;
++        return qbt_geni_resume(&bt.geni);
++    }
++    if(bt.gated)return 0;
++    uint64_t sequence=bt.rx_sequence;
++    int e=quiesce();if(e)return e;
++    if(sequence!=bt.rx_sequence || qbt_transport_tx_pending()) {qbt_geni_resume(&bt.geni);return -EBUSY;}
++    volatile uint32_t *r=bt.tlmm.va+kRx*4096/4;
++    r[2]=0;r[3]=0;pin(kRx,3u);
++    r[2]=(3u<<5)|(2u<<2)|(1u<<4)|1u;barrier();
++    if(!(r[1]&1) || (r[3]&1)) {disarmRxWake();qbt_geni_resume(&bt.geni);return -EBUSY;}
++    /* Leave RTS ready so the controller can send its IBS wake indication. */
++    uwr(nullptr,0x2ac,0x80000001u);
++    bt.gated=true;
++    if(!serialClock(false)){bt.gated=false;disarmRxWake();qbt_geni_resume(&bt.geni);return -EIO;}
++    return 0;
++}
++int setRate(void *,uint32_t baud) {
++    int e=quiesce();if(e)return e;
++    uint32_t hz=0;struct sm8550_geni_clock_io io={nullptr,grd,gwr,delay};
++    e=sm8550_geni_uart14_source(&io,baud,&hz);
++    if(!e)e=qbt_geni_set_rate(&bt.geni,baud,hz,16);
++    if(!e)e=qbt_geni_resume(&bt.geni);
++    if(!e)bt.baud=baud;return e;
++}
++void *allocate(void *,size_t n){return IOMallocData(n);}
++void release(void *,void *p,size_t n){IOFreeData(p,n);}
++int firmware(void *,const char *name,const uint8_t **data,size_t *size) {
++    uint8_t *bytes=nullptr;int e=sheng_bt_firmware_read(name,&bytes,size);*data=bytes;return -e;
++}
++void firmwarePut(void *,const uint8_t *data,size_t size){sheng_bt_firmware_release(const_cast<uint8_t *>(data),size);}
++void log(void *,int level,const char *line){if(level<=3 || bt.log)printf("[bluetooth] %s\n",line);}
++bool address() {
++    IORegistryEntry *chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
++    OSData *id=chosen?OSDynamicCast(OSData,chosen->getProperty("unique-chip-id")):nullptr;
++    if(!id || id->getLength()<8){if(chosen)chosen->release();return false;}
++    uint64_t hash=0xcbf29ce484222325ULL;
++    static const char domain[]="unixnu-bluetooth";
++    for(unsigned i=0;i<sizeof(domain)-1;i++)hash=(hash^(uint8_t)domain[i])*0x100000001b3ULL;
++    const uint8_t *seed=static_cast<const uint8_t *>(id->getBytesNoCopy());
++    bool nonzero=false;
++    for(unsigned i=0;i<id->getLength();i++){nonzero|=seed[i]!=0;hash=(hash^seed[i])*0x100000001b3ULL;}
++    bool published=false;
++    if(nonzero) {
++        for(unsigned i=0;i<6;i++)bt.address[i]=(uint8_t)(hash>>(i*8));
++        bt.address[0]=(bt.address[0]&0xfe)|2;
++        IORegistryEntry *node=IORegistryEntry::fromPath("/arm-io/bluetooth",gIODTPlane);
++        OSData *encoding=node?OSDynamicCast(OSData,node->getProperty("transport-encoding")):nullptr;
++        OSData *speed=node?OSDynamicCast(OSData,node->getProperty("transport-speed")):nullptr;
++        uint32_t wire=0,baud=0;
++        if(encoding && encoding->getLength()==4)memcpy(&wire,encoding->getBytesNoCopy(),4);
++        if(speed && speed->getLength()==4)memcpy(&baud,speed->getBytesNoCopy(),4);
++        if(node && wire==1 && baud==3200000) {
++            published=chosen->setProperty("mac-address-bluetooth0",bt.address,6) &&
++                node->setProperty("local-mac-address",bt.address,6);
++            if(published && !bt.radio) {
++                IOService *radio=new IOService;
++                if(radio && radio->init()) {
++                    radio->setName("bluetooth");
++                    published=radio->setProperty("device_type","bluetooth") &&
++                        radio->setProperty("transport-encoding",encoding) &&
++                        radio->setProperty("transport-speed",speed) &&
++                        radio->setProperty("local-mac-address",bt.address,6);
++                    IOService *provider=IOService::getPlatform();
++                    if(published && provider && radio->attach(provider)) {
++                        bt.radio=radio;radio->registerService();printf("[bluetooth] IOService bluetooth registered (H4, 3.2 Mbaud)\n");
++                        uint32_t hwid=1;PE_parse_boot_argn("fuxi-bt-hwid",&hwid,sizeof(hwid));
++                        IOService *bus=hwid?new IOService:nullptr;
++                        OSDictionary *ids=bus?OSDictionary::withCapacity(2):nullptr;
++                        OSNumber *chip=ids?OSNumber::withNumber(4387ULL,64):nullptr;
++                        OSString *step=chip?OSString::withCString("c2"):nullptr;
++                        if(step && bus->init() && ids->setObject("C",chip) && ids->setObject("s",step)) {
++                            bus->setName("AppleBCMWLANBusInterfacePCIe");
++                            if(bus->setProperty("HWIdentifiers",ids) && bus->attach(provider)) {
++                                bus->registerService();printf("[bluetooth] HWIdentifiers nub registered (BCM4387 c2)\n");
++                            } else {bus->release();}
++                        } else if(bus) {bus->release();}
++                        if(ids)ids->release();if(chip)chip->release();if(step)step->release();
++                    } else {published=false;radio->release();}
++                } else {published=false;if(radio)radio->release();}
++            }
++        }
++        if(node)node->release();
++        if(!node)published=true;   // fuxi: no /arm-io/bluetooth yet: the controller still starts with this address
++    }
++    chosen->release();return published;
++
++}
++int resources() {
++    if(bt.resources)return 0;
++    if(!map(bt.gcc,0x100000,0x80000) || !map(bt.uart,SM8550_UART14_BASE,0x4000) ||
++        !map(bt.wrapper,SM8550_QUP2_BASE,0x2000) || !map(bt.tlmm,0xf100000,0x60000) || !map(bt.smmu,0x15000000,0xd0000))return -ENOMEM;
++    if(!address())return -ENOENT;
++    const IOOptionBits options=static_cast<IOOptionBits>(kIODirectionInOut)|static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous)|static_cast<IOOptionBits>(kIOMemoryMapperNone);
++    if(!bt.dma)bt.dma=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,options,kDmaBytes,4096);
++    if(!bt.dma)return -ENOMEM;
++    IOByteCount contiguous=0;
++    uint64_t pa=bt.dma->getPhysicalSegment(0,&contiguous,kIOMemoryMapperNone);
++    if(!pa || contiguous<kDmaBytes)return -EIO;
++    AppsSmmuLock guard;if(!guard.ready())return -ENOMEM;
++    struct smmu_io io={nullptr,srd,swr};
++    bt.domain=smmu_plan_bypass(&io,SM8550_QUP2_SID,pa,kDmaBytes);
++    const char *error=bt.domain.error?bt.domain.error:smmu_configure_bypass(&io,&bt.domain,SM8550_QUP2_SID);
++    if(error) {
++        printf("[bluetooth dma] slot=%u bank=%u result=%s\n",bt.domain.slot,bt.domain.bank,error);
++        return -EIO;
++    }
++    bt.dma_address=pa;
++    printf("[bluetooth dma] bypass slot=%u bank=%u pa=%llx bytes=%u\n",bt.domain.slot,bt.domain.bank,pa,kDmaBytes);
++    bt.resources=true;return 0;
++}
++int stopEngine() {
++    irqMask(nullptr,true);uwr(nullptr,0xe1c,0);
++    if((urd(nullptr,0x40)&0x1001) || (urd(nullptr,0xe40)&3)) {
++        uwr(nullptr,0x604,2);uwr(nullptr,0x634,2);
++        unsigned i=0;for(;i<1000 && (urd(nullptr,0x40)&0x1001);i++)IODelay(1);
++        if(i==1000)return -ETIMEDOUT;
++        uwr(nullptr,0xc58,1);uwr(nullptr,0xd58,1);
++        for(i=0;i<1000 && (urd(nullptr,0xe40)&3);i++)IODelay(1);
++        if(i==1000)return -ETIMEDOUT;
++    }
++    uwr(nullptr,0x618,UINT32_MAX);uwr(nullptr,0x648,UINT32_MAX);
++    uwr(nullptr,0xc44,UINT32_MAX);uwr(nullptr,0xd44,UINT32_MAX);
++    bt.geni.state=QBT_GENI_OFF;bt.geni.rx_busy=bt.geni.tx_busy=false;
++    return 0;
++}
++uint32_t linePins() {
++    static const uint8_t pins[]={76,77,78,79,kBtEnable,kSwCtrl};
++    uint32_t bits=0;
++    for(unsigned i=0;i<sizeof(pins);i++)bits|=(bt.tlmm.va[(pins[i]*4096u+4)/4]&1u)<<i;
++    return bits;
++}
++int prepareEngine() {
++    uint8_t *bytes=static_cast<uint8_t *>(bt.dma->getBytesNoCopy());
++    struct qbt_dma_buffer tx={bytes,bt.dma_address,QBT_GENI_TX_SIZE},rx[QBT_GENI_RX_COUNT];
++    for(unsigned i=0;i<QBT_GENI_RX_COUNT;i++)rx[i]={bytes+4096+i*QBT_GENI_RX_SIZE,bt.dma_address+4096+i*QBT_GENI_RX_SIZE,QBT_GENI_RX_SIZE};
++    struct qbt_geni_ops ops={nullptr,urd,uwr,dmaBarrier,dmaSync,nowNs,irqMask,wake,rxBytes};
++    int e=qbt_geni_prepare(&bt.geni,&ops,&tx,rx);if(e)return e;
++    native_bluetooth_stats[14]=5;
++    uint32_t hz;struct sm8550_geni_clock_io clocks={nullptr,grd,gwr,delay};
++    e=sm8550_geni_uart14_source(&clocks,115200,&hz);if(e)return e;
++    e=qbt_geni_set_rate(&bt.geni,115200,hz,16);if(e)return e;
++    bt.baud=115200;return 0;
++}
++/* log-bluetooth=2, controller still in reset: GENI's internal loopback checks DMA,
++ * cache maintenance and packing without the controller. Stats[30] holds received
++ * length, bit 16 sent, bit 17 match; stats[31] the first received bytes. */
++int loopbackCheck() {
++    static const uint8_t pattern[16]={0x01,0x55,0xaa,0x00,0xff,0x04,0x0e,0x7e,0x81,0x42,0x24,0x18,0x10,0x20,0x40,0x80};
++    uwr(nullptr,0x22c,3);bt.loopback=true;bt.loop_length=0;
++    int e=qbt_geni_start(&bt.geni);
++    size_t sent=e?0:qbt_geni_write(&bt.geni,pattern,sizeof(pattern));
++    uint64_t end=nowNs(nullptr)+50000000ULL;
++    while(sent && bt.loop_length<sizeof(pattern) && bt.geni.state==QBT_GENI_RUN && nowNs(nullptr)<end) {
++        if(!qbt_geni_service(&bt.geni))IOSleep(1);
++    }
++    uint64_t first=0;memcpy(&first,bt.loop_rx,bt.loop_length<8?bt.loop_length:8);
++    native_bluetooth_stats[31]=first;
++    native_bluetooth_stats[30]=bt.loop_length|(sent?1u<<16:0)|(bt.loop_length==sizeof(pattern) && !memcmp(bt.loop_rx,pattern,sizeof(pattern))?1u<<17:0);
++    /* Stopping exercises the same cancel path as a baud change. */
++    e=bt.geni.state==QBT_GENI_RUN?quiesce():-EIO;
++    bt.loopback=false;uwr(nullptr,0x22c,0);
++    if(!e && bt.geni.state==QBT_GENI_STOPPED)return 0;
++    e=stopEngine();if(e)return e;
++    return prepareEngine();
++}
++int powerOn() {
++    if(bt.powered)return 0;
++    native_bluetooth_stats[14]=1;int e=resources();if(e)return e;
++    native_bluetooth_stats[14]=2;
++    e=sheng_wcn_power_get(SHENG_WCN_BLUETOOTH);if(e)return -e;
++    bt.powered=true;bt.gated=true;
++    native_bluetooth_stats[14]=3;
++    /* The controller leaves reset with RTS low: UART function only after it has settled. */
++    for(unsigned gpio=76;gpio<=79;gpio++)pin(gpio,gpio>=78?3u:1u);
++    pin(kSwCtrl,1u);pin(kBtEnable,kBtEnableCfg,0);IOSleep(100);
++    if(!sm8550_gcc_update32(bt.gcc.va+0x52018/4,0,1u))return -EIO;
++    for(unsigned i=0;i<1000 && !(grd(nullptr,0)&(1u<<31));i++)IODelay(1);
++    if(!(grd(nullptr,0)&(1u<<31)) || !serialClock(true))return -EIO;
++    bt.gated=false;
++    native_bluetooth_stats[11]=urd(nullptr,0x68);native_bluetooth_stats[12]=bt.wrapper.va[1];
++    native_bluetooth_stats[13]=grd(nullptr,0x52010);native_bluetooth_stats[14]=4;
++    if(bt.wrapper.va[1]<0x20050000)return -ENOTSUP;
++    if(((urd(nullptr,0x68)>>8)&255)!=2)return -ENXIO;
++    e=stopEngine();if(e)return e;
++    e=prepareEngine();if(e)return e;
++    if(!bt.serial_irq){irqMask(nullptr,true);e=armcpu_spi_attach(SM8550_UART14_INTID,false,serialIrq,nullptr,nullptr,nullptr);if(e){printf("[bluetooth] UART interrupt %u attach failed %d\n",SM8550_UART14_INTID,e);return -EIO;}bt.serial_irq=true;}
++    (void)rxIrq;   // fuxi: no RX-wake interrupt (see clockVote)
++    if(bt.log>=2){e=loopbackCheck();if(e)return e;}
++    pin(kBtEnable,kBtEnableCfg,1);IOSleep(60);
++    for(unsigned gpio=76;gpio<=79;gpio++)pin(gpio,(1u<<2)|(gpio>=78?3u:1u));
++    disarmRxWake();
++    e=qbt_geni_start(&bt.geni);if(e)return e;
++    native_bluetooth_stats[14]=6;
++    bt.initializing=true;
++    if(bt.log>=2) {
++        /* Bytes seen here precede the first command: controller output, not a reply. */
++        for(unsigned i=0;i<20;i++){pump(nullptr);IOSleep(1);}
++        native_bluetooth_boot_state[0]=linePins();
++        native_bluetooth_boot_state[1]=__atomic_load_n(&native_bluetooth_boot_rx_length,__ATOMIC_ACQUIRE);
++    }
++    e=qbt_boot(bt.core,3200000,bt.address);bt.initializing=false;
++    if(bt.log>=2) {
++        static const uint32_t regs[]={0x40,0x610,0x640,0xc40,0xd40,0x800,0xd54};
++        native_bluetooth_boot_state[2]=linePins();
++        for(unsigned i=0;i<7;i++)native_bluetooth_boot_state[3+i]=bt.clocked?urd(nullptr,regs[i]):0;
++        struct qbt_stats stats;qbt_get_stats(bt.core,&stats);
++        native_bluetooth_boot_state[10]=(uint32_t)stats.tlv_acks|((uint32_t)stats.tlv_sent<<16);
++        native_bluetooth_boot_state[11]=(uint32_t)stats.hardware_errors|((uint32_t)stats.last_hardware_error<<8)|((uint32_t)stats.tlv_final_status<<16);
++    }
++    return e;
++}
++int powerOff() {
++    if(!bt.powered)return 0;
++    qbt_set_service(bt.core,false);bt.service=false;
++    int e=0;
++    if(bt.geni.state!=QBT_GENI_OFF) {
++        if(bt.gated){int resumed=clockVote(nullptr,true);if(!e)e=resumed;}
++        if(bt.clocked){int shutdown=qbt_shutdown(bt.core);if(!e)e=shutdown;}
++    }
++    if(bt.clocked && bt.geni.state!=QBT_GENI_OFF){int stopped=quiesce();if(!e)e=stopped;}
++    irqMask(nullptr,true);disarmRxWake();pin(kBtEnable,kBtEnableCfg,0);IOSleep(100);
++    int retired=bt.clocked?stopEngine():0;if(!e)e=retired;
++    if(!retired)bt.gated=serialClock(false);
++    bt.powered=false;__atomic_store_n(&bt.rx_wake,0u,__ATOMIC_RELEASE);
++    int released=sheng_wcn_power_put(SHENG_WCN_BLUETOOTH);if(!e)e=-released;
++    return e;
++}
++int requestPower(void *,bool enabled) {
++    uint32_t expected=0;
++    if(!__atomic_compare_exchange_n(&bt.power_request,&expected,enabled?1u:2u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return EBUSY;
++    wake(nullptr);return 0;
++}
++void powerResult(bool enabled,int error) {
++    struct qbt_info info;qbt_get_info(bt.core,&info);
++    native_bluetooth_stats[17]=info.product;native_bluetooth_stats[18]=info.soc;
++    native_bluetooth_stats[19]=((uint32_t)info.rom<<16)|info.patch;
++    if(enabled && !error)native_bluetooth_stats[14]=7;
++    qbt_transport_power_result(enabled,error<0?-error:error,info.firmware,info.baud);
++    native_bluetooth_stats[20]=(unsigned)bt.powered|((unsigned)bt.gated<<1)|((unsigned)bt.clocked<<2);
++    native_bluetooth_stats[21]=sheng_wcn_power_owners();
++    native_bluetooth_stats[0]=error?3:enabled?2:0;native_bluetooth_stats[1]=(uint64_t)(int64_t)error;
++    printf("[bluetooth] power=%u result=%d baud=%u\n",enabled,error,info.baud);
++    if(error && bt.geni.error)printf("[bluetooth uart] error=%d irq=%x/%x/%x/%x\n",bt.geni.error,bt.geni.fault_irq[0],bt.geni.fault_irq[1],bt.geni.fault_irq[2],bt.geni.fault_irq[3]);
++}
++void worker(void *,wait_result_t) {
++    thread_set_thread_name(current_thread(),"sheng-bluetooth");
++    struct qbt_platform ops={nullptr,allocate,release,nowNs,writeUart,drained,setRate,flow,clockVote,pump,waitUntil,nativeRx,firmware,firmwarePut,log};
++    bt.core=qbt_create(&ops);if(!bt.core){native_bluetooth_stats[0]=3;return;}
++    struct qbt_transport_ops transport={nullptr,wake,requestPower};
++    int e=qbt_transport_init(&transport);if(e){native_bluetooth_stats[0]=3;return;}
++    while(native_gpu_addon_stage<1)waitUntil(nullptr,nowNs(nullptr)+10000000ULL);
++    /* Wi-Fi settles WLAN_EN and the shared supplies first; its failure stage is negative. */
++    // fuxi: the Wi-Fi driver powers the shared WCN7850 rails (fuxi-wifi=5); give it its start first.
++    unsigned wifi=0;PE_parse_boot_argn("fuxi-wifi",&wifi,sizeof(wifi));
++    printf("[bluetooth] waiting for Wi-Fi (fuxi-wifi=%u) to hold the WCN rails\n",wifi);
++    {uint64_t end=nowNs(nullptr)+20000000000ULL;while(nowNs(nullptr)<end)waitUntil(nullptr,end);}
++    e=powerOn();if(e)(void)powerOff();powerResult(true,e);
++    uint64_t health=nowNs(nullptr)+1000000000ULL,closeAt=0;
++    for(;;) {
++        uint32_t command=__atomic_exchange_n(&bt.power_request,0u,__ATOMIC_ACQ_REL);
++        if(command){e=command==1?powerOn():powerOff();if(e && command==1)(void)powerOff();powerResult(command==1,e);}
++        if(bt.powered) {
++            pump(nullptr);bool active=qbt_transport_active();
++            if(active!=bt.service){qbt_set_service(bt.core,active);bt.service=active;closeAt=active?0:nowNs(nullptr)+500000000ULL;}
++            uint8_t tx[2048];size_t room=qbt_transmit_capacity(bt.core);
++            if(room>sizeof(tx))room=sizeof(tx);
++            if(room){uint32_t n=qbt_transport_tx_take(tx,(uint32_t)room);if(n && qbt_transmit(bt.core,tx,n))e=-EIO;}
++            qbt_step(bt.core);
++            struct qbt_info info;qbt_get_info(bt.core,&info);
++            if(info.state==3 || bt.geni.state==QBT_GENI_FAILED || (closeAt && nowNs(nullptr)>=closeAt)) {
++                int error=info.state==3?info.error:bt.geni.error;
++                (void)powerOff();powerResult(false,error);closeAt=0;
++            }
++        }
++        uint64_t t=nowNs(nullptr);
++        if(t>=health) {
++            struct qbt_stats stats;qbt_get_stats(bt.core,&stats);
++            native_bluetooth_stats[2]=bt.baud;native_bluetooth_stats[3]=stats.tx_bytes;native_bluetooth_stats[4]=stats.rx_bytes;
++            native_bluetooth_stats[5]=bt.geni.stats.interrupts;native_bluetooth_stats[6]=stats.timeouts;native_bluetooth_stats[7]=stats.clock_sleeps;
++            native_bluetooth_stats[8]=bt.domain.slot;native_bluetooth_stats[9]=bt.domain.bank;
++            native_bluetooth_stats[20]=(unsigned)bt.powered|((unsigned)bt.gated<<1)|((unsigned)bt.clocked<<2);
++            native_bluetooth_stats[21]=sheng_wcn_power_owners();
++            for(unsigned i=0;i<4;i++)native_bluetooth_stats[22+i]=bt.geni.fault_irq[i];
++            native_bluetooth_stats[26]=stats.malformed;native_bluetooth_stats[27]=stats.unmatched_events;
++            native_bluetooth_stats[28]=bt.geni.stats.rx_dma;native_bluetooth_stats[29]=bt.geni.stats.tx_dma;
++            native_bluetooth_stats[15]=bt.geni.stats.line_errors;native_bluetooth_stats[16]=bt.geni.stats.dma_errors;
++            health=t+1000000000ULL;
++        }
++        uint64_t deadline=bt.powered?qbt_deadline(bt.core):UINT64_MAX;
++        uint64_t geni=bt.powered && !bt.gated?qbt_geni_deadline(&bt.geni):UINT64_MAX;
++        if(geni<deadline)deadline=geni;if(health<deadline)deadline=health;if(closeAt && closeAt<deadline)deadline=closeAt;
++        if(!deadline){thread_yield_to_preemption();continue;}
++        waitUntil(nullptr,deadline);
++    }
++}
++}
++struct proc;
++extern "C" {
++void proc_iterate(unsigned,int (*)(struct proc *,void *),void *,int (*)(struct proc *,void *),void *);
++int proc_pid(struct proc *);
++}
++int processSeen(struct proc *process,void *found) {
++    static const char *const names[]={"bluetoothd","BlueTool"};
++    const char *name=proc_best_name(process);
++    for(unsigned i=0;name && i<2;i++)if(!strcmp(name,names[i]))static_cast<int *>(found)[i]=proc_pid(process);
++    return 0;
++}
++void processWatch(void *,wait_result_t) {
++    thread_set_thread_name(current_thread(),"sheng-bluetooth-procs");
++    for(;;) {
++        int found[2]={0,0};
++        proc_iterate(1u|4u,processSeen,found,nullptr,nullptr);
++        for(unsigned i=0;i<2;i++) {
++            if(found[i] && (uint32_t)found[i]!=native_bluetooth_processes[i*2])native_bluetooth_processes[i*2+1]=native_bluetooth_processes[i*2+1]+1;
++            if((uint32_t)found[i]!=native_bluetooth_processes[i*2])   // fuxi: every change, for the USB log
++                printf("[bluetooth proc] %s pid %d (starts %u)\n",i?"BlueTool":"bluetoothd",found[i],native_bluetooth_processes[i*2+1]);
++            native_bluetooth_processes[i*2]=(uint32_t)found[i];
++        }
++        IOSleep(2000);
++    }
++}
++extern "C" void sheng_bluetooth_probe(void) {
++    unsigned enabled=1;   // fuxi: on by default (no boot-argument room); fuxi-bluetooth=0 turns it off
++    PE_parse_boot_argn("fuxi-bluetooth",&enabled,sizeof(enabled));
++    if(!enabled)return;
++    printf("[bluetooth] fuxi probe: QcaBluetooth on QUP2 SE6 (0x898000, INTID %u)\n",SM8550_UART14_INTID);
++    uint32_t expected=0;if(!__atomic_compare_exchange_n(&bt.started,&expected,1u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return;
++    native_bluetooth_stats[0]=1;
++    if(!address()){native_bluetooth_stats[0]=3;native_bluetooth_stats[1]=(uint64_t)(int64_t)-ENOENT;return;}
++    bt.log=2;PE_parse_boot_argn("log-bluetooth",&bt.log,sizeof(bt.log));   // fuxi: diagnostics on by default
++    if(bt.log>=2)native_bluetooth_boot_text=static_cast<char *>(IOMallocData(8192));
++    thread_t thread=nullptr;
++    if(kernel_thread_start(worker,nullptr,&thread)==KERN_SUCCESS)thread_deallocate(thread);
++    else native_bluetooth_stats[0]=3;
++    if(bt.log>=2 && kernel_thread_start(processWatch,nullptr,&thread)==KERN_SUCCESS)thread_deallocate(thread);
++}
+diff --git a/package/FuxiBtFirmware.cpp b/package/FuxiBtFirmware.cpp
+new file mode 100644
+index 0000000..c554a39
+--- /dev/null
++++ b/package/FuxiBtFirmware.cpp
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// fuxi (2026-11-15): Bluetooth firmware (qca/hmtbtfw20.tlv, qca/hmtnv20.*) from the boot GPU addon's bluetooth/<name> entries,
++// the container FuxiWifiFwPart.cpp reads wifi/<name> from ("NGPUADD2", per file u32 path bytes, u32 mode, u64 size, u64 packed
++// size, path and zlib stream each padded to 8). Same interface as UniXNU-sheng's BluetoothFirmware.c.
++#include <IOKit/IOLib.h>
++#include <libkern/zlib.h>
++#include <sys/errno.h>
++#include "BluetoothFirmware.h"
++extern "C" int native_ram_block_gpu_addon(const uint8_t **, uint64_t *) __attribute__((weak_import));
++namespace {
++voidpf zAlloc(voidpf, uInt items, uInt size) {
++    size_t bytes = size_t(items) * size + 16;
++    uint8_t *p = static_cast<uint8_t *>(IOMallocData(bytes));
++    if (!p) return Z_NULL;
++    memcpy(p, &bytes, sizeof bytes);
++    return p + 16;
++}
++void zFree(voidpf, voidpf address) {
++    uint8_t *p = static_cast<uint8_t *>(address) - 16;
++    size_t bytes;
++    memcpy(&bytes, p, sizeof bytes);
++    IOFreeData(p, bytes);
++}
++}
++extern "C" int sheng_bt_firmware_read(const char *name, uint8_t **data, size_t *size) {
++    if (!data || !size || !name) return EINVAL;
++    *data = nullptr; *size = 0;
++    if (strncmp(name, "qca/", 4)) return ENOENT;
++    const uint8_t *addon = nullptr; uint64_t bytes = 0;
++    if (!native_ram_block_gpu_addon || !native_ram_block_gpu_addon(&addon, &bytes)) return EAGAIN;
++    if (bytes < 24 || memcmp(addon, "NGPUADD2", 8)) return ENOENT;
++    uint32_t count; uint64_t total;
++    memcpy(&count, addon + 8, 4); memcpy(&total, addon + 16, 8);
++    if (total != bytes) return ENOENT;
++    char want[64];
++    snprintf(want, sizeof want, "bluetooth/%s", name + 4);
++    uint64_t at = 24;
++    for (uint32_t i = 0; i < count; ++i) {
++        if (bytes - at < 24) return ENOENT;
++        uint32_t nameBytes; uint64_t length, packed;
++        memcpy(&nameBytes, addon + at, 4); memcpy(&length, addon + at + 8, 8); memcpy(&packed, addon + at + 16, 8);
++        at += 24;
++        const uint64_t namePadded = (nameBytes + 7) & ~7ull, packedPadded = (packed + 7) & ~7ull;
++        if (namePadded > bytes - at || packedPadded > bytes - at - namePadded) return ENOENT;
++        const char *entry = reinterpret_cast<const char *>(addon + at);
++        at += namePadded;
++        if (nameBytes == strlen(want) + 1 && !memcmp(entry, want, nameBytes)) {
++            if (!length || length > 4u * 1024 * 1024) return EINVAL;
++            uint8_t *buf = static_cast<uint8_t *>(IOMallocData(length));
++            if (!buf) return ENOMEM;
++            z_stream z; memset(&z, 0, sizeof z);
++            z.zalloc = zAlloc; z.zfree = zFree;
++            z.next_in = const_cast<Bytef *>(addon + at); z.avail_in = uInt(packed);
++            z.next_out = buf; z.avail_out = uInt(length);
++            int r = inflateInit(&z);
++            if (r == Z_OK) {r = inflate(&z, Z_FINISH); inflateEnd(&z);}
++            if (r != Z_STREAM_END || z.total_out != length) {IOFreeData(buf, length); return EIO;}
++            IOLog("[bluetooth] firmware %s from the boot addon (%llu bytes)\n", name, (unsigned long long)length);
++            *data = buf; *size = size_t(length);
++            return 0;
++        }
++        at += packedPadded;
++    }
++    IOLog("[bluetooth] firmware %s not in the boot addon\n", name);
++    return ENOENT;
++}
++extern "C" void sheng_bt_firmware_release(uint8_t *data, size_t size) {if (data) IOFreeData(data, size);}
+diff --git a/package/FuxiButtons.cpp b/package/FuxiButtons.cpp
+index 9e49d7d..13d6260 100644
+--- a/package/FuxiButtons.cpp
++++ b/package/FuxiButtons.cpp
+@@ -4,8 +4,16 @@
+ // Observer sampling plus owned peripheral type/polarity/latch writes; no PDC changes or interrupt takeover.
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++extern "C" void unixnu_sample_task(const char *name) __attribute__((weak_import));
+ #include <IOKit/IODeviceMemory.h>
+ #include <kern/thread.h>
++#include <kern/clock.h>
++#include <sys/types.h>
++#include <sys/fcntl.h>
++#include <sys/vnode.h>
++#include <sys/uio.h>
++#include <sys/kauth.h>
++#include <sys/proc.h>
+ #include <pexpert/pexpert.h>
+ #include "FuxiButtonsCore.h"
+ extern "C" {
+@@ -16,6 +24,10 @@ volatile uint32_t fuxi_spmi_lock_word;
+ void fuxi_spmi_lock(void){while(__atomic_exchange_n(&fuxi_spmi_lock_word,1u,__ATOMIC_ACQUIRE))IODelay(1);}
+ void fuxi_spmi_unlock(void){__atomic_store_n(&fuxi_spmi_lock_word,0u,__ATOMIC_RELEASE);}
+ }
++extern "C" void clock_set_calendar_microtime(clock_sec_t secs, clock_usec_t microsecs);
++volatile uint32_t fuxi_rtc_stats[4];   // 0 state (1 read, 2 set, <0 failed step), 1 seconds, 2 control, 3 apid
++extern "C" int vn_rdwr(enum uio_rw rw, struct vnode *vp, caddr_t base, int len, off_t offset, enum uio_seg segflg, int ioflg,
++    kauth_cred_t cred, int *aresid, proc_t p);
+ namespace {
+ constexpr uint64_t kCore=0xc400000,kCnfg=0xc42d000,kObserver=0xc440000;
+ struct Window {IOMemoryMap *map;volatile uint32_t *va;};
+@@ -48,6 +60,79 @@ int findApid(uint32_t ppid,uint32_t count){
+  }
+  return found;
+ }
++// The system clock starts at 1970 (no calendar source): HTTPS certificate checks fail, so Wi-Fi joins but nothing loads.
++// PMK8550 RTC (fuxi 2026-11-14): read once; the calendar is set only from a plausible Unix time, otherwise only logged.
++int gRtcApid=-1;
++volatile int64_t gPendingOffset;
++volatile bool gOffsetPending;
++const char kOffsetPath[]="/private/var/db/fuxi-rtc-offset";
++// Seconds of the RTC (RTC_RW READ 0x48..0x4b, little endian), read until the low byte did not wrap. Caller holds no lock.
++int rtcSeconds(uint32_t *secs,uint8_t *ctrl){
++ if(gRtcApid<0)return -1;
++ uint8_t b[4]={},c0=0;int rc=0;
++ fuxi_spmi_lock();
++ rc=br_read8(gObs.va,&gArb,gRtcApid,0x46,ctrl);
++ for(int tries=0;tries<3 && !rc;++tries){
++  for(int i=0;i<4 && !rc;++i)rc=br_read8(gObs.va,&gArb,gRtcApid,(uint8_t)(0x48+i),&b[i]);
++  if(!rc)rc=br_read8(gObs.va,&gArb,gRtcApid,0x48,&c0);
++  if(!rc && c0>=b[0])break;
++ }
++ fuxi_spmi_unlock();
++ *secs=(uint32_t)b[0]|((uint32_t)b[1]<<8)|((uint32_t)b[2]<<16)|((uint32_t)b[3]<<24);
++ return rc;
++}
++// The stored offset (calendar seconds minus RTC seconds) as decimal text on the Data volume.
++bool offsetFile(bool write,int64_t *offset){
++ vfs_context_t ctx=vfs_context_create(nullptr);
++ if(!ctx)return false;
++ vnode_t vp=nullptr;
++ int error=vnode_open(kOffsetPath,write?(O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW):(O_RDONLY|O_NOFOLLOW),0644,0,&vp,ctx);
++ bool ok=false;
++ if(!error){
++  char text[32]={};int resid=0;
++  if(write){
++   int n=snprintf(text,sizeof text,"%lld\n",(long long)*offset);
++   error=vn_rdwr(UIO_WRITE,vp,text,n,0,UIO_SYSSPACE,IO_NOAUTH|IO_UNIT,vfs_context_ucred(ctx),&resid,vfs_context_proc(ctx));
++   ok=!error && !resid;
++  }else{
++   error=vn_rdwr(UIO_READ,vp,text,sizeof text-1,0,UIO_SYSSPACE,IO_NOAUTH,vfs_context_ucred(ctx),&resid,vfs_context_proc(ctx));
++   if(!error){
++    int64_t v=0;bool neg=false;const char *c=text;
++    if(*c=='-'){neg=true;++c;}
++    bool digits=false;while(*c>='0'&&*c<='9'){v=v*10+(*c-'0');++c;digits=true;}
++    if(digits){*offset=neg?-v:v;ok=true;}
++   }
++  }
++  vnode_close(vp,write?FWRITE:FREAD,ctx);
++ }
++ vfs_context_rele(ctx);
++ if(!ok)IOLog("fuxi rtc: offset file %s error %d\n",write?"write":"read",error);
++ return ok;
++}
++void readRtc(uint32_t count){
++ // Observer (read) channels need no ownership: the RTC_RW APID belongs to another EE, so findApid (EE0 only) misses it.
++ int apid=-1;
++ for(uint32_t i=0;i<count;++i){
++  uint32_t map=gCore.va[(BR_APID_MAP+4*i)/4];
++  if(map && ((map>>8)&0xff)==0x61)IOLog("fuxi rtc: candidate apid %u ppid %#x owner %u\n",i,(map>>8)&0xfff,gCnfg.va[i]&7u);
++  if(map && ((map>>8)&0xfff)==0x061 && apid<0)apid=(int)i;
++ }
++ fuxi_rtc_stats[3]=(uint32_t)apid;
++ if(apid<0){fuxi_rtc_stats[0]=(uint32_t)-1;IOLog("fuxi rtc: no RTC_RW apid\n");return;}
++ gRtcApid=apid;
++ uint32_t secs=0;uint8_t ctrl=0;
++ int rc=rtcSeconds(&secs,&ctrl);
++ fuxi_rtc_stats[1]=secs;fuxi_rtc_stats[2]=ctrl;
++ if(rc){fuxi_rtc_stats[0]=(uint32_t)-2;IOLog("fuxi rtc: read error %d\n",rc);return;}
++ int64_t offset=0;
++ const bool stored=offsetFile(false,&offset);
++ const int64_t calendar=(int64_t)secs+(stored?offset:0);
++ const bool plausible=(ctrl&0x80) && calendar>=1704067200 && calendar<2208988800;   // 2024-01-01 .. 2040-01-01
++ if(plausible)clock_set_calendar_microtime((clock_sec_t)calendar,0);
++ fuxi_rtc_stats[0]=plausible?2u:1u;
++ IOLog("fuxi rtc: apid %d ctrl %#x rtc %u offset %lld (%s) -> %s\n",apid,(unsigned)ctrl,secs,(long long)offset,
++     stored?"stored":"none",plausible?"calendar set":"left alone");
++}
+ bool setup(){
+  gArb.ee=0;
+  if(!mapWindow(gCore,kCore,0x3000)||!mapWindow(gCnfg,kCnfg,0x4000)){fail(1,-12);return false;}
+@@ -73,6 +158,7 @@ bool setup(){
+  }
+  fuxi_buttons_stats[0]=3;
+  IOLog("[FuxiButtons] ready mode=edge-poll2ms version=%x apids=%u pon=%d gpio=%d\n",version,count,gPon,gGpio);
++ readRtc(count);
+  return true;
+ }
+ void buttonsThread(void *,wait_result_t){
+@@ -111,7 +197,14 @@ void buttonsThread(void *,wait_result_t){
+    IOLog("[FuxiButtons] report mask=%x pon=%x gpio=%x error=%d\n",mask,(unsigned)pon,(unsigned)gpio,rc);
+    last=mask;seen=generation;
+   }
++  if((rounds+1)%15000==0 && unixnu_sample_task)unixnu_sample_task("bluetoothd");
+   if(++rounds%15000==0)IOLog("[FuxiButtons] alive polls=%d reports=%d mask=%x errors=%d sink=%u\n",(int)fuxi_buttons_stats[1],(int)fuxi_buttons_stats[2],mask,(int)fuxi_buttons_stats[6],sink?1u:0u);
++  if(__atomic_load_n(&gOffsetPending,__ATOMIC_ACQUIRE)){
++   __atomic_store_n(&gOffsetPending,false,__ATOMIC_RELEASE);
++   int64_t offset=gPendingOffset;
++   const bool ok=offsetFile(true,&offset);
++   IOLog("fuxi rtc: offset %lld %s\n",(long long)offset,ok?"stored":"not stored");
++  }
+   IOSleep(2);
+  }
+ }
+@@ -122,6 +215,15 @@ extern "C" void native_buttons_set_sink(void (*sink)(void *,uint32_t),void *cont
+  __atomic_store_n(&gSink,sink,__ATOMIC_RELEASE);
+  __atomic_fetch_add(&gSinkGeneration,1,__ATOMIC_RELEASE);
+ }
++// zz-calendar-hook.patch: a user-set calendar (Settings, timed) stores offset = calendar - RTC for the next boots.
++extern "C" void unixnu_calendar_set_hook(uint64_t seconds){
++ uint32_t secs=0;uint8_t ctrl=0;
++ if(rtcSeconds(&secs,&ctrl)){IOLog("fuxi rtc: calendar set to %llu before the RTC is ready; offset not stored\n",(unsigned long long)seconds);return;}
++ // The setting process is sandboxed (its context may not write /private/var/db): the buttons kernel thread stores the offset.
++ gPendingOffset=(int64_t)seconds-(int64_t)secs;
++ __atomic_store_n(&gOffsetPending,true,__ATOMIC_RELEASE);
++ IOLog("fuxi rtc: calendar set to %llu, rtc %u, offset %lld queued\n",(unsigned long long)seconds,secs,(long long)gPendingOffset);
++}
+ extern "C" void fuxi_buttons_probe(void){
+  unsigned enabled=0;
+  if(!PE_parse_boot_argn("fuxi-buttons",&enabled,sizeof(enabled))||enabled!=1||fuxi_buttons_stats[0])return;
+diff --git a/package/FuxiCpuFreqLog.cpp b/package/FuxiCpuFreqLog.cpp
+index e23b5bb..9901925 100644
+--- a/package/FuxiCpuFreqLog.cpp
++++ b/package/FuxiCpuFreqLog.cpp
+@@ -13,6 +13,8 @@
+ #include <IOKit/IODeviceMemory.h>
+ 
+ extern "C" {
++bool native_adreno_preempt_stats(uint32_t *out) __attribute__((weak_import));
++extern volatile uint32_t native_gpu_preempt[8] __attribute__((weak_import));
+ extern char native_cpufreq_row[120];
+ extern volatile uint32_t native_cpufreq_stage;
+ void sheng_cpufreq_probe(void);
+@@ -56,6 +58,19 @@ void gpuRow(char *last, size_t size) {
+         strlcpy(last, row, size);
+         IOLog("fuxi gpu dcvs: %s\n", row);
+     }
++    {
++        static uint32_t lastp[26];
++        uint32_t p[26] = {};
++        const bool on = &native_adreno_preempt_stats && native_adreno_preempt_stats(p);
++        if (on && memcmp(p, lastp, sizeof p)) {
++            memcpy(lastp, p, sizeof p);
++            IOLog("fuxi gpu preempt: setup %x cpsw %u int %x | trig %u done %u skip %u fault %u disj %u wptr %u last %uus ring %u flight %u cntl %x "
++                  "dead %u rescue %u | r0 %x/%x e%x i%x r1 %x/%x e%x i%x | chk %x %x %x %x %x %x\n",
++                  &native_gpu_preempt ? native_gpu_preempt[0] : 0xdead, &native_gpu_preempt ? native_gpu_preempt[1] : 0,
++                  &native_gpu_preempt ? native_gpu_preempt[2] : 0, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[16], p[17],
++                  p[18], p[19], p[20], p[21], p[22], p[23], p[24], p[25], p[10], p[11], p[12], p[13], p[14], p[15]);
++        }
++    }
+     if (&native_gpu_idle_sleeps && &native_gpu_idle_spins && &native_gpu_idle_timeouts) {
+         static uint64_t s0, p0, t0;
+         const uint64_t s = native_gpu_idle_sleeps, p = native_gpu_idle_spins, t = native_gpu_idle_timeouts;
+diff --git a/package/FuxiWcnPower.c b/package/FuxiWcnPower.c
+new file mode 100644
+index 0000000..a169d53
+--- /dev/null
++++ b/package/FuxiWcnPower.c
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* fuxi (2026-11-15): the WCN7850 rails are brought up and held by the Wi-Fi driver (fuxi-wifi=5, FuxiWifiLink.cpp); Bluetooth only
++ * keeps its vote here, so a later shared power-off can respect both radios. Returns positive errno (WcnPower.h). */
++#include <stdint.h>
++#include "WcnPower.h"
++static volatile unsigned fuxi_wcn_owners;
++int sheng_wcn_power_get(unsigned radio) {
++    if (radio > 1) return 22;
++    __atomic_fetch_or(&fuxi_wcn_owners, 1u << radio, __ATOMIC_ACQ_REL);
++    return 0;
++}
++int sheng_wcn_power_put(unsigned radio) {
++    if (radio > 1) return 22;
++    __atomic_fetch_and(&fuxi_wcn_owners, ~(1u << radio), __ATOMIC_ACQ_REL);
++    return 0;
++}
++unsigned sheng_wcn_power_owners(void) { return __atomic_load_n(&fuxi_wcn_owners, __ATOMIC_ACQUIRE); }
+diff --git a/package/FuxiWifiNet.cpp b/package/FuxiWifiNet.cpp
+index bbb4947..ff786f5 100644
+--- a/package/FuxiWifiNet.cpp
++++ b/package/FuxiWifiNet.cpp
+@@ -168,6 +168,16 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
+   if (type == 0x86dd) { k.ip6++; return; }
+   if (type != 0x0800 || n < 34) { k.other++; return; }
+   k.ip4++; const uint8_t *ip = e + 14; const unsigned ihl = (ip[0] & 15) * 4;
++  {  // fuxi 2026-11-14: joined with an address but nearly no traffic; the first IPv4 packets of each direction, DHCP aside
++    static unsigned shown4[2];
++    const unsigned proto = ip[9];
++    unsigned sport = 0, dport = 0;
++    if ((proto == 6 || proto == 17) && n >= 14 + ihl + 4) { sport = ip[ihl] << 8 | ip[ihl + 1]; dport = ip[ihl + 2] << 8 | ip[ihl + 3]; }
++    const bool dhcp4 = proto == 17 && (sport == 67 || sport == 68);
++    if (!dhcp4 && shown4[out]++ < 48)
++      log(6, "wifi-net: ip4 %s proto %u %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len %u%s", dir, proto, ip[12], ip[13], ip[14], ip[15], sport,
++          ip[16], ip[17], ip[18], ip[19], dport, (unsigned)n, proto == 6 && n >= 14 + ihl + 14 ? ((ip[ihl + 13] & 0x02) ? (ip[ihl + 13] & 0x10 ? " syn-ack" : " syn") : (ip[ihl + 13] & 0x04 ? " rst" : "")) : "");
++  }
+   if (ip[9] != 17 || n < 14 + ihl + 8) return;
+   const uint8_t *udp = ip + ihl; const unsigned sp = udp[0] << 8 | udp[1], dp = udp[2] << 8 | udp[3];
+   if (!((sp == 67 || sp == 68) && (dp == 67 || dp == 68))) return;
+diff --git a/package/GpuPowerProbe.cpp b/package/GpuPowerProbe.cpp
+index 472c851..ee6ba9c 100644
+--- a/package/GpuPowerProbe.cpp
++++ b/package/GpuPowerProbe.cpp
+@@ -70,6 +70,7 @@ extern "C" {
+ #include "NativeAdrenoPwrup.h"
+ #include "NativeAdrenoA740HwInit.h"
+ #include "AdrenoPM4.h"
++#include <kern/thread_call.h>
+ // Weak: an image that does not link NativeAdreno reports "nolink" instead of failing to link.
+ extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu, size_t bytes, unsigned bank, unsigned asid,
+     unsigned slot, unsigned sid, void (*progress)(uint32_t), NativeAdrenoGmuContextReport *report) __attribute__((weak));
+@@ -346,6 +347,25 @@ int ringRead(void *, uint32_t reg, uint32_t *value) {
+     return gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuGpu, size_t(reg) * 4, value);
+ }
+ int ringBarrier(void *) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
++// The GMU's window for the preemption keepalive vote, addressed by the register's dword offset (sheng ce0c600).
++int gmuWrAt(void *, uint32_t dword, uint32_t value) {
++    return gColdDevice.io.write32(gColdDevice.io.cookie, ShengGmuCore, size_t(kGmuReg(dword)), value);
++}
++// AHB fence bit 1 reports dropped context-switch register writes; retry for at most 2 ms while the GPU domain wakes (sheng ce0c600).
++int preemptWrite(void *, uint32_t reg, uint32_t value) {
++    for (unsigned attempt = 0; attempt < 200; ++attempt) {
++        if (ringWrite(nullptr, reg, value)) return 1;
++        ringBarrier(nullptr);
++        uint32_t status = 0;
++        if (gColdDevice.io.read32(gColdDevice.io.cookie, ShengGmuCore, kGmuReg(0x23b13), &status)) return 1;
++        if (!(status & 2)) return 0;
++        IODelay(10);
++    }
++    return 1;
++}
++// The CP's preemption, as the board sees it: [0] set up (0 yes), [1] CP_SW interrupts seen, [2] the last such RBBM_INT_0_STATUS word.
++extern "C" {volatile uint32_t native_gpu_preempt[8];}
++extern "C" bool native_adreno_preempt_irq() __attribute__((weak));   // NativeAdrenoPublish.cpp
+ // The ring, memptrs and lists are Normal non-cacheable on both sides (GPU PTE MAIR 0, CPU write-combine): no cache
+ // maintenance, only ordering.
+ int ringPublish(void *, const volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
+@@ -372,10 +392,13 @@ int ringIdle(void *) {
+     }
+     return 0;
+ }
+-OSSharedPtr<IOMemoryMap> gGpuMaps[5];
+-volatile uint8_t *gGpuCpu[5];
++OSSharedPtr<IOMemoryMap> gGpuMaps[GpuBufferCount];
++volatile uint8_t *gGpuCpu[GpuBufferCount];
+ NativeAdrenoGpuBuffer gGpuBuffers[GpuBufferCount];
+ NativeAdrenoRing gRing;
++NativeAdrenoRing gRing1;   // the second ring of the CP's preemption (sheng-gpu-preempt)
++bool gPreemptWanted;
++unsigned gPreemptMode = 1;   // sheng-gpu-preempt=1: only the low and disabled queues take the second ring; =2: the normal ones too
+ NativeAdrenoCpInit gCpInit;
+ extern "C" {
+ NativeAdrenoGmuContextReport native_gpu_context;
+@@ -518,7 +541,7 @@ void cpRow(const char *what) {
+ // the returned x6 (ARM_SMCCC_QUIRK_QCOM_A6); QCOM_SCM_V2_EBUSY (-12) retries after 30 ms, at most 20 times. WAITQ_SLEEP
+ // (2) needs the SCM wait-queue interrupt, which is not wired here, so it is returned to the caller as is.
+ struct ScmRes {int64_t a0; uint64_t a1; uint32_t ms, resumes;};
+-ScmRes scmCall(uint64_t fn, uint64_t arginfo, uint64_t p0, uint64_t p1, uint64_t p2) {
++ScmRes scmCall(uint64_t fn, uint64_t arginfo, uint64_t p0, uint64_t p1, uint64_t p2, uint64_t p3 = 0) {
+     uint64_t first = fn, a6 = 0;
+     const uint64_t start = ringNow(nullptr);
+     auto done = [&](int64_t a0, uint64_t a1, unsigned resumes) {
+@@ -526,7 +549,7 @@ ScmRes scmCall(uint64_t fn, uint64_t arginfo, uint64_t p0, uint64_t p1, uint64_t
+     };
+     for (unsigned resume = 0, busy = 0; resume < 10000;) {
+         register uint64_t x0 asm("x0") = first, x1 asm("x1") = arginfo, x2 asm("x2") = p0, x3 asm("x3") = p1;
+-        register uint64_t x4 asm("x4") = p2, x5 asm("x5") = 0, x6 asm("x6") = a6, x7 asm("x7") = 0;
++        register uint64_t x4 asm("x4") = p2, x5 asm("x5") = p3, x6 asm("x6") = a6, x7 asm("x7") = 0;
+         asm volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
+                      :: "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+         if (x0 == 1) {first = 1; a6 = x6; ++resume; continue;}
+@@ -663,6 +686,10 @@ IOReturn armcpu_spi_attach(uint32_t intid, bool edge, void (*handler)(void *), v
+ extern volatile uint64_t armcpu_spi_unhandled __attribute__((weak));
+ }
+ volatile uint32_t gIrqLast, gIrqSeen, gIrqEmpty;
++static thread_call_t gPreemptCall;
++static void finishPreemption(thread_call_param_t, thread_call_param_t) {
++    (void)native_adreno_preempt_irq();
++}
+ void gpuIrq(void *) {
+     // a6xx_irq: read RBBM_INT_0_STATUS and clear it through RBBM_INT_CLEAR_CMD before anything else, so the level line drops
+     // before the EOI. A storm (a line with no source to clear) masks the GPU interrupts instead of hanging the boot CPU; the
+@@ -674,6 +701,12 @@ void gpuIrq(void *) {
+     gIrqCount = gIrqCount + 1;
+     gIrqEmpty = status ? 0 : gIrqEmpty + 1;
+     if (gIrqEmpty > 100000) gpuWr(A740_RBBM_INT_0_MASK, 0);
++    // CP_SW (RBBM_INT_0 bit 8): the CP finished a context switch; the driver completes it on a thread call (it takes the submit mutex).
++    if (status & (1u << 8)) {
++        native_gpu_preempt[1] = native_gpu_preempt[1] + 1;
++        native_gpu_preempt[2] = status;
++        if (gPreemptCall) thread_call_enter(gPreemptCall);
++    }
+     thread_wakeup(event_t(&gIrqCount));
+ }
+ bool cpFence(const uint32_t *words, size_t count) {
+@@ -709,6 +742,9 @@ void irqAndTimer() {
+     // set, so a working line fires as soon as it is enabled; one more fence (CP_NOP) must fire it again.
+     uint32_t readback = 0;
+     uint64_t router = ~0ull;
++    if (&native_adreno_preempt_irq && !gPreemptCall)
++        gPreemptCall = thread_call_allocate_with_options(finishPreemption, nullptr,
++            THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
+     q[0] = armcpu_spi_attach ? uint32_t(armcpu_spi_attach(332, false, gpuIrq, nullptr, &readback, &router)) : 0xdead;
+     gIrqAttached = q[0] == 0;
+     q[1] = readback;
+@@ -1173,6 +1209,17 @@ void coherenceProbe(NativeAdrenoVm *vm) {
+     snprintf(native_gpu_coherence_row, sizeof native_gpu_coherence_row, "H d%u/64 a%u r%u/%u w%u/%u s%x k%u -> %s", k[1], gCoherenceAttempts,
+              k[2], k[3], k[4], k[5], k[6], k[0], pass ? "on" : "off");
+ }
++extern "C" {extern volatile uint32_t native_adreno_cp_aperture[4] __attribute__((weak));}
++// QCOM_SCM_CP_APERTURE for the GPU's context bank (sheng ce0c600): SVC_INFO IS_CALL_AVAIL for SVC_MP/CP_SMMU_APERTURE_ID, then the grant.
++void openCpAperture() {
++    if (!&native_adreno_cp_aperture) return;
++    const ScmRes avail = scmCall(0x42000601u, 1, 0x02000000u | (0x0cu << 8) | 0x1bu, 0, 0);
++    native_adreno_cp_aperture[0] = avail.a0 ? 0x80000000u | uint32_t(avail.a0) : uint32_t(avail.a1);
++    if (avail.a0 || !avail.a1) {native_adreno_cp_aperture[1] = 0xffffffffu; printf("fuxi gpu cp aperture: not available %x\n", native_adreno_cp_aperture[0]); return;}
++    const ScmRes r = scmCall(0x42000c1bu, 4, 0xffff0000u | (0u << 8) | 0u, 0xffffffffu, 0xffffffffu, 0xffffffffu);
++    native_adreno_cp_aperture[1] = uint32_t(r.a0);
++    printf("fuxi gpu cp aperture: avail %x grant %x\n", native_adreno_cp_aperture[0], native_adreno_cp_aperture[1]);
++}
+ void publishAndWrapperTest(bool rounds) {
+     char row[64];
+     if (!native_adreno_publish || !native_adreno_published_service || !native_adreno_publish_stats) {setRow(5, "P nolink"); return;}
+@@ -1180,12 +1227,26 @@ void publishAndWrapperTest(bool rounds) {
+     const NativeAdrenoRingClock clock{nullptr, ringNow, ringIdle};
+     // userClientTest attaches the submit object; with the self-tests skipped it still has to be attached before a client opens.
+     if (vm) gSubmit.attach(vm, &gRing);
++    // The CP's switch between the two rings (sheng ce0c600): trigger registers, the GMU keepalive vote, each ring's record and SMMU pages.
++    if (vm && gPreemptWanted) {
++        NativeAdrenoSubmit::PreemptSetup setup{};
++        setup.io = NativeAdrenoPreemptIo{nullptr, preemptWrite, ringRead, ringBarrier, nullptr, gmuWrAt};
++        setup.pages.record[0] = gGpuBuffers[5].iova; setup.pages.record[1] = gGpuBuffers[6].iova;
++        setup.pages.smmu_info[0] = gGpuBuffers[7].iova; setup.pages.smmu_info[1] = gGpuBuffers[8].iova;
++        setup.pages.record_cpu[0] = const_cast<uint8_t *>(gGpuCpu[5]); setup.pages.record_cpu[1] = const_cast<uint8_t *>(gGpuCpu[6]);
++        setup.pages.smmu_cpu[0] = const_cast<uint8_t *>(gGpuCpu[7]); setup.pages.smmu_cpu[1] = const_cast<uint8_t *>(gGpuCpu[8]);
++        setup.now = ringNow; setup.clock = nullptr; setup.mode = gPreemptMode;
++        const IOReturn on = gSubmit.setPreemption(&gRing, &gRing1, setup, true);
++        native_gpu_preempt[0] = uint32_t(on);
++        printf("fuxi gpu preempt: mode %u setup %#x\n", gPreemptMode, unsigned(on));
++    }
+     native_adreno_dram_read32 = dramRead32;
+     native_adreno_cached_read32 = cachedRead32;
+     native_adreno_line_audit = lineAudit;
+     coherenceProbe(vm);
+     const IOReturn timer = gTimer.attach(&gTimerIo, NativeAdrenoTimeCp);
+     {unsigned wc = 1; PE_parse_boot_argn("sheng-gpu-wc", &wc, sizeof wc); native_adreno_wc_enabled = wc ? 1 : 0;}
++    openCpAperture();
+     const IOReturn published = native_adreno_publish(vm, &gSubmit, &gRing, &clock, timer ? nullptr : &gTimer, &gDeviceInfo, 32, 40);
+     IOService *svc = published ? nullptr : native_adreno_published_service();
+     int ok = 0, n = 0, errAt = -1, v1 = -1, v2 = -1;
+@@ -1441,7 +1502,7 @@ void gpuStart() {
+     gpuSetActlr();
+     c[0] = 1;
+     if (NativeAdrenoGpuContextBuffers(gGpuBuffers)) {setRow(7, "C1 buffers refused"); return;}
+-    for (unsigned i = 0; i < 5; ++i) {
++    for (unsigned i = 0; i < GpuBufferCount; ++i) {
+         IODeviceMemory *m = IODeviceMemory::withRange(gGpuBuffers[i].physical, gGpuBuffers[i].bytes);
+         if (m) {
+             gGpuMaps[i] = OSSharedPtr<IOMemoryMap>(m->map(kIOMapAnywhere | kIOMapWriteCombineCache), OSNoRetain);
+@@ -1520,6 +1581,17 @@ void gpuStart() {
+         gGpuBuffers[1].iova, const_cast<uint8_t *>(gGpuCpu[2]), gGpuBuffers[2].bytes, gGpuBuffers[2].iova);
+     if (attached) {snprintf(row, sizeof row, "C4 ring attach %x", unsigned(attached)); setRow(7, row); return;}
+     gpuWr64(A740_CP_BV_RB_RPTR_ADDR, gGpuBuffers[2].iova + 8);   // rbmemptr(bv_rptr)
++    // Normal/low work on ring 1, requested high priorities on ring 0 (sheng ce0c600). 0 one ring, 1 only low/background on ring 1, 2 normal too.
++    {unsigned preempt = 0; /* fuxi 2026-11-15: off. Mode 2 stalled the 4th switch (CNTL stop stuck, then every fence timed out); mode 1 never switched. Diagnostics (FuxiCpuFreqLog "fuxi gpu preempt"); 0 = one ring */ PE_parse_boot_argn("sheng-gpu-preempt", &preempt, sizeof preempt); gPreemptWanted = preempt == 1 || preempt == 2; gPreemptMode = preempt == 2 ? 2 : 1;}
++    if (gPreemptWanted) {
++        const IOReturn second = gRing1.attachSecondary(&rio, &cache, const_cast<uint8_t *>(gGpuCpu[9]), gGpuBuffers[9].bytes,
++            gGpuBuffers[9].iova, const_cast<uint8_t *>(gGpuCpu[10]), gGpuBuffers[10].bytes, gGpuBuffers[10].iova);
++        if (second) {snprintf(row, sizeof row, "C4 ring1 attach %x", unsigned(second)); setRow(7, row); return;}
++        const IOReturn p0 = gRing.setPreempt(gGpuBuffers[5].iova, gGpuBuffers[7].iova, gGpuBuffers[2].iova + 8);
++        const IOReturn p1 = gRing1.setPreempt(gGpuBuffers[6].iova, gGpuBuffers[8].iova, gGpuBuffers[10].iova + 8);
++        if (p0 || p1) {snprintf(row, sizeof row, "C4 preempt %x/%x", unsigned(p0), unsigned(p1)); setRow(7, row); return;}
++        gpuWr64(A740_CP_BV_RB_RPTR_ADDR, gGpuBuffers[2].iova + 8);
++    }
+     gpuWr(A740_CP_SQE_CNTL, 1);
+     // 5. a7xx_patch_pwrup_reglist (preemption list only; IFPC is off) and a7xx_cp_init through the ring.
+     c[0] = 5;
+diff --git a/package/KeyStoreProbe.cpp b/package/KeyStoreProbe.cpp
+index 8b993f0..f292181 100644
+--- a/package/KeyStoreProbe.cpp
++++ b/package/KeyStoreProbe.cpp
+@@ -56,6 +56,21 @@ uint32_t native_aks_lock_state(void) {
+     }
+     return (uint32_t)cached;
+ }
++// The identity that keys software wrapping (AppleKeyStoreState aks_wrap_key/aks_unwrap_key): /chosen/unique-chip-id, as UniXNU-sheng.
++// Zero when the platform has none, which fails wrapping. fuxi 2026-11-15: without wrapping securityd could store no keychain item.
++extern "C" size_t native_aks_device_id(uint8_t *out, size_t capacity) {
++    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
++    OSData *id = chosen ? OSDynamicCast(OSData, chosen->getProperty("unique-chip-id")) : nullptr;
++    size_t n = 0;
++    if (id && id->getLength() >= 8 && id->getLength() <= capacity) {
++        const uint8_t *bytes = static_cast<const uint8_t *>(id->getBytesNoCopy());
++        bool nonzero = false;
++        for (unsigned i = 0; i < id->getLength(); ++i) { out[i] = bytes[i]; nonzero |= bytes[i] != 0; }
++        if (nonzero) n = id->getLength();
++    }
++    if (chosen) chosen->release();
++    return n;
++}
+ // sheng-aks-ss=<n> overrides the DER "ss" state flags (default 4).
+ uint32_t native_aks_state_flags(void) {
+     static int cached = -1;
+diff --git a/package/QcomGlink.c b/package/QcomGlink.c
+index fee7b1f..0c02e3a 100644
+--- a/package/QcomGlink.c
++++ b/package/QcomGlink.c
+@@ -120,6 +120,21 @@ QcomGlinkChannel *qcom_glink_channel(QcomGlink *g, const char *name, uint32_t in
+         c->intent_count = intent_count;
+         c->initiator = open_now != 0;
+         c->open_sent = open_now ? 0 : 2;  /* 2: wait for the remote's OPEN before sending ours */
++        for (unsigned p = 0; !open_now && p < sizeof g->pending / sizeof g->pending[0]; ++p) {
++            if (!g->pending[p].used) continue;
++            unsigned same = 1;
++            for (unsigned b = 0; same && b < QCOM_GLINK_NAME; ++b) {
++                if (g->pending[p].name[b] != c->name[b]) same = 0;
++                if (!c->name[b]) break;
++            }
++            if (!same) continue;
++            c->rcid = g->pending[p].rcid;
++            c->remote_open = 1;
++            c->ack_due = 1;  /* progress() answers the remembered OPEN */
++            g->pending[p].used = 0;
++            g->replayed++;
++            break;
++        }
+         return c;
+     }
+     return 0;
+@@ -164,7 +179,7 @@ static int advertise(QcomGlink *g, QcomGlinkChannel *c, unsigned index)
+ 
+ static void reset_channel(QcomGlinkChannel *c)
+ {
+-    c->open_acked = c->remote_open = c->up = c->intent_asked = 0;
++    c->open_acked = c->remote_open = c->up = c->intent_asked = c->ack_due = 0;
+     c->open_sent = c->initiator ? 0 : 2;
+     for (unsigned i = 0; i < QCOM_GLINK_MAX_LOCAL_INTENTS; ++i) c->local[i].advertised = c->local[i].busy = 0, c->local[i].fill = 0;
+     for (unsigned i = 0; i < QCOM_GLINK_MAX_REMOTE_INTENTS; ++i) c->remote[i].valid = 0;
+@@ -181,6 +196,10 @@ static void progress(QcomGlink *g)
+     for (unsigned i = 0; i < QCOM_GLINK_MAX_CHANNELS; ++i) {
+         QcomGlinkChannel *c = &g->channel[i];
+         if (!c->used) continue;
++        if (c->ack_due) {
++            if (command(g, QCOM_GLINK_OPEN_ACK, c->rcid, 0)) return;
++            c->ack_due = 0;
++        }
+         if (c->open_sent == 0 || (c->open_sent == 2 && c->remote_open)) {
+             if (send_open(g, c)) return;
+         }
+@@ -300,6 +319,23 @@ static int receive_one(QcomGlink *g)
+             g->unknown_opens++;
+             for (unsigned b = 0; b < QCOM_GLINK_NAME; ++b) g->last_unknown[b] = name[b];
+             note_unknown(g, name);
++            /* remembered for a channel registered later (same name replaces, else a free slot) */
++            unsigned slot = sizeof g->pending / sizeof g->pending[0], free_slot = slot;
++            for (unsigned p = 0; p < sizeof g->pending / sizeof g->pending[0]; ++p) {
++                unsigned same = g->pending[p].used;
++                for (unsigned b = 0; same && b < QCOM_GLINK_NAME; ++b) {
++                    if (g->pending[p].name[b] != name[b]) same = 0;
++                    if (!name[b]) break;
++                }
++                if (same) {slot = p; break;}
++                if (!g->pending[p].used && free_slot == sizeof g->pending / sizeof g->pending[0]) free_slot = p;
++            }
++            if (slot == sizeof g->pending / sizeof g->pending[0]) slot = free_slot;
++            if (slot < sizeof g->pending / sizeof g->pending[0]) {
++                for (unsigned b = 0; b < QCOM_GLINK_NAME; ++b) g->pending[slot].name[b] = name[b];
++                g->pending[slot].rcid = (uint16_t)param1;
++                g->pending[slot].used = 1;
++            }
+         } else {
+             if (c->remote_open && c->up && c->client.state) c->client.state(c->context, c, 0);
+             if (c->remote_open) reset_channel(c);
+@@ -316,6 +352,8 @@ static int receive_one(QcomGlink *g)
+         break;
+     case QCOM_GLINK_CLOSE:
+         if (command(g, QCOM_GLINK_CLOSE_ACK, param1, 0)) return 0;
++        for (unsigned p = 0; p < sizeof g->pending / sizeof g->pending[0]; ++p)
++            if (g->pending[p].used && g->pending[p].rcid == param1) g->pending[p].used = 0;
+         if ((c = by_rcid(g, param1))) {
+             const int was = c->up;
+             if (c->open_sent == 1 && command(g, QCOM_GLINK_CLOSE, c->lcid, 0)) return 0;
+diff --git a/package/QcomGlink.h b/package/QcomGlink.h
+index 1fb845c..5d02d3a 100644
+--- a/package/QcomGlink.h
++++ b/package/QcomGlink.h
+@@ -51,7 +51,7 @@ typedef struct {
+ struct QcomGlinkChannel {
+     char name[QCOM_GLINK_NAME];
+     uint16_t lcid, rcid;
+-    uint8_t used, initiator, open_sent, open_acked, remote_open, up, intent_asked;
++    uint8_t used, initiator, open_sent, open_acked, remote_open, up, intent_asked, ack_due;
+     QcomGlinkClient client;
+     void *context;
+     /* Our receive intents: count buffers of size bytes in storage (count * size). */
+@@ -74,6 +74,10 @@ typedef struct {
+     uint32_t rx_messages, tx_messages, rx_data, unknown_opens, dropped;
+     char last_unknown[QCOM_GLINK_NAME];
+     char unknown_names[96];  /* the distinct names of those opens, space separated, as many as fit */
++    /* Remote opens nobody had registered yet: a channel registered later by the same name answers it then (the DSP sends OPEN once, so a
++     * service that registers after the DSP is up, such as the battery, would otherwise never come up). */
++    struct {char name[QCOM_GLINK_NAME]; uint16_t rcid; uint8_t used;} pending[8];
++    uint32_t replayed;
+ } QcomGlink;
+ 
+ /* Sets up the link on its FIFOs (rx may have no data yet: the remote makes its FIFO later) and resets the indices we own. */
+diff --git a/package/ShengBattery.cpp b/package/ShengBattery.cpp
+new file mode 100644
+index 0000000..dbd6000
+--- /dev/null
++++ b/package/ShengBattery.cpp
+@@ -0,0 +1,286 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// The battery as iOS reads it (boot argument sheng-battery=1, started by BatteryProbe.cpp; needs sheng-adsp=2): an IOPMPowerSource whose
++// values come from the battery manager in the audio DSP over the PMIC GLINK channel (ShengBattmgr.c). powerd finds every IOPMPowerSource,
++// reads CurrentCapacity/MaxCapacity, IsCharging, ExternalConnected, voltage, amperage and AdapterDetails and listens for the status change
++// message updateStatus sends; the status bar, the lock screen's charging state and Settings > Battery follow from that.
++//
++// Design: everything runs on the service's work loop. The DSP thread's callbacks only copy a message into a small ring and signal an
++// IOInterruptEventSource (no provider: a software event), so the DSP thread never waits for this driver. One request is in flight at a
++// time; a 2 s timer gives up on an unanswered one. Battery notifications start a refresh at once, and a 60 s timer refreshes in any case
++// (the fields that hardly change, every tenth time). Charging itself is the DSP firmware's; the one setting written is the input current
++// limit on a computer's USB port (ShengBattmgr.c; boot argument sheng-usb-sdp-ma, 0 leaves the firmware's limit).
++#include <IOKit/IOLib.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/pwr_mgt/IOPM.h>
++#include <IOKit/pwr_mgt/IOPMPowerSource.h>
++#include <libkern/c++/OSBoolean.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSSymbol.h>
++#include <pexpert/pexpert.h>
++extern "C" {
++#include "ShengAdsp.h"
++#include "ShengBattmgr.h"
++}
++
++extern "C" ShengAdspChannel *sheng_adsp_channel(const char *, uint32_t, uint32_t, int, const ShengAdspClient *, void *) __attribute__((weak_import));
++extern "C" int sheng_adsp_send(ShengAdspChannel *, const void *, uint32_t) __attribute__((weak_import));
++// [0] stage (1 class up, 2 channel registered, 3 channel up, 4 published; negative: the step that failed), [1] percent, [2] mV,
++// [3] mA, [4] temperature (raw), [5] flags (bit 0 present, 1 external, 2 charging, 3 full, 4 notifications enabled), [6] refresh
++// cycles, [7] answers, [8] timeouts | errors << 16, [9] notifications, [10] USB type (raw), [11] full mAh, [12] design mAh,
++// [13] cycles, [14] messages dropped (ring full) | ignored << 16, [15] send refusals
++extern "C" {extern volatile int32_t native_battery_stats[16];}
++// The raw readings behind the values: [0] capacity property (hundredths of a percent), [1] gauge 1 remaining, [2] gauge 1 full, [3] gauge 2
++// remaining, [4] gauge 2 full, [5] temperature property, [6] current property (uA, discharge positive), [7] valid field bits, [8] the field
++// the last timeout skipped (-1 none)
++extern "C" {volatile int32_t native_battery_raw[10];}
++// The charger as the firmware reports it (-1 no reading): [0] USB online, [1] USB type, [2] adapter type, [3] the board's adapter type,
++// [4] input current limit mA, [5] the most the port offers mA, [6] USB mV, [7] USB mA, [8] battery status, [9] charge type, [10] thermal
++// level, [11] charge current mA, [12] adapter watts, [13] bits: 0 cell 1 authenticated, 1 cell 2, 2 PD adapter authenticated, 3 input
++// suspended (each with bit +8 set when read), [14] limit sets | tries << 8 | port type << 16, [15] last limit result
++extern "C" {volatile int32_t native_charger_stats[16];}
++
++namespace {
++// On arm64e, IOWorkLoop::addEventSource decides whether an event source does work by comparing OSMemberFunctionCast(checkForWork) of
++// the source with that of the loop's command gate; with member function pointer type discrimination _ptmf2ptf returns the member
++// pointer's own virtual thunk instead of resolving it through the object's vtable, so the two are always equal and a software
++// IOInterruptEventSource lands on the passive chain: interruptOccurred signals the loop, but checkForWork is never called. The
++// event source's kActive flag (IOEventSource.h, protected) skips that comparison.
++struct ActiveSource : IOEventSource {
++    static void mark(IOEventSource *source) {static_cast<ActiveSource *>(source)->flags |= kActive;}
++};
++constexpr uint32_t kRequestMs = 2000, kRefreshMs = 60000, kSlowEvery = 10, kRing = 16, kMessage = 64;
++}
++
++class ShengBattery : public IOPMPowerSource {
++    OSDeclareDefaultStructors(ShengBattery)
++    IOWorkLoop *loop = nullptr;
++    IOTimerEventSource *request = nullptr, *refresh = nullptr;
++    IOInterruptEventSource *inbox = nullptr;
++    IOSimpleLock *ringLock = nullptr;
++    struct {uint32_t length; uint8_t data[kMessage];} ring[kRing];
++    uint32_t ringHead = 0, ringCount = 0;
++    volatile uint32_t channelUp = 0, channelChanged = 0;
++    bool wasUp = false, published = false;
++    uint32_t refreshes = 0;
++    ShengBattmgr bm;
++    uint32_t sdpLimit = 0;
++    ShengAdspChannel *channel = nullptr;
++
++    static void dspState(void *context, int up) {
++        ShengBattery *self = static_cast<ShengBattery *>(context);
++        __atomic_store_n(&self->channelUp, up ? 1u : 0u, __ATOMIC_RELEASE);
++        __atomic_store_n(&self->channelChanged, 1u, __ATOMIC_RELEASE);
++        self->inbox->interruptOccurred(nullptr, nullptr, 0);
++    }
++    static void dspReceive(void *context, const uint8_t *data, uint32_t length) {
++        ShengBattery *self = static_cast<ShengBattery *>(context);
++        IOSimpleLockLock(self->ringLock);
++        if (self->ringCount < kRing && length <= kMessage) {
++            auto &slot = self->ring[(self->ringHead + self->ringCount) % kRing];
++            memcpy(slot.data, data, length);
++            slot.length = length;
++            self->ringCount++;
++        } else {
++            native_battery_stats[14] = native_battery_stats[14] + 1;
++        }
++        IOSimpleLockUnlock(self->ringLock);
++        self->inbox->interruptOccurred(nullptr, nullptr, 0);
++    }
++
++    void pump() {
++        uint8_t out[SHENG_BATTMGR_REQUEST_BYTES];
++        const uint32_t n = sheng_battmgr_next(&bm, out);
++        if (!n) return;
++        if (sheng_adsp_send(channel, out, n)) native_battery_stats[15] = native_battery_stats[15] + 1;  // the timer skips the field
++        request->setTimeoutMS(kRequestMs);
++    }
++    void number(const char *key, int64_t value) {
++        const OSSymbol *symbol = OSSymbol::withCString(key);
++        OSNumber *n = OSNumber::withNumber((unsigned long long)value, 32);
++        if (symbol && n) setPSProperty(symbol, n);
++        OSSafeReleaseNULL(n); OSSafeReleaseNULL(symbol);
++    }
++    void flag(const char *key, bool value) {
++        const OSSymbol *symbol = OSSymbol::withCString(key);
++        if (symbol) setPSProperty(symbol, value ? kOSBooleanTrue : kOSBooleanFalse);
++        OSSafeReleaseNULL(symbol);
++    }
++    void recordRaw() {
++        static const int fields[8] = {BmCapacity, BmGauge1Remaining, BmGauge1Full, BmGauge2Remaining, BmGauge2Full, BmTemperature, BmCurrent, -1};
++        for (unsigned i = 0; i < 7; ++i) native_battery_raw[i] = (bm.valid >> fields[i]) & 1 ? bm.value[fields[i]] : -999999;
++        native_battery_raw[7] = (int32_t)bm.valid;
++        native_battery_raw[8] = bm.last_timeout;
++        static const int charger[13] = {BmUsbOnline, BmUsbType, BmUsbAdapter, BmRealType, BmUsbLimit, BmUsbMax, BmUsbVoltage, BmUsbCurrent,
++                                        BmStatus, BmChargeType, BmThermalLevel, BmChargeCurrent, BmPowerMax};
++        static const int milli[13] = {0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0};
++        for (unsigned i = 0; i < 13; ++i)
++            native_charger_stats[i] = (bm.valid >> charger[i]) & 1 ? (milli[i] ? bm.value[charger[i]] / 1000 : bm.value[charger[i]]) : -1;
++        static const int bits[4] = {BmAuthentic, BmSlaveAuthentic, BmPdVerified, BmInputSuspend};
++        int32_t flags = 0;
++        for (unsigned i = 0; i < 4; ++i)
++            if ((bm.valid >> bits[i]) & 1) flags |= (bm.value[bits[i]] != 0) << i | 1 << (i + 8);
++        native_charger_stats[13] = flags;
++        native_charger_stats[14] = (int32_t)(bm.limit_sets | bm.limit_tries << 8 | (uint32_t)(bm.limit_port & 0xff) << 16);
++        native_charger_stats[15] = bm.limit_result;
++    }
++    void publish() {
++        ShengBatterySnapshot s;
++        sheng_battmgr_snapshot(&bm, &s);
++        setBatteryInstalled(s.present);
++        setExternalConnected(s.external);
++        setExternalChargeCapable(s.external);
++        setIsCharging(s.charging);
++        setAtCriticalLevel(s.critical);
++        setCurrentCapacity((unsigned)s.percent);
++        setMaxCapacity(100);
++        setVoltage((unsigned)(s.voltage_mv > 0 ? s.voltage_mv : 0));
++        setAmperage(s.current_ma);
++        if (s.cycles > 0) setCycleCount((unsigned)s.cycles);
++        setTimeRemaining(s.charging ? (s.time_to_full_min >= 0 ? s.time_to_full_min : 0xffff)
++                                    : (s.time_to_empty_min >= 0 ? s.time_to_empty_min : 0xffff));
++        flag("FullyCharged", s.fully_charged);
++        number("InstantAmperage", s.current_ma);
++        if (s.temperature_valid) number("Temperature", s.temperature);
++        if (s.raw_mah > 0) number("AppleRawCurrentCapacity", s.raw_mah);
++        if (s.full_mah > 0) {number("AppleRawMaxCapacity", s.full_mah); number("NominalChargeCapacity", s.full_mah);}
++        if (s.design_mah > 0) number("DesignCapacity", s.design_mah);
++        OSDictionary *adapter = OSDictionary::withCapacity(5);
++        if (adapter) {
++            OSNumber *family = OSNumber::withNumber(s.adapter_family, 32);
++            if (family) {adapter->setObject(kIOPMPSAdapterDetailsFamilyKey, family); family->release();}
++            if (s.external) {
++                OSNumber *w = OSNumber::withNumber((unsigned long long)s.adapter_watts, 32), *mv = OSNumber::withNumber((unsigned long long)s.adapter_mv, 32),
++                         *ma = OSNumber::withNumber((unsigned long long)s.adapter_ma, 32);
++                if (w) {adapter->setObject(kIOPMPSAdapterDetailsWattsKey, w); w->release();}
++                if (mv) {adapter->setObject(kIOPMPSAdapterDetailsVoltage, mv); mv->release();}
++                if (ma) {adapter->setObject(kIOPMPSAdapterDetailsAmperageKey, ma); ma->release();}
++            }
++            const OSSymbol *key = OSSymbol::withCString(kIOPMPSAdapterDetailsKey);
++            if (key) setPSProperty(key, adapter);
++            OSSafeReleaseNULL(key);
++            adapter->release();
++        }
++        native_battery_stats[1] = s.percent; native_battery_stats[2] = s.voltage_mv; native_battery_stats[3] = s.current_ma;
++        native_battery_stats[4] = s.temperature;
++        native_battery_stats[5] = s.present | s.external << 1 | s.charging << 2 | s.fully_charged << 3 | bm.enabled << 4;
++        native_battery_stats[10] = (bm.valid >> BmUsbType) & 1 ? bm.value[BmUsbType] : -1;
++        native_battery_stats[11] = s.full_mah; native_battery_stats[12] = s.design_mah; native_battery_stats[13] = s.cycles;
++        recordRaw();
++        if (!published && !s.charge_known) return;  // no charge reading yet: 0 % would read as an empty battery
++        if (!published) {
++            // The properties are in place before anyone finds the service.
++            published = true;
++            registerService();
++            native_battery_stats[0] = 4;
++        }
++        updateStatus();
++    }
++    void counters() {
++        native_battery_stats[6] = (int32_t)bm.cycles_done;
++        native_battery_stats[7] = (int32_t)bm.responses;
++        native_battery_stats[8] = (int32_t)(bm.timeouts | bm.errors << 16);
++        native_battery_stats[9] = (int32_t)bm.notifications;
++        native_battery_stats[14] = (native_battery_stats[14] & 0xffff) | (int32_t)(bm.ignored << 16);
++    }
++    void handle(int result) {
++        if (result == BmCycleDone) publish();
++        pump();
++        counters();
++    }
++
++    static void inboxAction(OSObject *owner, IOInterruptEventSource *, int) {
++        ShengBattery *self = OSDynamicCast(ShengBattery, owner);
++        if (!self) return;
++        if (__atomic_exchange_n(&self->channelChanged, 0u, __ATOMIC_ACQ_REL)) {
++            const bool up = __atomic_load_n(&self->channelUp, __ATOMIC_ACQUIRE) != 0;
++            if (up && !self->wasUp) {
++                native_battery_stats[0] = self->published ? 4 : 3;
++                uint8_t enable[SHENG_BATTMGR_ENABLE_BYTES];
++                sheng_adsp_send(self->channel, enable, sheng_battmgr_enable_request(enable));
++                sheng_battmgr_refresh(&self->bm, 1);
++                self->pump();
++                self->refresh->setTimeoutMS(kRefreshMs);
++            }
++            if (!up && self->wasUp) {self->request->cancelTimeout(); sheng_battmgr_init(&self->bm); self->bm.sdp_limit_ua = self->sdpLimit;}
++            self->wasUp = up;
++        }
++        for (;;) {
++            uint8_t data[kMessage];
++            uint32_t length = 0;
++            IOSimpleLockLock(self->ringLock);
++            if (self->ringCount) {
++                auto &slot = self->ring[self->ringHead];
++                length = slot.length;
++                memcpy(data, slot.data, length);
++                self->ringHead = (self->ringHead + 1) % kRing;
++                self->ringCount--;
++            }
++            IOSimpleLockUnlock(self->ringLock);
++            if (!length) break;
++            const int result = sheng_battmgr_receive(&self->bm, data, length);
++            if (result == BmAnswer || result == BmCycleDone) self->request->cancelTimeout();
++            self->handle(result);
++        }
++    }
++    static void requestAction(OSObject *owner, IOTimerEventSource *) {
++        ShengBattery *self = OSDynamicCast(ShengBattery, owner);
++        if (!self || !self->wasUp) return;
++        const uint32_t before = self->bm.cycles_done;
++        sheng_battmgr_timeout(&self->bm);
++        self->handle(self->bm.cycles_done != before ? BmCycleDone : BmAnswer);
++    }
++    static void refreshAction(OSObject *owner, IOTimerEventSource *sender) {
++        ShengBattery *self = OSDynamicCast(ShengBattery, owner);
++        if (!self || !self->wasUp) return;
++        sheng_battmgr_refresh(&self->bm, ++self->refreshes % kSlowEvery == 0);
++        self->handle(BmAnswer);
++        sender->setTimeoutMS(kRefreshMs);
++    }
++
++public:
++    bool startBattery() {
++        sheng_battmgr_init(&bm);
++        uint32_t ma = 0;
++        if (PE_parse_boot_argn("sheng-usb-sdp-ma", &ma, sizeof ma)) bm.sdp_limit_ua = ma > 3000 ? 3000000u : ma * 1000u;
++        sdpLimit = bm.sdp_limit_ua;
++        loop = IOWorkLoop::workLoop();
++        ringLock = IOSimpleLockAlloc();
++        inbox = IOInterruptEventSource::interruptEventSource(this, &ShengBattery::inboxAction);
++        request = IOTimerEventSource::timerEventSource(this, &ShengBattery::requestAction);
++        refresh = IOTimerEventSource::timerEventSource(this, &ShengBattery::refreshAction);
++        if (!loop || !ringLock || !inbox || !request || !refresh) return false;
++        // fuxi 2026-11-14 boot probe: without the flag the inbox was not on the loop's active chain, with it it was
++        ActiveSource::mark(inbox);
++        if (loop->addEventSource(inbox) != kIOReturnSuccess || loop->addEventSource(request) != kIOReturnSuccess ||
++            loop->addEventSource(refresh) != kIOReturnSuccess)
++            return false;
++        native_battery_stats[0] = 1;
++        const ShengAdspClient client = {&ShengBattery::dspState, &ShengBattery::dspReceive};
++        channel = sheng_adsp_channel ? sheng_adsp_channel("PMIC_RTR_ADSP_APPS", 1024, 4, 0, &client, this) : nullptr;
++        if (!channel) return false;
++        native_battery_stats[0] = 2;
++        return true;
++    }
++};
++OSDefineMetaClassAndStructors(ShengBattery, IOPMPowerSource)
++
++// Called by BatteryProbe.cpp once this file's classes are registered.
++extern "C" void sheng_battery_start(void) {
++    ShengBattery *battery = OSTypeAlloc(ShengBattery);
++    if (!battery || !battery->init() || !battery->attach(IOService::getPlatform())) {
++        if (battery) battery->release();
++        native_battery_stats[0] = -1;
++        return;
++    }
++    if (!battery->startBattery()) {
++        native_battery_stats[0] = native_battery_stats[0] > 0 ? -native_battery_stats[0] - 1 : -1;
++        battery->detach(IOService::getPlatform());
++        battery->release();
++        return;
++    }
++    battery->release();  // the platform's attachment keeps it
++}
+diff --git a/package/ShengBattmgr.c b/package/ShengBattmgr.c
+new file mode 100644
+index 0000000..d3a5987
+--- /dev/null
++++ b/package/ShengBattmgr.c
+@@ -0,0 +1,256 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#include "ShengBattmgr.h"
++
++/* Battery properties as this board's firmware numbers them (one more after charge control limit max than the common list): status 0,
++ * health 1, present 2, charge type 3, capacity 4 (hundredths of a percent), SOH 5, OCV 6, voltage now 7 (uV), voltage max 8, current
++ * now 9 (uA), thermal level 10, its max 11, charge current 12 (uA), temperature 13 (hundredths of a degree), technology 14, charge
++ * counter 15 (uAh), cycle count 16, full design 17 (uAh), full 18 (uAh), model 19 (a string), time to full 20 (s), time to empty 21 (s).
++ * USB: online 0, voltage now 1 (uV), voltage max 2, current now 3 (uA), current max 4, input current limit 5, type 6, adapter type 7.
++ * Board: battery authenticated 3, adapter type 7, PD adapter authenticated 0x18, input suspended 0x2a, adapter watts 0x33, the fuel
++ * gauges 0x8a/0x8b and 0xa6/0xa7, second cell authenticated 0xa5. */
++static const struct {uint8_t opcode, property, slow;} kFields[BmFields] = {
++    [BmStatus] = {SHENG_BATTMGR_OP_BATTERY_GET, 0, 0},
++    [BmPresent] = {SHENG_BATTMGR_OP_BATTERY_GET, 2, 0},
++    [BmCapacity] = {SHENG_BATTMGR_OP_BATTERY_GET, 4, 0},
++    [BmVoltage] = {SHENG_BATTMGR_OP_BATTERY_GET, 7, 0},
++    [BmCurrent] = {SHENG_BATTMGR_OP_BATTERY_GET, 9, 0},
++    [BmTemperature] = {SHENG_BATTMGR_OP_BATTERY_GET, 13, 0},
++    [BmCharge] = {SHENG_BATTMGR_OP_BATTERY_GET, 15, 0},
++    [BmUsbOnline] = {SHENG_BATTMGR_OP_USB_GET, 0, 0},
++    [BmUsbType] = {SHENG_BATTMGR_OP_USB_GET, 6, 0},
++    [BmUsbVoltage] = {SHENG_BATTMGR_OP_USB_GET, 1, 0},
++    [BmUsbCurrent] = {SHENG_BATTMGR_OP_USB_GET, 3, 0},
++    [BmTimeToEmpty] = {SHENG_BATTMGR_OP_BATTERY_GET, 21, 0},
++    [BmTimeToFull] = {SHENG_BATTMGR_OP_BATTERY_GET, 20, 0},
++    /* the fuel gauges: remaining and full charge of each (mAh) */
++    [BmGauge1Remaining] = {SHENG_BATTMGR_OP_BOARD_GET, 0x8a, 0},
++    [BmGauge1Full] = {SHENG_BATTMGR_OP_BOARD_GET, 0x8b, 0},
++    [BmGauge2Remaining] = {SHENG_BATTMGR_OP_BOARD_GET, 0xa6, 0},
++    [BmGauge2Full] = {SHENG_BATTMGR_OP_BOARD_GET, 0xa7, 0},
++    [BmFull] = {SHENG_BATTMGR_OP_BATTERY_GET, 18, 1},
++    [BmDesign] = {SHENG_BATTMGR_OP_BATTERY_GET, 17, 1},
++    [BmCycles] = {SHENG_BATTMGR_OP_BATTERY_GET, 16, 1},
++    [BmUsbAdapter] = {SHENG_BATTMGR_OP_USB_GET, 7, 0},
++    [BmUsbLimit] = {SHENG_BATTMGR_OP_USB_GET, 5, 0},
++    [BmUsbMax] = {SHENG_BATTMGR_OP_USB_GET, 4, 0},
++    [BmChargeType] = {SHENG_BATTMGR_OP_BATTERY_GET, 3, 0},
++    [BmThermalLevel] = {SHENG_BATTMGR_OP_BATTERY_GET, 10, 0},
++    [BmChargeCurrent] = {SHENG_BATTMGR_OP_BATTERY_GET, 12, 0},
++    [BmRealType] = {SHENG_BATTMGR_OP_BOARD_GET, 0x07, 0},
++    [BmPowerMax] = {SHENG_BATTMGR_OP_BOARD_GET, 0x33, 0},
++    [BmPdVerified] = {SHENG_BATTMGR_OP_BOARD_GET, 0x18, 0},
++    [BmAuthentic] = {SHENG_BATTMGR_OP_BOARD_GET, 0x03, 1},
++    [BmSlaveAuthentic] = {SHENG_BATTMGR_OP_BOARD_GET, 0xa5, 1},
++    [BmInputSuspend] = {SHENG_BATTMGR_OP_BOARD_GET, 0x2a, 0},
++};
++#define NO_CYCLE 0xff
++
++static void put32(uint8_t *p, uint32_t v) {p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);}
++static uint32_t le32(const uint8_t *p) {return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;}
++static void header(uint8_t *out, uint32_t opcode)
++{
++    put32(out, SHENG_BATTMGR_OWNER);
++    put32(out + 4, SHENG_BATTMGR_TYPE_REQUEST);
++    put32(out + 8, opcode);
++}
++
++void sheng_battmgr_init(ShengBattmgr *b)
++{
++    for (unsigned i = 0; i < sizeof *b; ++i) ((uint8_t *)b)[i] = 0;
++    b->cursor = NO_CYCLE;
++    b->last_timeout = -1;
++    b->sdp_limit_ua = 900000;  /* a configured USB 3 port's 900 mA; the firmware's current limiting backs off if the port sags */
++    b->limit_port = -1;
++}
++
++uint32_t sheng_battmgr_enable_request(uint8_t out[SHENG_BATTMGR_ENABLE_BYTES])
++{
++    header(out, SHENG_BATTMGR_OP_REQUEST_NOTIFICATION);
++    put32(out + 12, 0);    /* battery 0 */
++    put32(out + 16, 0);    /* power state */
++    put32(out + 20, 1);    /* low capacity notification threshold, percent */
++    put32(out + 24, 100);  /* high */
++    return SHENG_BATTMGR_ENABLE_BYTES;
++}
++
++static void skip_to_wanted(ShengBattmgr *b)
++{
++    while (b->cursor < BmFields && kFields[b->cursor].slow && !b->slow_due) b->cursor++;
++}
++
++static void advance(ShengBattmgr *b)
++{
++    b->in_flight = 0;
++    b->cursor++;
++    skip_to_wanted(b);
++}
++
++void sheng_battmgr_refresh(ShengBattmgr *b, int slow)
++{
++    if (b->cursor != NO_CYCLE) {b->refresh_wanted = 1 + (slow != 0); return;}
++    b->slow_due = slow || !(b->valid & (1u << BmFull));
++    b->cursor = 0;
++    b->in_flight = 0;
++    skip_to_wanted(b);
++}
++
++uint32_t sheng_battmgr_next(ShengBattmgr *b, uint8_t out[SHENG_BATTMGR_REQUEST_BYTES])
++{
++    if (b->in_flight || b->limit_in_flight) return 0;
++    if (b->limit_due) {
++        header(out, SHENG_BATTMGR_OP_USB_SET);
++        put32(out + 12, 0);
++        put32(out + 16, 5);  /* input current limit */
++        put32(out + 20, b->limit_due);
++        b->limit_in_flight = b->limit_due;
++        b->limit_due = 0;
++        b->limit_tries++;
++        return SHENG_BATTMGR_REQUEST_BYTES;
++    }
++    if (b->cursor == NO_CYCLE || b->cursor >= BmFields) return 0;
++    header(out, kFields[b->cursor].opcode);
++    put32(out + 12, 0);
++    put32(out + 16, kFields[b->cursor].property);
++    put32(out + 20, 0);
++    b->in_flight = 1;
++    return SHENG_BATTMGR_REQUEST_BYTES;
++}
++
++/* The input current limit a port type gets from the host side: a standard port (SDP 1) the configured value, a charging downstream port
++ * (CDP 3) its 1.5 A; others (dedicated chargers, Type-C current, PD contracts) are the firmware's own. */
++static uint32_t wanted_limit(const ShengBattmgr *b, int port)
++{
++    return port == 1 ? b->sdp_limit_ua : port == 3 ? 1500000u : 0u;
++}
++
++/* After a cycle: a set is due when the port wants a higher limit than the firmware reports, at most three tries per port type. */
++static void check_limit(ShengBattmgr *b)
++{
++    const int port = (b->valid >> BmUsbAdapter) & 1 ? b->value[BmUsbAdapter] : (b->valid >> BmUsbType) & 1 ? b->value[BmUsbType] : 0;
++    if (port != b->limit_port) {b->limit_port = port; b->limit_tries = 0;}
++    const uint32_t want = wanted_limit(b, port);
++    if (!want || b->limit_tries >= 3) return;
++    if ((b->valid >> BmUsbLimit) & 1 && b->value[BmUsbLimit] >= (int32_t)want - 100000) return;  /* 100 mA under it: input limiting */
++    b->limit_due = want;
++}
++
++/* Ends the cycle when the cursor ran past the last field; starts the remembered one. Returns 1 when a cycle ended. */
++static int finish(ShengBattmgr *b)
++{
++    if (b->cursor == NO_CYCLE || b->cursor < BmFields) return 0;
++    b->cursor = NO_CYCLE;
++    b->cycles_done++;
++    check_limit(b);
++    if (b->refresh_wanted) {
++        const int slow = b->refresh_wanted == 2;
++        b->refresh_wanted = 0;
++        sheng_battmgr_refresh(b, slow);
++    }
++    return 1;
++}
++
++void sheng_battmgr_timeout(ShengBattmgr *b)
++{
++    if (b->limit_in_flight) {b->limit_in_flight = 0; b->limit_result = -60; b->timeouts++; return;}
++    if (b->cursor == NO_CYCLE || !b->in_flight) return;
++    b->timeouts++;
++    b->last_timeout = b->cursor;
++    b->valid &= ~(1u << b->cursor);
++    advance(b);
++    finish(b);
++}
++
++int sheng_battmgr_receive(ShengBattmgr *b, const uint8_t *data, uint32_t length)
++{
++    if (length < 12 || le32(data) != SHENG_BATTMGR_OWNER) {b->ignored++; return BmIgnored;}
++    const uint32_t type = le32(data + 4), opcode = le32(data + 8);
++    if (opcode == SHENG_BATTMGR_OP_NOTIFICATION) {
++        b->notifications++;
++        sheng_battmgr_refresh(b, 0);
++        return BmNotified;
++    }
++    if (type != SHENG_BATTMGR_TYPE_REQUEST) {b->ignored++; return BmIgnored;}
++    if (opcode == SHENG_BATTMGR_OP_REQUEST_NOTIFICATION) {b->enabled = 1; return BmEnabled;}
++    if (opcode == SHENG_BATTMGR_OP_USB_SET) {
++        if (!b->limit_in_flight || length < 24) {b->ignored++; return BmIgnored;}
++        b->limit_result = (int32_t)le32(data + 20);
++        if (!b->limit_result) b->limit_sets++;
++        b->limit_in_flight = 0;
++        sheng_battmgr_refresh(b, 0);  /* read the limit back */
++        return BmAnswer;
++    }
++    if (b->cursor == NO_CYCLE || b->cursor >= BmFields || !b->in_flight || length < 24) {b->ignored++; return BmIgnored;}
++    const uint32_t property = le32(data + 12), value = le32(data + 16), result = le32(data + 20);
++    if (opcode != kFields[b->cursor].opcode || property != kFields[b->cursor].property) {b->ignored++; return BmIgnored;}
++    b->responses++;
++    if (result) {
++        b->errors++;
++        b->valid &= ~(1u << b->cursor);
++    } else {
++        b->value[b->cursor] = (int32_t)value;
++        b->valid |= 1u << b->cursor;
++    }
++    advance(b);
++    return finish(b) ? BmCycleDone : BmAnswer;
++}
++
++/* POWER_SUPPLY_USB_TYPE (unknown 0, SDP 1, DCP 2, CDP 3, ACA 4, C 5, PD 6, PD_DRP 7, PD_PPS 8) to the kIOPSFamilyCode values (the
++ * USB family's error space, 0xe0004000 + n: host 0, dedicated charging port 4, downstream charging port 5, unknown 7, Type-C 9, PD 10). */
++static uint32_t family(int type)
++{
++    switch (type) {
++    case 1: return 0xe0004000u;
++    case 2: return 0xe0004004u;
++    case 3: return 0xe0004005u;
++    case 5: return 0xe0004009u;
++    case 6: case 7: case 8: return 0xe000400au;
++    default: return 0xe0004007u;
++    }
++}
++
++void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s)
++{
++#define HAS(f) ((b->valid >> (f)) & 1u)
++#define V(f) (b->value[(f)])
++    const int status = HAS(BmStatus) ? V(BmStatus) : 0;  /* POWER_SUPPLY_STATUS: 1 charging, 2 discharging, 3 not charging, 4 full */
++    s->present = HAS(BmPresent) ? V(BmPresent) != 0 : HAS(BmCapacity);
++    s->external = HAS(BmUsbOnline) && V(BmUsbOnline) != 0;
++    /* Both gauges only on a two-cell board: on fuxi (one cell) 0xa6 reads 0 and 0xa7 repeats gauge 1's remaining charge, which halved
++     * the percentage (boot log 2026-11-14: capacity 10000, gauge 1 3207/3268 mAh, "gauge 2" 0/3207); there the firmware's capacity is
++     * the state of charge. */
++    const int gauges = HAS(BmGauge1Remaining) && HAS(BmGauge1Full) && HAS(BmGauge2Remaining) && HAS(BmGauge2Full) &&
++                       V(BmGauge1Remaining) > 0 && V(BmGauge1Full) > 0 && V(BmGauge2Remaining) > 0 && V(BmGauge2Full) > 0;
++    const int64_t remaining = gauges ? (int64_t)(uint32_t)V(BmGauge1Remaining) + (uint32_t)V(BmGauge2Remaining) : 0;
++    const int64_t full = gauges ? (int64_t)(uint32_t)V(BmGauge1Full) + (uint32_t)V(BmGauge2Full) : 0;
++    int percent = full > 0 ? (int)((remaining * 100 + full / 2) / full) : HAS(BmCapacity) ? (V(BmCapacity) + 50) / 100 : 0;
++    s->percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
++    s->charge_known = full > 0 || HAS(BmCapacity);
++    s->charging = s->external && status == 1;
++    s->fully_charged = s->external && (status == 4 || s->percent == 100);
++    s->critical = s->present && !s->external && s->percent <= 2;
++    s->voltage_mv = HAS(BmVoltage) ? V(BmVoltage) / 1000 : 0;
++    s->current_ma = HAS(BmCurrent) ? -V(BmCurrent) / 1000 : 0;
++    /* -40 to 90 C; the firmware answers a fixed out-of-range value when it has no reading */
++    s->temperature_valid = HAS(BmTemperature) && V(BmTemperature) >= -4000 && V(BmTemperature) <= 9000;
++    s->temperature = s->temperature_valid ? V(BmTemperature) : 0;
++    s->raw_mah = HAS(BmCharge) ? V(BmCharge) / 1000 : 0;
++    s->full_mah = HAS(BmFull) ? V(BmFull) / 1000 : 0;
++    s->design_mah = HAS(BmDesign) ? V(BmDesign) / 1000 : 0;
++    s->cycles = HAS(BmCycles) ? V(BmCycles) : 0;
++    /* The gauge reports times in seconds, and a negative or huge value when it has none. */
++    s->time_to_empty_min = HAS(BmTimeToEmpty) && V(BmTimeToEmpty) > 0 && V(BmTimeToEmpty) < 100 * 3600 ? V(BmTimeToEmpty) / 60 : -1;
++    s->time_to_full_min = HAS(BmTimeToFull) && V(BmTimeToFull) > 0 && V(BmTimeToFull) < 100 * 3600 ? V(BmTimeToFull) / 60 : -1;
++    if (s->external) {
++        s->adapter_family = family(HAS(BmUsbType) ? V(BmUsbType) : 0);
++        s->adapter_mv = HAS(BmUsbVoltage) ? V(BmUsbVoltage) / 1000 : 0;
++        s->adapter_ma = HAS(BmUsbCurrent) ? V(BmUsbCurrent) / 1000 : 0;
++        if (s->adapter_mv < 0) s->adapter_mv = 0;
++        if (s->adapter_ma < 0) s->adapter_ma = -s->adapter_ma;
++        s->adapter_watts = (int)(((int64_t)s->adapter_mv * s->adapter_ma + 500000) / 1000000);
++    } else {
++        s->adapter_family = 0;
++        s->adapter_mv = s->adapter_ma = s->adapter_watts = 0;
++    }
++#undef HAS
++#undef V
++}
+diff --git a/package/ShengBattmgr.h b/package/ShengBattmgr.h
+new file mode 100644
+index 0000000..bb30b90
+--- /dev/null
++++ b/package/ShengBattmgr.h
+@@ -0,0 +1,91 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* The battery manager the audio DSP runs (PMIC GLINK, channel "PMIC_RTR_ADSP_APPS"): messages start with a 12-byte header (owner, type,
++ * opcode); a property read is a request {battery 0, property, 0} answered by {property, value, result}; the DSP also sends notifications
++ * when something changed. This is the message codec, the refresh cycle (one request in flight, the next one only when it is answered
++ * or the owner's timer gives up on it) and the mapping to what iOS reads from a power source. No I/O, no waits: the owner sends the
++ * bytes and feeds back what arrives. Charging itself stays with the DSP firmware; the one setting written here is the USB input current
++ * limit on a computer's port, which the firmware keeps low until the host side asks for more (as a USB device stack does once the
++ * port configured it). */
++#ifndef SHENG_BATTMGR_H
++#define SHENG_BATTMGR_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SHENG_BATTMGR_OWNER 32778u  /* the battery manager; 32779 is the USB-C port manager on the same channel */
++#define SHENG_BATTMGR_TYPE_REQUEST 1u
++#define SHENG_BATTMGR_TYPE_NOTIFY 2u
++#define SHENG_BATTMGR_OP_REQUEST_NOTIFICATION 0x04u
++#define SHENG_BATTMGR_OP_NOTIFICATION 0x07u
++#define SHENG_BATTMGR_OP_BATTERY_GET 0x30u
++#define SHENG_BATTMGR_OP_USB_GET 0x32u
++#define SHENG_BATTMGR_OP_USB_SET 0x33u
++#define SHENG_BATTMGR_OP_BOARD_GET 0x50u  /* the board's own properties, same request and answer shape: fuel gauges, charger state */
++#define SHENG_BATTMGR_REQUEST_BYTES 24u
++#define SHENG_BATTMGR_ENABLE_BYTES 28u
++
++/* The fields one refresh reads, in order (at most 32: valid has a bit per field). */
++enum {
++    BmStatus, BmPresent, BmCapacity, BmVoltage, BmCurrent, BmTemperature, BmCharge, BmUsbOnline, BmUsbType, BmUsbVoltage,
++    BmUsbCurrent, BmTimeToEmpty, BmTimeToFull, BmGauge1Remaining, BmGauge1Full, BmGauge2Remaining, BmGauge2Full, BmFull, BmDesign,
++    BmCycles,
++    /* the charger's state: port type as charger detection saw it, input current limit and the most the port offers (uA), charge type,
++     * thermal level, the charge current the charger runs, the board's view of the adapter (type, watts, PD authenticated), battery
++     * authentication of both cells, input suspended */
++    BmUsbAdapter, BmUsbLimit, BmUsbMax, BmChargeType, BmThermalLevel, BmChargeCurrent, BmRealType, BmPowerMax, BmPdVerified,
++    BmAuthentic, BmSlaveAuthentic, BmInputSuspend, BmFields
++};
++
++typedef struct {
++    int32_t value[BmFields];
++    uint32_t valid;               /* bit per field */
++    uint8_t cursor, in_flight, enabled, slow_due;
++    uint32_t cycles_done, responses, notifications, errors, timeouts, ignored;
++    uint32_t refresh_wanted;      /* a notification asked for a new cycle while one ran */
++    int last_timeout;             /* the field the last timeout skipped, -1 none */
++    /* the input current limit on a computer's port: what a standard port (SDP) gets, 0 to leave the firmware's; the port type the
++     * tries count for; the value due to be sent, the one in flight, tries for this port type, sets the firmware took, the last result
++     * (the firmware's, or -60 timed out) */
++    uint32_t sdp_limit_ua;
++    int32_t limit_port;
++    uint32_t limit_due, limit_in_flight, limit_tries, limit_sets;
++    int32_t limit_result;
++} ShengBattmgr;
++
++/* What a power source shows. Temperatures are hundredths of a degree Celsius, as the firmware reports them. The charge comes from the
++ * board's two fuel gauges (remaining over full, both summed) when they answer, else from the battery's capacity property; the board
++ * reports the current with discharge positive, the power source with charge positive. */
++typedef struct {
++    int present, external, charging, fully_charged, critical;
++    int percent;                  /* 0..100 */
++    int charge_known;             /* percent comes from a reading, not a default */
++    int voltage_mv, current_ma;   /* current: positive while the battery takes charge */
++    int temperature, temperature_valid;  /* valid: a reading in the range a battery can have */
++    int raw_mah, full_mah, design_mah, cycles;
++    int time_to_empty_min, time_to_full_min;  /* -1 unknown */
++    uint32_t adapter_family;      /* kIOPSFamilyCode value, 0 when no adapter */
++    int adapter_mv, adapter_ma, adapter_watts;
++} ShengBatterySnapshot;
++
++enum {BmIgnored = 0, BmAnswer = 1, BmCycleDone = 2, BmNotified = 3, BmEnabled = 4};
++
++void sheng_battmgr_init(ShengBattmgr *b);
++/* The notification enable request (sent once the channel is up). */
++uint32_t sheng_battmgr_enable_request(uint8_t out[SHENG_BATTMGR_ENABLE_BYTES]);
++/* Starts a refresh cycle (no effect while one runs: it is remembered and runs after). slow: also the fields that hardly change. */
++void sheng_battmgr_refresh(ShengBattmgr *b, int slow);
++/* The next request: an input current limit due after the last cycle, else the running cycle's next field; 0 when nothing is to be
++ * sent now (one in flight, or nothing due). */
++uint32_t sheng_battmgr_next(ShengBattmgr *b, uint8_t out[SHENG_BATTMGR_REQUEST_BYTES]);
++/* The owner's request timer ran out: the field is skipped (a limit set counts as tried). */
++void sheng_battmgr_timeout(ShengBattmgr *b);
++/* A message from the channel; returns one of the Bm* results. */
++int sheng_battmgr_receive(ShengBattmgr *b, const uint8_t *data, uint32_t length);
++/* The power source values from the fields read so far. */
++void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/package/Sm8550Gcc.c b/package/Sm8550Gcc.c
+new file mode 100644
+index 0000000..1b54f0a
+--- /dev/null
++++ b/package/Sm8550Gcc.c
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#include "Sm8550GeniUart.h"
++#include "Sm8550QupDma.h"
++#include <IOKit/IOLocks.h>
++static IOLock *gcc_lock;
++static IOLock *smmu_lock;
++static uint32_t uart14_initial_bus;
++static bool uart14_claimed;
++static IOLock *get_gcc_lock(void) {
++    IOLock *lock=__atomic_load_n(&gcc_lock,__ATOMIC_ACQUIRE);
++    if(!lock) {
++        IOLock *candidate=IOLockAlloc();if(!candidate)return NULL;
++        if(__atomic_compare_exchange_n(&gcc_lock,&lock,candidate,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))lock=candidate;
++        else IOLockFree(candidate);
++    }
++    return lock;
++}
++bool sm8550_apps_smmu_lock(void) {
++    IOLock *lock=__atomic_load_n(&smmu_lock,__ATOMIC_ACQUIRE);
++    if(!lock) {
++        IOLock *candidate=IOLockAlloc();if(!candidate)return false;
++        if(__atomic_compare_exchange_n(&smmu_lock,&lock,candidate,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))lock=candidate;
++        else IOLockFree(candidate);
++    }
++    IOLockLock(lock);return true;
++}
++void sm8550_apps_smmu_unlock(void) {IOLockUnlock(smmu_lock);}
++bool sm8550_gcc_update32(volatile uint32_t *reg,uint32_t clear,uint32_t set) {
++    if(!reg)return false;
++    IOLock *lock=get_gcc_lock();if(!lock)return false;
++    IOLockLock(lock);*reg=(*reg&~clear)|set;
++    __asm__ volatile("dsb sy" ::: "memory");
++    bool ok=(*reg&set)==set && (*reg&(clear&~set))==0;
++    IOLockUnlock(lock);return ok;
++}
++bool sm8550_geni_uart14_vote(volatile uint32_t *reg,bool enabled) {
++    if(!reg)return false;
++    IOLock *lock=get_gcc_lock();if(!lock)return false;
++    IOLockLock(lock);uint32_t value=*reg;
++    if(!enabled && !uart14_claimed){IOLockUnlock(lock);return true;}
++    if(enabled) {
++        if(!uart14_claimed){uart14_initial_bus=value&0xfu;uart14_claimed=true;}
++        value|=0x40fu;
++    } else {
++        value&=~0x400u;
++        if(!(value&0x203f0u))value&=~(0xfu&~uart14_initial_bus);
++    }
++    *reg=value;__asm__ volatile("dsb sy" ::: "memory");
++    bool ok=(*reg&0x40fu)==(value&0x40fu);IOLockUnlock(lock);return ok;
++}
+diff --git a/package/Sm8550GeniUart.c b/package/Sm8550GeniUart.c
+new file mode 100644
+index 0000000..d08c769
+--- /dev/null
++++ b/package/Sm8550GeniUart.c
+@@ -0,0 +1,36 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* GCC UART14 RCG sequence from gcc-sm8550.c / clk-rcg2.c at the Linux source pin. */
++#include "Sm8550GeniUart.h"
++#ifdef KERNEL
++#include <sys/errno.h>
++#else
++#include <errno.h>
++#endif
++int sm8550_geni_uart14_source(const struct sm8550_geni_clock_io *io,uint32_t baud,uint32_t *hz) {
++    if(!io || !io->read || !io->write || !io->delay_us || !hz)return -EINVAL;
++    uint32_t m,n,rate;
++    switch(baud) {
++        case 115200:m=384;n=15625;rate=7372800;break;
++        case 3000000:m=4;n=25;rate=48000000;break;
++        case 3200000:m=64;n=375;rate=51200000;break;
++        case 4000000:m=16;n=75;rate=64000000;break;
++        default:return -EINVAL;
++    }
++    const uint32_t root=0x1e760;
++    /* This SE is exclusive to UART14; manual RCG mode owns its source. */
++    uint32_t dfs=io->read(io->context,root+0x14);
++    io->write(io->context,root+0x14,dfs&~1u);
++    if(io->read(io->context,root+0x14)&1u)return -EIO;
++    io->write(io->context,root+8,(io->read(io->context,root+8)&~0xffffu)|m);
++    io->write(io->context,root+12,(io->read(io->context,root+12)&~0xffffu)|(~(n-m)&0xffffu));
++    io->write(io->context,root+16,(io->read(io->context,root+16)&~0xffffu)|(~n&0xffffu));
++    uint32_t cfg=io->read(io->context,root+4);
++    cfg=(cfg&~(0x1fu|0x700u|0x3000u|0x100000u))|1u|(6u<<8)|(2u<<12);
++    io->write(io->context,root+4,cfg);
++    io->write(io->context,root,io->read(io->context,root)|1u);
++    for(unsigned i=0;i<1000;i++) {
++        if(!(io->read(io->context,root)&1u)){*hz=rate;return 0;}
++        io->delay_us(io->context,1);
++    }
++    return -ETIMEDOUT;
++}
+diff --git a/package/Sm8550GeniUart.h b/package/Sm8550GeniUart.h
+new file mode 100644
+index 0000000..7f4f45a
+--- /dev/null
++++ b/package/Sm8550GeniUart.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef SM8550_GENI_UART_H
++#define SM8550_GENI_UART_H
++#include <stdbool.h>
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++#define SM8550_UART14_BASE 0x00898000ULL
++#define SM8550_QUP2_BASE 0x008c0000ULL
++#define SM8550_UART14_INTID 493u
++#define SM8550_QUP2_SID 0x423u
++struct sm8550_geni_clock_io {
++    void *context;
++    uint32_t (*read)(void *,uint32_t);
++    void (*write)(void *,uint32_t,uint32_t);
++    void (*delay_us)(void *,unsigned);
++};
++/* UART engine is stopped before source changes. GPLL0-even is 300 MHz. */
++int sm8550_geni_uart14_source(const struct sm8550_geni_clock_io *,uint32_t baud,uint32_t *hz);
++/* Serialize shared GCC votes from worker context. Returns false on allocation failure. */
++bool sm8550_gcc_update32(volatile uint32_t *,uint32_t clear,uint32_t set);
++/* Own SE6 and its newly acquired shared core/AHB votes. */
++bool sm8550_geni_uart14_vote(volatile uint32_t *,bool enabled);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/package/Sm8550QupDma.c b/package/Sm8550QupDma.c
+new file mode 100644
+index 0000000..5ea7e4d
+--- /dev/null
++++ b/package/Sm8550QupDma.c
+@@ -0,0 +1,84 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#include "Sm8550QupDma.h"
++#include "ArmSmmu4K.h"
++#ifdef KERNEL
++#include <sys/errno.h>
++#else
++#include <errno.h>
++#endif
++static unsigned bits(unsigned code) {static const unsigned sizes[]={32,36,40,42,44,48};return code<6?sizes[code]:0;}
++int sm8550_qup_dma_attach(const struct sm8550_qup_dma_io *io,struct sm8550_qup_dma *d,uint16_t sid,
++    uint64_t pa,size_t bytes,uint64_t tpa,uint64_t *tables,size_t capacity) {
++    if(!io || !io->read || !io->write || !io->delay_us || !io->publish || !d || !tables ||
++        !bytes || bytes>0x200000 || (bytes&4095) || (pa&4095) || (tpa&4095) || sid>0x7fff || d->active || d->poisoned)return -EINVAL;
++    uint32_t id0=io->read(io->context,0x20),id1=io->read(io->context,0x24),id2=io->read(io->context,0x28);
++    d->id0=id0;d->id1=id1;d->id2=id2;
++    d->free_slots=d->unused_banks=d->rejected_config=d->exhausted=0;
++    d->rejected_cbar=d->rejected_cba2r=d->rejected_sctlr=d->rejected_fsr=0;
++    unsigned slots=id0&255,banks=id1&255,pages=1u<<(((id1>>28)&7)+1);
++    if(!(id0&(1u<<30)) || !(id0&(1u<<27)) || (id0&(1u<<8)) || !(id2&(1u<<12)) ||
++        !slots || slots>128 || banks<2 || banks>128 || (id1>>31) || (pages+banks)*4096>0xd0000)return -ENOTSUP;
++    uint32_t scr0=io->read(io->context,0);
++    if((scr0&1) || !(scr0&(1u<<10)))return -ENOTSUP;
++    bool used[128]={false};unsigned slot=slots,bank=banks,asid=0;
++    for(unsigned i=0;i<slots;i++) {
++        uint32_t smr=io->read(io->context,0x800+i*4),s2cr=io->read(io->context,0xc00+i*4);
++        if(!(smr&(1u<<31))) {d->free_slots++;if(slot==slots)slot=i;continue;}
++        if(((s2cr>>16)&3)==0 && (s2cr&255)<banks)used[s2cr&255]=true;
++        if(!((smr^sid)&0x7fff&~((smr>>16)&0x7fff)))return -EBUSY;
++    }
++    if(slot==slots){d->exhausted=1;return -ENOSPC;}
++    for(unsigned i=1;i<banks;i++) {
++        unsigned cb=(pages+i)*4096;
++        if(used[i])continue;
++        d->unused_banks++;
++        uint32_t cbar=io->read(io->context,0x1000+i*4);
++        if(cbar){d->rejected_config++;d->rejected_cbar=cbar;continue;}
++        uint32_t cba2r=io->read(io->context,0x1800+i*4);
++        if(cba2r){d->rejected_config++;d->rejected_cba2r=cba2r;continue;}
++        d->rejected_sctlr=io->read(io->context,cb);
++        if(d->rejected_sctlr&1u)continue;
++        d->rejected_fsr=io->read(io->context,cb+0x58);
++        if(!(d->rejected_fsr&0xc00001feu)){bank=i;break;}
++    }
++    if(bank==banks){d->exhausted=2;return -ENOSPC;}
++    for(unsigned candidate=1;candidate<256;candidate++) {
++        bool taken=false;
++        for(unsigned i=0;i<banks;i++)if(used[i] || (io->read(io->context,(pages+i)*4096)&1)) {
++            if((io->read(io->context,(pages+i)*4096+0x24)>>16)==candidate ||
++                (io->read(io->context,(pages+i)*4096+0x2c)>>16)==candidate){taken=true;break;}
++        }
++        if(!taken){asid=candidate;break;}
++    }
++    if(!asid){d->exhausted=3;return -ENOSPC;}
++    unsigned output=bits((id2>>4)&15);if(!output)return -ENOTSUP;
++    ArmSmmu4KConfig cfg={32,output,tpa,bytes/4096};
++    ArmSmmu4KRange range={SM8550_QUP_DMA_IOVA,pa,bytes,ArmSmmu4KRead|ArmSmmu4KWrite,1,3};
++    ArmSmmu4KResult result;
++    if(ArmSmmu4KBuild(&cfg,&range,1,tables,capacity,&result)!=ArmSmmu4KSuccess)return -EINVAL;
++    if(result.start_level!=1)return -EINVAL;
++    io->publish(io->context,tables,result.table_pages*4096);
++    unsigned cb=(pages+bank)*4096;
++    d->bank=bank;d->slot=slot;d->asid=asid;d->pages=pages;d->poisoned=true;
++    io->write(io->context,0x1800+bank*4,1);
++    io->write(io->context,0x1000+bank*4,0x1f300);
++    io->write(io->context,cb+0x10,((id2>>4)&15)|(7u<<15));
++    io->write(io->context,cb+0x30,32u|(3u<<12)|(1u<<23));
++    io->write(io->context,cb+0x20,(uint32_t)tpa);
++    io->write(io->context,cb+0x24,(uint32_t)(tpa>>32)|(asid<<16));
++    io->write(io->context,cb+0x28,0);io->write(io->context,cb+0x2c,0);
++    io->write(io->context,cb+0x38,(uint32_t)result.mair);io->write(io->context,cb+0x3c,(uint32_t)(result.mair>>32));
++    io->write(io->context,cb+0x618,0);io->write(io->context,cb+0x7f0,0);
++    unsigned poll=0;
++    for(;poll<1000 && (io->read(io->context,cb+0x7f4)&1);poll++)io->delay_us(io->context,1);
++    if(poll==1000)return -ETIMEDOUT;
++    io->write(io->context,cb,0x00c01027);
++    if(io->read(io->context,cb)!=0x00c01027 || io->read(io->context,cb+0x20)!=(uint32_t)tpa ||
++        io->read(io->context,cb+0x24)!=((uint32_t)(tpa>>32)|(asid<<16)))return -EIO;
++    io->write(io->context,0xc00+slot*4,bank);
++    io->write(io->context,0x800+slot*4,0x80000000u|sid);
++    if(io->read(io->context,0xc00+slot*4)!=bank || io->read(io->context,0x800+slot*4)!=(0x80000000u|sid)) {
++        io->write(io->context,0xc00+slot*4,2u<<16);return -EIO;
++    }
++    d->active=true;d->poisoned=false;return 0;
++}
+diff --git a/package/Sm8550QupDma.h b/package/Sm8550QupDma.h
+new file mode 100644
+index 0000000..522a9a1
+--- /dev/null
++++ b/package/Sm8550QupDma.h
+@@ -0,0 +1,35 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef SM8550_QUP_DMA_H
++#define SM8550_QUP_DMA_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++#define SM8550_QUP_DMA_IOVA 0x40000000ULL
++struct sm8550_qup_dma_io {
++    void *context;
++    uint32_t (*read)(void *,uint32_t);
++    void (*write)(void *,uint32_t,uint32_t);
++    void (*delay_us)(void *,unsigned);
++    void (*publish)(void *,void *,size_t);
++};
++struct sm8550_qup_dma {
++    unsigned bank,slot,asid,pages;
++    /* Selection evidence from existing reads, with no diagnostic MMIO scan.
++     * exhausted: 1 stream slots, 2 context banks, 3 ASIDs. */
++    uint32_t id0,id1,id2,rejected_cbar,rejected_cba2r,rejected_sctlr,rejected_fsr;
++    unsigned free_slots,unused_banks,rejected_config,exhausted;
++    bool active,poisoned;
++};
++/* Master is idle and caller holds the apps-SMMU configuration lock.
++ * Buffers and page tables stay allocated for this domain's entire lifetime. */
++int sm8550_qup_dma_attach(const struct sm8550_qup_dma_io *,struct sm8550_qup_dma *,uint16_t sid,
++    uint64_t buffer_pa,size_t bytes,uint64_t tables_pa,uint64_t *tables,size_t table_pages);
++bool sm8550_apps_smmu_lock(void);
++void sm8550_apps_smmu_unlock(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/package/WcnPower.h b/package/WcnPower.h
+new file mode 100644
+index 0000000..175fbfe
+--- /dev/null
++++ b/package/WcnPower.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef SHENG_WCN_POWER_H
++#define SHENG_WCN_POWER_H
++#ifdef __cplusplus
++extern "C" {
++#endif
++enum { SHENG_WCN_WLAN=0, SHENG_WCN_BLUETOOTH=1 };
++/* One ownership vote per radio, idempotent until put. Return positive errno. */
++int sheng_wcn_power_get(unsigned radio);
++int sheng_wcn_power_put(unsigned radio);
++unsigned sheng_wcn_power_owners(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+-- 
+2.53.0
+
