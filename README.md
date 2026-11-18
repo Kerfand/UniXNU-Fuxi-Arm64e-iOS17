@@ -24,11 +24,14 @@
 
 - **GPU / 显示**：Adreno 740 执行命令，IOSurface 与交换链正常，b3a8（XR10）帧由 CPU 转换后上屏。
 - **触控**：FTM5 正常；21H16 上内核 `IOHIDEventDriver` 需要 IOHIDDevice 带 `HIDDefaultBehavior` 才会匹配（配合 `dk=0` 跳过 DriverKit）；补上 `OSArray::withObjects` 映射后触控不再卡死。
-- **按键**：`FuxiButtons`（PMK8550 PON/RESIN + PM8550 GPIO6）接入 NativeHidInput report 2，电源可用，音量键不可用。
-- **激活**：Data 种子缺 `/private/var/Keychains`，securityd 无法打开钥匙串，mobileactivationd 迁移失败。内核在 Data 挂载后按 21H16 系统卷 `/private/var` 模板补齐目录（`sheng-data-skel=1`，表由 `tools/mkskel.py` 从你自己的 IPSW 生成），mobileactivationd 原生激活，已跳过激活。
-- **亮度**：`fuxi-backlight=dsi`（DCS 0x51）+ `sheng-backlight-control=1`；arm64e 上改为真正的 `getMetaClass()` 重写，不再改虚表。
+- **按键**：`FuxiButtons`（PMK8550 PON/RESIN + PM8550 GPIO6）接入 NativeHidInput report 2，电源可用，音量键可用。
+
 - **GPU 插件**：Turnip（`libvulkan_freedreno.dylib`）改用 chained fixups 链接，修复 mediaserverd / iconservicesagent 在子线程加载 Metal 时 dyld 栈溢出（设置打开慢的根因）。
 - **壁纸**：默认壁纸 7565 的 HEIC 图层需转成 PNG（Windows WIC，保留 alpha），由 `ios17-wallpaper-iphone.patch` 挂载；挂载成功，但 PosterBoard 的渲染扩展尚未出现，**壁纸仍不显示**。
+
+## 进度更新（2026-11-12）
+
+- **Wifi**：修复Wifi扫描和连接(2.4)✓ 上网❌
 
 ## 进度更新（2026-11-13）
 
@@ -42,17 +45,16 @@
   - **仍无声**：播放路由要求 HAL 级扬声器保护（`spac`），尚未满足。
 - **内核探针**：1 kHz 热点采样器增加 LR 与整栈包含式统计（`zz-hot-sampler.patch`），线程探针、IOKit 探针常驻关键词。
 
-## 进度更新（2026-11-13）
-
-修复电池状态(电量显示,充电状态显示)
-修复迁移(补全系统应用)
-修复壁纸显示(桌面壁纸,锁屏壁纸)
-修复数据固化(重启保留数据)
-扩大数据空间为48G
-
 ## 进度更新（2026-11-14）
 
-修复蓝牙上电(未接入用户态)
+- **电池**：修复电量针✓ 修复电池状态显示✓
+- **迁移**：修复开机迁移✓ 补全系统应用
+- **壁纸**：修复壁纸渲显示✓ 桌面/锁屏壁纸✓
+- **存储**：修复数据保留✓ 扩容Data种子为48G
+
+## 进度更新（2026-11-15）
+
+- **蓝牙**：修复蓝牙上电✓(暂未接入用户态)
 
 ## 进度更新（2026-11-17）
 
