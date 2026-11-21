@@ -238,7 +238,7 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
  	return error;
  }
  
-@@ -6947,6 +6950,34 @@
+@@ -6947,6 +6950,45 @@
   *	namei:???
   *	vn_stat:???
   */
@@ -249,6 +249,17 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +static void
 +unixnu_fp_note(const char *call, user_addr_t path, enum uio_seg segflg, int error)
 +{
++	/* fuxi 2026-11-20: off unless unixnu-fp=1 - a path copy and 14 substring scans on every stat/open/access were a
++	 * visible share of backboardd's kernel time (U24 hot sampler). */
++	static int unixnu_fp_on = -1;
++	if (unixnu_fp_on < 0) {
++		int on = 0;
++		(void)PE_parse_boot_argn("unixnu-fp", &on, sizeof(on));
++		unixnu_fp_on = on == 1;
++	}
++	if (!unixnu_fp_on) {
++		return;
++	}
 +	char buf[256];
 +	size_t len = 0;
 +	int copy_error = segflg == UIO_SYSSPACE ? copystr(CAST_DOWN(void *, path), buf, sizeof(buf), &len)

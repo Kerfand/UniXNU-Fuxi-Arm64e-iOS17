@@ -120,6 +120,88 @@ bool serialClock(bool enabled) {
     for(unsigned i=0;i<1000;i++){if(!(grd(nullptr,0x1e754)&(1u<<31))){bt.clocked=true;return true;}IODelay(1);}
     return false;
 }
+// fuxi 2026-11-17: HCI scan counters for the boot log ("[bluetooth hci]"), read from the H4 streams bluetoothd exchanges with the
+// controller (no change to the traffic). Commands: total, LE scan enable (0x200c, 0x2042) and inquiry (0x0401) requests with their
+// enable byte; events: total, command complete/status, hardware errors, LE advertising reports (0x3e/0x02, extended 0x3e/0x0d),
+// inquiry results (0x02, 0x22, 0x2f) and the last reported address with its RSSI.
+struct HciScan {
+    uint64_t commands, scanOn, scanOff, inquiries, events, complete, status, hwErrors, advReports, extReports, inquiryResults, acl;
+    uint8_t lastAddr[6]; int8_t lastRssi; uint8_t lastKind; uint32_t distinct; uint8_t seen[32][6];
+};
+static HciScan gHci;
+// One H4 direction: type byte, header, payload (the first 16 payload bytes kept).
+struct H4Parser {uint8_t type, header[4], headerNeed, headerHave; uint32_t remaining, kept; uint8_t payload[16];};
+static H4Parser gHciRx, gHciTx;
+static void hciRemember(const uint8_t *addr, int8_t rssi, uint8_t kind) {
+    memcpy(gHci.lastAddr, addr, 6); gHci.lastRssi = rssi; gHci.lastKind = kind;
+    for (uint32_t i = 0; i < gHci.distinct && i < 32; ++i) if (!memcmp(gHci.seen[i], addr, 6)) return;
+    if (gHci.distinct < 32) memcpy(gHci.seen[gHci.distinct], addr, 6);
+    gHci.distinct++;
+}
+static void hciPacket(bool tx, const H4Parser &h) {
+    const uint8_t *q = h.payload;
+    if (tx) {
+        if (h.type != 1) return;
+        gHci.commands++;
+        const uint16_t op = (uint16_t)(h.header[0] | h.header[1] << 8);
+        if (op == 0x200c || op == 0x2042) {if (h.kept >= 1 && q[0]) gHci.scanOn++; else gHci.scanOff++;}
+        if (op == 0x0401) gHci.inquiries++;
+        return;
+    }
+    if (h.type == 2) {gHci.acl++; return;}
+    if (h.type != 4) return;
+    gHci.events++;
+    const uint8_t code = h.header[0];
+    if (code == 0x0e) gHci.complete++;
+    else if (code == 0x0f) gHci.status++;
+    else if (code == 0x10) gHci.hwErrors++;
+    else if (code == 0x3e && h.kept >= 1) {
+        // 0x02: subevent, count, event type, address type, address, data length, data, RSSI (RSSI past the kept bytes: unknown)
+        if (q[0] == 0x02) {gHci.advReports++; if (h.kept >= 10) hciRemember(q + 4, 127, 1);}
+        // 0x0d: subevent, count, event type (2), address type, address, ..., RSSI at offset 14
+        else if (q[0] == 0x0d) {gHci.extReports++; if (h.kept >= 11) hciRemember(q + 5, h.kept >= 15 ? (int8_t)q[14] : 127, 2);}
+    } else if ((code == 0x02 || code == 0x22 || code == 0x2f) && h.kept >= 7) {
+        gHci.inquiryResults++;
+        hciRemember(q + 1, code == 0x02 ? 127 : (h.kept >= 14 ? (int8_t)q[13] : 127), 3);
+    }
+}
+static void hciFeed(bool tx, H4Parser &h, const uint8_t *bytes, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t c = bytes[i];
+        if (!h.type) {
+            h.type = c; h.headerHave = 0; h.kept = 0;
+            h.headerNeed = c == 1 ? 3 : c == 2 ? 4 : c == 3 ? 3 : c == 4 ? 2 : c == 5 ? 4 : 0;
+            if (!h.headerNeed) h.type = 0;  // not H4 framing (vendor bytes): resynchronise on the next byte
+            continue;
+        }
+        if (h.headerHave < h.headerNeed) {
+            h.header[h.headerHave++] = c;
+            if (h.headerHave == h.headerNeed) {
+                h.remaining = h.type == 1 ? h.header[2] : h.type == 2 ? (uint32_t)(h.header[2] | h.header[3] << 8) :
+                              h.type == 3 ? h.header[2] : h.type == 4 ? h.header[1] : (uint32_t)((h.header[2] | h.header[3] << 8) & 0x3fff);
+                if (!h.remaining) {hciPacket(tx, h); h.type = 0;}
+            }
+            continue;
+        }
+        if (h.kept < sizeof h.payload) h.payload[h.kept] = c;
+        h.kept++;
+        if (--h.remaining == 0) {if (h.kept > sizeof h.payload) h.kept = sizeof h.payload; hciPacket(tx, h); h.type = 0;}
+    }
+}
+static void hciLog() {
+    static HciScan last; static uint64_t lastNs;
+    const uint64_t now = mach_absolute_time();
+    if (!memcmp(&last, &gHci, offsetof(HciScan, seen))) return;
+    uint64_t ns; absolutetime_to_nanoseconds(now - lastNs, &ns);
+    if (lastNs && ns < 5000000000ULL) return;
+    last = gHci; lastNs = now;
+    const uint8_t *a = gHci.lastAddr;
+    printf("[bluetooth hci] cmds %llu scan-on %llu scan-off %llu inquiry %llu | events %llu complete %llu status %llu hwerr %llu acl %llu | "
+           "le-adv %llu le-ext %llu inq-result %llu devices %u last %02x:%02x:%02x:%02x:%02x:%02x rssi %d kind %u\n",
+           gHci.commands, gHci.scanOn, gHci.scanOff, gHci.inquiries, gHci.events, gHci.complete, gHci.status, gHci.hwErrors, gHci.acl,
+           gHci.advReports, gHci.extReports, gHci.inquiryResults, gHci.distinct, a[5], a[4], a[3], a[2], a[1], a[0], gHci.lastRssi,
+           gHci.lastKind);
+}
 size_t rxBytes(void *,const uint8_t *bytes,size_t n) {
     if(bt.loopback) {
         size_t count=sizeof(bt.loop_rx)-bt.loop_length;if(count>n)count=n;
@@ -152,7 +234,7 @@ size_t rxBytes(void *,const uint8_t *bytes,size_t n) {
     }
     bt.rx_sequence+=n;return qbt_receive(bt.core,bytes,n);
 }
-size_t nativeRx(void *,const uint8_t *bytes,size_t n){return qbt_transport_receive(bytes,(uint32_t)n);}
+size_t nativeRx(void *,const uint8_t *bytes,size_t n){hciFeed(false,gHciRx,bytes,n);return qbt_transport_receive(bytes,(uint32_t)n);}
 size_t writeUart(void *,const uint8_t *p,size_t n){return qbt_geni_write(&bt.geni,p,n);}
 bool drained(void *){return bt.gated || qbt_geni_drained(&bt.geni);}
 int flow(void *,bool enabled){qbt_geni_set_flow(&bt.geni,enabled);return 0;}
@@ -457,7 +539,7 @@ void worker(void *,wait_result_t) {
             if(active!=bt.service){qbt_set_service(bt.core,active);bt.service=active;closeAt=active?0:nowNs(nullptr)+500000000ULL;}
             uint8_t tx[2048];size_t room=qbt_transmit_capacity(bt.core);
             if(room>sizeof(tx))room=sizeof(tx);
-            if(room){uint32_t n=qbt_transport_tx_take(tx,(uint32_t)room);if(n && qbt_transmit(bt.core,tx,n))e=-EIO;}
+            if(room){uint32_t n=qbt_transport_tx_take(tx,(uint32_t)room);if(n)hciFeed(true,gHciTx,tx,n);if(n && qbt_transmit(bt.core,tx,n))e=-EIO;}
             qbt_step(bt.core);
             struct qbt_info info;qbt_get_info(bt.core,&info);
             if(info.state==3 || bt.geni.state==QBT_GENI_FAILED || (closeAt && nowNs(nullptr)>=closeAt)) {
@@ -477,6 +559,7 @@ void worker(void *,wait_result_t) {
             native_bluetooth_stats[26]=stats.malformed;native_bluetooth_stats[27]=stats.unmatched_events;
             native_bluetooth_stats[28]=bt.geni.stats.rx_dma;native_bluetooth_stats[29]=bt.geni.stats.tx_dma;
             native_bluetooth_stats[15]=bt.geni.stats.line_errors;native_bluetooth_stats[16]=bt.geni.stats.dma_errors;
+            hciLog();
             health=t+1000000000ULL;
         }
         uint64_t deadline=bt.powered?qbt_deadline(bt.core):UINT64_MAX;

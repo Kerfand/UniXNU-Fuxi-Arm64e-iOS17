@@ -279,6 +279,101 @@ static void zero32 (void *start, size_t length)
 // (arm_smmu_write_sme). ARM IHI 0062D.c table 3-1 additionally requires VA64=1
 // for inputs above 32 bits even with SCTLR.M=0. Storage DMA path only; this
 // is physical pass-through, not a page-table or Adreno 4 KiB qualification.
+// fuxi 2026-11-18: direct-DPU scanout, ported from UniXNU/ShengUfs NativeUfs.cpp (f020bd6). Replaces the weak stubs of
+// device/package/FuxiDpuScanoutStubs.c: the display bank gets a stage 1 table with kDpuSlots windows for the compositor's
+// surfaces, and native_ufs_dpu_state bit 31 tells NativeLegacyDisplay.cpp that it may flip directly (boot-arg sheng-dpu-scanout=2).
+extern "C" volatile uint32_t native_ufs_dpu_smmu[24];
+extern "C" volatile uint32_t native_ufs_dpu_state;
+extern "C" volatile uint32_t native_ufs_dpu_check[8];
+// The display bank's stage 1 table: L1, then L2 for the first GiB, then kDpuSlots * kDpuSlotTables L3 tables (one per 2 MiB of a slot).
+constexpr uint32_t kDpuWindow = 0x10000000U, kDpuSlots = 4, kDpuSlotBytes = 32U << 20, kDpuSlotTables = kDpuSlotBytes >> 21;
+static uint64_t *gDpuTables;
+static uintptr_t gDpuCb;
+static IOLock *gDpuLock;
+static uintptr_t gDpuLiveCb;
+// FSR fault bits (TF .. UUT, SS, MULTI); 0x600 is the format field.
+constexpr uint32_t kDpuFaults = 0xc00001feU;
+static void dpuClean (const void *start, size_t length)
+{
+  for (size_t off = 0; off < length; off += 64)
+    __asm__ volatile ("dc civac, %0" :: "r" (static_cast<const uint8_t *> (start) + off) : "memory");
+  __asm__ volatile ("dsb sy" ::: "memory");
+}
+static bool dpuTlbFlush (uintptr_t cb)
+{
+  write32 (cb, 0x618, 0); write32 (cb, 0x7f0, 0);   // TLBIALL, TLBSYNC
+  __asm__ volatile ("dsb sy" ::: "memory");
+  for (unsigned spin = 0; spin < 100000; ++spin) if (!(read32 (cb, 0x7f4) & 1)) return true;
+  return false;
+}
+static void dpuEnable (uintptr_t smmu, uintptr_t cb, uint32_t bank, uint32_t oldSctlr)
+{
+  (void) smmu;
+  const size_t bytes = (2 + kDpuSlots * kDpuSlotTables) * 4096;
+  IOBufferMemoryDescriptor *tables = IOBufferMemoryDescriptor::inTaskWithOptions (
+    kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
+    static_cast<IOOptionBits> (kIOMemoryMapperNone), bytes, 4096);
+  gDpuLock = IOLockAlloc ();
+  if (!tables || !gDpuLock) {native_ufs_dpu_state = 0xdead0002U; return;}
+  uint64_t *l1 = static_cast<uint64_t *> (tables->getBytesNoCopy ()), *l2 = l1 + 512;
+  const uint64_t pa = tables->getPhysicalSegment (0, nullptr, kIOMemoryMapperNone);
+  bzero (l1, bytes);
+  // Normal non-cacheable (attribute 0 = 0x44), not shareable, access flag, readable and writable at both privilege levels.
+  const uint64_t attrs = (1ULL << 10) | (1ULL << 6);
+  // i564: the first fetch faulted at once with FSYNR0 level 0, so the walk may start at level 0 although T0SZ 32 means level 1. One table
+  // serves every level: [0] points back at itself (level 0 -> level 1, level 1 -> level 2 for the window), [2] and [3] are the 1 GiB
+  // blocks, [128 + t] the window's level 3 tables. The second page stays unused.
+  (void) l2;
+  l1[0] = pa | 3;
+  l1[2] = 0x80000000ULL | attrs | 1;
+  l1[3] = 0xc0000000ULL | attrs | 1;
+  for (uint32_t t = 0; t < kDpuSlots * kDpuSlotTables; ++t) l1[(kDpuWindow >> 21) + t] = (pa + (2 + t) * 4096ULL) | 3;
+  dpuClean (l1, bytes);
+  const uint32_t old[5] = {read32 (cb, 0x20), read32 (cb, 0x24), read32 (cb, 0x10), read32 (cb, 0x30), read32 (cb, 0x38)};
+  gDpuLiveCb = cb;
+  write32 (cb, 0x20, static_cast<uint32_t> (pa)); write32 (cb, 0x24, static_cast<uint32_t> (pa >> 32));
+  // TCR2 (PASIZE bits 2:0, SEP bits 17:15): 48-bit output and SEP 7 (the sign extension comes from the upstream address, as arm-smmu's AArch64 contexts set it). SEP 0 takes
+  // IA[31] as the sign bit, so every address with bit 31 set but zero above it (the display's own framebuffer at 0xb90f7500: i564, and the
+  // first fetch of every earlier try) is out of TTBR0's range and faults at level 0.
+  write32 (cb, 0x10, 5U | (7U << 15));
+  write32 (cb, 0x30, 32U | (1U << 23));               // T0SZ 32, non-cacheable walks, 4 KiB granule, no TTBR1
+  write32 (cb, 0x38, 0x44);                           // MAIR attribute 0: normal non-cacheable
+  __asm__ volatile ("dsb sy" ::: "memory");
+  volatile uint32_t *c = native_ufs_dpu_check;
+  c[0] = read32 (cb, 0x20); c[1] = read32 (cb, 0x30); c[2] = read32 (cb, 0x58);
+  const auto undo = [&] (uint32_t why) {
+    write32 (cb, 0x0, oldSctlr);
+    __asm__ volatile ("dsb sy; isb" ::: "memory");
+    write32 (cb, 0x20, old[0]); write32 (cb, 0x24, old[1]); write32 (cb, 0x10, old[2]); write32 (cb, 0x30, old[3]); write32 (cb, 0x38, old[4]);
+    const uint32_t fsr = read32 (cb, 0x58);
+    if (fsr & (1U << 30)) write32 (cb, 0x8, 1);        // RESUME: terminate a stalled transaction
+    if (fsr & kDpuFaults) write32 (cb, 0x58, fsr);     // write one to clear
+    dpuTlbFlush (cb);
+    native_ufs_dpu_state = why;
+  };
+  if (c[0] != static_cast<uint32_t> (pa) || c[1] != (32U | (1U << 23))) {undo (0xdead0003U); return;}   // the bank ignores our writes
+  if (!dpuTlbFlush (cb)) {undo (0xdead0004U); return;}
+  // fuxi 2026-11-20: no CFIE. U30 reset without a panic a few frames after the first direct flip; a context fault interrupt nobody
+  // handles is the likely way there. A fault now only terminates the fetch and is read from FSR/FAR (native_ufs_dpu_live).
+  write32 (cb, 0x0, 1U | (1U << 5));                  // SCTLR: M, CFRE; a fault terminates instead of stalling the display
+  __asm__ volatile ("dsb sy; isb" ::: "memory");
+  // No check translation here (i563: IDR0 bit 26 ATOSNS, the SMMU has no ATOS), so watch the display's own fetches for 50 ms (6 frames
+  // at 120 Hz) and turn translation off again at the first fault.
+  uint32_t fsr = 0, us = 0;
+  for (; us < 50000; us += 500) {
+    fsr = read32 (cb, 0x58);
+    if (fsr & kDpuFaults) break;
+    IODelay (500);
+  }
+  c[3] = fsr; c[7] = us;
+  if (fsr & kDpuFaults) {
+    c[4] = read32 (cb, 0x60); c[5] = read32 (cb, 0x64); c[6] = read32 (cb, 0x68);
+    undo (0xdead0005U); return;
+  }
+  gDpuTables = l1; gDpuCb = cb;
+  native_ufs_dpu_state = 0x80000000U | bank;
+}
+
 static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, uint32_t *report,
                               uint64_t dma, uint64_t bytes)
 {
@@ -930,6 +1025,60 @@ static bool hostBringUp (const char **why)
   if (!hostStopQueue (why)) return false;
   smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, kDmaBytes);
   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
+  // The display's streams (dpu=2 or more, or dpu-scanout), read here for the same reason: what the boot loader left for 0x1c00 and 0x1c02 (`iommus =
+  // <&apps_smmu 0x1c00 0x2>`), the first step of letting the display fetch the compositor's pages. Nothing is written.
+  uint32_t dpu = 0, scanout = 0;
+  PE_parse_boot_argn ("dpu", &dpu, sizeof (dpu));
+  PE_parse_boot_argn ("sheng-dpu-scanout", &scanout, sizeof (scanout));
+  if (scanout < 2) scanout = 0;   // fuxi: the display flips directly from 2 on (NativeLegacyDisplay.cpp)
+  if (dpu >= 2 || scanout) {
+    const uintptr_t s = gHost.smmu;
+    const uint32_t idr0 = read32 (s, 0x20), idr1 = read32 (s, 0x24);
+    const unsigned groups = (idr0 & 255) > 128 ? 128 : (idr0 & 255), banks = idr1 & 255;
+    const unsigned pages = 1U << (((idr1 >> 28) & 7) + 1);
+    native_ufs_dpu_smmu[1] = read32 (s, 0x0); native_ufs_dpu_smmu[2] = idr0; native_ufs_dpu_smmu[3] = idr1;
+    unsigned valid = 0;
+    for (unsigned k = 0; k < 2; ++k) native_ufs_dpu_smmu[4 + 9 * k] = 0xffffffffU;
+    for (unsigned i = 0; i < groups; ++i) {
+      const uint32_t smr = read32 (s, 0x800 + 4 * i);
+      if (!(smr & 0x80000000U)) continue;
+      ++valid;
+      const uint32_t mask = (smr >> 16) & 0x7fff;
+      for (unsigned k = 0; k < 2; ++k) {
+        volatile uint32_t *r = &native_ufs_dpu_smmu[4 + 9 * k];
+        if (r[0] != 0xffffffffU || ((smr ^ (0x1c00U + 2 * k)) & 0x7fff & ~mask)) continue;
+        const uint32_t s2cr = read32 (s, 0xc00 + 4 * i), bank = s2cr & 255;
+        r[0] = i | (bank << 16); r[1] = smr; r[2] = s2cr;
+        if (((s2cr >> 16) & 3) == 0 && bank < banks && (pages + banks) * 4096 <= 0xd0000) {
+          const uintptr_t cb = s + (pages + bank) * 4096;
+          r[3] = read32 (s, 0x1000 + 4 * bank); r[4] = read32 (s, 0x1800 + 4 * bank);
+          r[5] = read32 (cb, 0x0); r[6] = read32 (cb, 0x20); r[7] = read32 (cb, 0x24); r[8] = read32 (cb, 0x30);
+          native_ufs_dpu_smmu[22 + k] = read32 (cb, 0x58);
+        }
+      }
+    }
+    native_ufs_dpu_smmu[0] = 0x80000000U | groups | (valid << 8) | (banks << 16);
+    // dpu-scanout=1 or more: stage 1 for the display's bank (i562: bank 3, CBAR type 1, SCTLR 0xe0 = translation off, so the display
+    // fetched physical addresses; its pipe address registers are 32-bit and every kernel allocation is above 4 GiB). The table keeps
+    // 0x80000000..0xffffffff as it was (two 1 GiB identity blocks, so the boot loader's scanout at 0xb8000000 carries on unchanged) and adds
+    // kDpuSlots windows of kDpuSlotBytes at kDpuWindow for the compositor's surfaces, filled by native_ufs_dpu_map. Undone at once when the
+    // bank does not take the table or a check translation of 0xb8000000 does not come back identical.
+    const uint32_t found = native_ufs_dpu_smmu[4], bank = found >> 16;
+    if (scanout && found != 0xffffffffU && bank < banks && ((native_ufs_dpu_smmu[6] >> 16) & 3) == 0 && !(native_ufs_dpu_smmu[9] & 1) &&
+        ((native_ufs_dpu_smmu[7] >> 16) & 3) == 1) {
+      dpuEnable (s, s + (pages + bank) * 4096, bank, native_ufs_dpu_smmu[9]);
+    } else if (scanout) {
+      native_ufs_dpu_state = 0xdead0001U;
+    }
+    // fuxi 2026-11-20: the outcome was silent (U26/U27: sheng-dpu-scanout=2 and 0 flips). State (bit 31 on = the display may flip
+    // directly; 0xdead000n = the refusing step), the display stream's slot|bank<<16, its SMR and S2CR, CBAR, CBA2R, SCTLR, TCR, TTBR0 low.
+    if (scanout)
+      IOLog ("NativeUfs: dpu scanout state %#x found %#x smr %#x s2cr %#x cbar %#x cba2r %#x sctlr %#x tcr %#x ttbr %#x groups/valid/banks %#x\n",
+             (unsigned) native_ufs_dpu_state, (unsigned) native_ufs_dpu_smmu[4], (unsigned) native_ufs_dpu_smmu[5],
+             (unsigned) native_ufs_dpu_smmu[6], (unsigned) native_ufs_dpu_smmu[7], (unsigned) native_ufs_dpu_smmu[8],
+             (unsigned) native_ufs_dpu_smmu[9], (unsigned) native_ufs_dpu_smmu[10], (unsigned) native_ufs_dpu_smmu[11],
+             (unsigned) native_ufs_dpu_smmu[0]);
+  }
   uint32_t idr1 = read32 (gHost.smmu, 0x24);
   gHost.cb = gHost.smmu + ((1U << (((idr1 >> 28) & 7) + 1)) + (report[0] >> 16)) * 4096;
   if (gRootDiagnosticEnabled) {
@@ -2371,4 +2520,44 @@ extern "C" int native_ufs_part_read (uint32_t lun, uint64_t lba, uint32_t blocks
     blocks -= chunk;
   }
   return 1;
+}
+
+// fuxi 2026-11-18: direct-DPU scanout, ported from UniXNU/ShengUfs NativeUfs.cpp (f020bd6). Replaces the weak stubs of
+// device/package/FuxiDpuScanoutStubs.c: the display bank gets a stage 1 table with kDpuSlots windows for the compositor's
+// surfaces, and native_ufs_dpu_state bit 31 tells NativeLegacyDisplay.cpp that it may flip directly (boot-arg sheng-dpu-scanout=2).
+// The display streams' state as the boot loader left it (dpu=2): [0] bit 31 read, stream-match groups | valid ones << 8 | context banks << 16;
+// [1] sCR0, [2] IDR0, [3] IDR1; for 0x1c00 at [4] and 0x1c02 at [13]: group | bank << 16 (all ones: no match), SMR, S2CR, CBAR, CBA2R, SCTLR,
+// TTBR0 low, high, TCR; [22], [23] the two banks' FSR.
+extern "C" volatile uint32_t native_ufs_dpu_smmu[24] = {};
+// The display bank's stage 1 (dpu-scanout): bit 31 on, low bits the bank; 0xdead000n the step that refused it (1 bank not as expected,
+// 2 no memory, 3 the bank ignored the table registers, 4 TLB sync timeout, 5 the display's fetches faulted with translation on).
+extern "C" volatile uint32_t native_ufs_dpu_state = 0;
+// TTBR0 low and TCR read back, FSR before and after the 50 ms watch, FAR low and high and FSYNR0 of the first fault, us watched.
+extern "C" volatile uint32_t native_ufs_dpu_check[8] = {};
+// The display bank's SCTLR (reg 0) or FSR (reg 1) now, for the log; all ones before the bank was touched.
+extern "C" uint32_t native_ufs_dpu_live (unsigned reg)
+{
+  // fuxi 2026-11-20: 2 FAR low, 3 FAR high, 4 FSYNR0; 5 clears the fault bits it reports (write one to clear).
+  static const uint32_t offs[5] = {0x0, 0x58, 0x60, 0x64, 0x68};
+  if (!gDpuLiveCb) return 0xffffffffU;
+  if (reg == 5) {const uint32_t fsr = read32 (gDpuLiveCb, 0x58); if (fsr & kDpuFaults) write32 (gDpuLiveCb, 0x58, fsr); return fsr;}
+  return reg < 5 ? read32 (gDpuLiveCb, offs[reg]) : 0xffffffffU;
+}
+
+// Points slot (0 .. kDpuSlots-1) of the display's window at count 4 KiB pages and returns the slot's address for the display, 0 when
+// translation is off or the pages do not fit. The caller makes sure the display is not fetching from the slot while it changes.
+extern "C" uint32_t native_ufs_dpu_map (unsigned slot, const uint64_t *pages, unsigned count)
+{
+  if (!gDpuTables || slot >= kDpuSlots || count > kDpuSlotBytes / 4096) return 0;
+  uint64_t *l3 = gDpuTables + 1024 + static_cast<size_t> (slot) * kDpuSlotTables * 512;
+  const uint64_t attrs = (1ULL << 10) | (1ULL << 6);
+  for (unsigned i = 0; i < kDpuSlotTables * 512; ++i) {
+    if (i < count && (pages[i] & 0xfff)) return 0;
+    l3[i] = i < count ? (pages[i] | attrs | 3) : 0;
+  }
+  dpuClean (l3, kDpuSlotTables * 4096);
+  IOLockLock (gDpuLock);
+  const bool synced = dpuTlbFlush (gDpuCb);
+  IOLockUnlock (gDpuLock);
+  return synced ? kDpuWindow + slot * kDpuSlotBytes : 0;
 }

@@ -8,6 +8,10 @@
 #include <sys/fcntl.h>
 #include <sys/stat.h>
 #include <pexpert/pexpert.h>
+#include <sys/vnode.h>
+#include <sys/uio.h>
+#include <sys/dirent.h>
+#include <kern/kalloc.h>
 
 static const char policy_head[] =
  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -127,8 +131,11 @@ static int sheng_boot_data_skel(proc_t p,uint64_t scratch) {
 static const char dictation_body[] =
   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
   "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+// fuxi 2026-11-18 K3: values false, so isDictationLanguageEnabled: stops before dictationIsAvailableForLanguage: (AFPreferences per call).
   "<plist version=\"1.0\"><dict><key>DictationLanguagesEnabled</key><dict>"
-  "<key>en_US</key><true/><key>en</key><true/><key>en_CN</key><true/><key>en_GB</key><true/><key>en-US</key><true/><key>en-CN</key><true/><key>zh-Hans_CN</key><true/><key>zh_Hans_CN</key><true/><key>zh_Hans-CN</key><true/><key>zh-Hans-CN</key><true/><key>zh_CN</key><true/><key>zh-CN</key><true/><key>zh-Hans</key><true/><key>zh_Hans</key><true/><key>zh</key><true/><key>yue_CN</key><true/><key>yue-Hant_CN</key><true/><key>zh-Hant_TW</key><true/><key>zh-Hant_HK</key><true/><key>zh_TW</key><true/><key>zh_HK</key><true/>"
+// fuxi 2026-11-18 K6: every iOS 17 dictation locale in both spellings: K5 (after the K4S wipe) still called updateEnabledDictationLanguages:,
+// which runs only when the queried language is not one of these keys (isDictationLanguageEnabled: allKeys containsObject:).
+  "<key>ar-AE</key><false/><key>ar_AE</key><false/><key>ar-SA</key><false/><key>ar_SA</key><false/><key>ca-ES</key><false/><key>ca_ES</key><false/><key>cs-CZ</key><false/><key>cs_CZ</key><false/><key>da-DK</key><false/><key>da_DK</key><false/><key>de-AT</key><false/><key>de_AT</key><false/><key>de-CH</key><false/><key>de_CH</key><false/><key>de-DE</key><false/><key>de_DE</key><false/><key>el-GR</key><false/><key>el_GR</key><false/><key>en-AE</key><false/><key>en_AE</key><false/><key>en-AU</key><false/><key>en_AU</key><false/><key>en-CA</key><false/><key>en_CA</key><false/><key>en-CN</key><false/><key>en_CN</key><false/><key>en-GB</key><false/><key>en_GB</key><false/><key>en-ID</key><false/><key>en_ID</key><false/><key>en-IE</key><false/><key>en_IE</key><false/><key>en-IN</key><false/><key>en_IN</key><false/><key>en-NZ</key><false/><key>en_NZ</key><false/><key>en-PH</key><false/><key>en_PH</key><false/><key>en-SA</key><false/><key>en_SA</key><false/><key>en-SG</key><false/><key>en_SG</key><false/><key>en-US</key><false/><key>en_US</key><false/><key>en-ZA</key><false/><key>en_ZA</key><false/><key>es-CL</key><false/><key>es_CL</key><false/><key>es-CO</key><false/><key>es_CO</key><false/><key>es-ES</key><false/><key>es_ES</key><false/><key>es-MX</key><false/><key>es_MX</key><false/><key>es-US</key><false/><key>es_US</key><false/><key>fi-FI</key><false/><key>fi_FI</key><false/><key>fr-BE</key><false/><key>fr_BE</key><false/><key>fr-CA</key><false/><key>fr_CA</key><false/><key>fr-CH</key><false/><key>fr_CH</key><false/><key>fr-FR</key><false/><key>fr_FR</key><false/><key>he-IL</key><false/><key>he_IL</key><false/><key>hi-IN</key><false/><key>hi_IN</key><false/><key>hr-HR</key><false/><key>hr_HR</key><false/><key>hu-HU</key><false/><key>hu_HU</key><false/><key>id-ID</key><false/><key>id_ID</key><false/><key>it-CH</key><false/><key>it_CH</key><false/><key>it-IT</key><false/><key>it_IT</key><false/><key>ja-JP</key><false/><key>ja_JP</key><false/><key>ko-KR</key><false/><key>ko_KR</key><false/><key>ms-MY</key><false/><key>ms_MY</key><false/><key>nb-NO</key><false/><key>nb_NO</key><false/><key>nl-BE</key><false/><key>nl_BE</key><false/><key>nl-NL</key><false/><key>nl_NL</key><false/><key>pl-PL</key><false/><key>pl_PL</key><false/><key>pt-BR</key><false/><key>pt_BR</key><false/><key>pt-PT</key><false/><key>pt_PT</key><false/><key>ro-RO</key><false/><key>ro_RO</key><false/><key>ru-RU</key><false/><key>ru_RU</key><false/><key>sk-SK</key><false/><key>sk_SK</key><false/><key>sv-SE</key><false/><key>sv_SE</key><false/><key>th-TH</key><false/><key>th_TH</key><false/><key>tr-TR</key><false/><key>tr_TR</key><false/><key>uk-UA</key><false/><key>uk_UA</key><false/><key>vi-VN</key><false/><key>vi_VN</key><false/><key>wuu-CN</key><false/><key>wuu_CN</key><false/><key>yue-CN</key><false/><key>yue_CN</key><false/><key>zh-CN</key><false/><key>zh_CN</key><false/><key>zh-HK</key><false/><key>zh_HK</key><false/><key>zh-TW</key><false/><key>zh_TW</key><false/><key>en</key><false/><key>zh</key><false/><key>zh-Hans</key><false/><key>zh_Hans</key><false/><key>zh-Hant</key><false/><key>zh_Hant</key><false/><key>zh-Hans-CN</key><false/><key>zh-Hans_CN</key><false/><key>zh_Hans_CN</key><false/><key>zh_Hans-CN</key><false/><key>zh-Hant-TW</key><false/><key>zh-Hant_TW</key><false/><key>zh-Hant-HK</key><false/><key>zh-Hant_HK</key><false/><key>yue-Hant-CN</key><false/><key>yue-Hant_CN</key><false/><key>yue_Hant_CN</key><false/><key>ja</key><false/><key>ko</key><false/><key>fr</key><false/><key>de</key><false/><key>es</key><false/><key>it</key><false/><key>ru</key><false/><key>pt</key><false/><key>ar</key><false/>"
   "</dict></dict></plist>\n";
 // copyin lands here: scratch is a user address and cannot be read directly.
 static char dictation_rbuf[sizeof(dictation_body)];
@@ -214,8 +221,13 @@ static int fuxi_boot_dictation_prefs(proc_t p,uint64_t scratch) {
  // slow with all 21 keys present), and stopping the write does not remove what earlier boots put
  // on Data while cfprefsd keeps serving it. sheng-dictation-prefs=1 restores the old write so the
  // two groups can be compared with a single image.
- int optin=0;
- if(!PE_parse_boot_argn("sheng-dictation-prefs",&optin,sizeof(optin)) || optin!=1)
+ // fuxi 2026-11-18: written by default again. -[UIKeyboardInputModeController isDictationLanguageEnabled:] (iPhone 21H16
+ // UIKitCore 0x18a767234) reads the keyboard preference DictationLanguagesEnabled and calls updateEnabledDictationLanguages: (the
+ // whole input-mode recomputation of the keyboard lag) whenever the queried language is not a key of that dictionary; without the
+ // dictionary every query recomputes. sheng-dictation-prefs=0 goes back to the B-group cleanup.
+ int optin=1;
+ PE_parse_boot_argn("sheng-dictation-prefs",&optin,sizeof(optin));
+ if(optin!=1)
   return fuxi_boot_dictation_cleanup(p,scratch);
  int on=0;int32_t result=0;
  if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
@@ -265,6 +277,204 @@ static int fuxi_boot_tu_debug(proc_t p,uint64_t scratch) {
  return error;
 }
 
+
+// fuxi 2026-11-17: China Standard Time. The Data skeleton (21H16 /private/var template) creates /private/var/db/timezone/localtime ->
+// US/Pacific only when it is absent, so the stored Data kept Pacific time. Pointed at Asia/Shanghai at every boot (sheng-data-skel=1);
+// fuxi-timezone=0 leaves the link alone.
+// 2026-11-19: no longer tied to sheng-data-skel=1 (other people's packs do not set it, so their phones stayed on Pacific time), and
+// the link is replaced only when it is missing or still the template's US/Pacific: a zone the user picked in Settings is kept.
+// fuxi-timezone=2 forces Asia/Shanghai at every boot.
+static int fuxi_boot_timezone(proc_t p,uint64_t scratch) {
+ int want=1;int32_t result=0;
+ PE_parse_boot_argn("fuxi-timezone",&want,sizeof(want));
+ if(want!=1 && want!=2)return 0;
+ static const char link[]="/private/var/db/timezone/localtime";
+ static const char target[]="/var/db/timezone/zoneinfo/Asia/Shanghai";
+ int error=copyout(link,scratch,sizeof(link));
+ if(!error && want==1){
+  struct readlink_args rl={.path=scratch,.buf=scratch+0x400,.count=0x100};
+  int32_t n=0;
+  if(!readlink(p,&rl,&n) && n>0 && n<0x100){
+   char cur[0x100]={};
+   if(!copyin(scratch+0x400,cur,(size_t)n)){
+    cur[n]=0;
+    if(!strnstr(cur,"US/Pacific",sizeof cur) && !strnstr(cur,"America/Los_Angeles",sizeof cur)){printf("fuxi timezone: kept %s\n",cur);return 0;}
+   }
+  }
+ }
+ if(!error){struct unlink_args rm={.path=scratch};error=unlink(p,&rm,&result);if(error==ENOENT)error=0;}
+ if(!error)error=copyout(target,scratch+0x200,sizeof(target));
+ if(!error){struct symlink_args sl={.path=scratch+0x200,.link=scratch};error=symlink(p,&sl,&result);}
+ if(!error){struct lchown_args own={.path=scratch,.owner=0,.group=0};error=lchown(p,&own,&result);}
+ printf("fuxi timezone: localtime -> Asia/Shanghai rc %d\n",error);
+ return error;
+}
+
+
+// fuxi 2026-11-18: keyboard lag root cause (whole-stack hot sampler, symbolized with the iPhone 21H16 arm64e cache): every
+// -[UIKeyboardInputMode dictationLanguage] goes through activeInputModes -> enabledInputModeIdentifiers:, which, with no
+// AppleKeyboards in the global domain (Setup never ran, Setup writes it), falls back to defaultEnabledInputModesForCurrentLocale and
+// recomputes all input modes of the locale (TIGetDefaultInputModesForLanguage, NSArray indexOfObject: over every supported mode): the
+// app's main thread at 100 % while the keyboard is up. A managed .GlobalPreferences gives the list. Rewritten at every boot
+// (sheng-data-skel=1); fuxi-keyboards=0 leaves it out (the managed value wins over Settings > Keyboards).
+static const char keyboards_body[] =
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+  "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+  "<plist version=\"1.0\"><dict>"
+  "<key>AppleKeyboards</key><array>"
+  "<string>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</string>"
+  "<string>en_US@sw=QWERTY;hw=Automatic</string>"
+  "<string>emoji@sw=Emoji</string>"
+  "</array>"
+  "<key>AppleKeyboardsExpanded</key><integer>1</integer>"
+  "</dict></plist>\n";
+static int fuxi_boot_keyboards(proc_t p,uint64_t scratch) {
+ int on=0,want=1;int32_t result=0;
+ if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
+ PE_parse_boot_argn("fuxi-keyboards",&want,sizeof(want));
+ if(want!=1){printf("fuxi keyboards: skipped\n");return 0;}
+ static const char path[]="/private/var/Managed Preferences/mobile/.GlobalPreferences.plist";
+ int error=copyout(path,scratch,sizeof(path));
+ int fd=-1;
+ if(!error){struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,.mode=0644};error=open(p,&op,&result);if(!error)fd=result;}
+ if(!error)error=copyout(keyboards_body,scratch+0x200,sizeof(keyboards_body)-1);
+ if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(keyboards_body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
+  if(!error && n!=(user_ssize_t)(sizeof(keyboards_body)-1))error=EIO;}
+ if(!error){struct fchown_args own={.fd=fd,.uid=0,.gid=0};error=fchown(p,&own,&result);}
+ if(fd>=0){struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;}
+ printf("fuxi keyboards: managed AppleKeyboards rc %d\n",error);
+ return error;
+}
+
+// fuxi 2026-11-19: Settings showed "No Internet Connection" on a Wi-Fi that works (DNS answers, TLS to Apple completes): the captive
+// portal probe was never sent, so the network stayed unevaluated. A managed com.apple.captive.control with Active false (the key
+// configd's captive agent reads) turns the probe off and the network counts as reachable. fuxi-captive=1 leaves the probe on.
+static const char captive_body[] =
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+  "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+  "<plist version=\"1.0\"><dict><key>Active</key><false/></dict></plist>\n";
+static int fuxi_boot_captive(proc_t p,uint64_t scratch) {
+ int on=0,want=0;int32_t result=0;
+ if(!PE_parse_boot_argn("sheng-data-skel",&on,sizeof(on)) || on!=1)return 0;
+ PE_parse_boot_argn("fuxi-captive",&want,sizeof(want));
+ if(want==1){printf("fuxi captive: probe left on\n");return 0;}
+ static const char path[]="/private/var/Managed Preferences/mobile/com.apple.captive.control.plist";
+ int error=copyout(path,scratch,sizeof(path));
+ int fd=-1;
+ if(!error){struct open_args op={.path=scratch,.flags=O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW,.mode=0644};error=open(p,&op,&result);if(!error)fd=result;}
+ if(!error)error=copyout(captive_body,scratch+0x200,sizeof(captive_body)-1);
+ if(!error){struct write_args wr={.fd=fd,.cbuf=scratch+0x200,.nbyte=sizeof(captive_body)-1};user_ssize_t n=0;error=write(p,&wr,&n);
+  if(!error && n!=(user_ssize_t)(sizeof(captive_body)-1))error=EIO;}
+ if(!error){struct fchown_args own={.fd=fd,.uid=0,.gid=0};error=fchown(p,&own,&result);}
+ if(fd>=0){struct close_args cl={.fd=fd};int ce=sys_close(p,&cl,&result);if(!error)error=ce;}
+ printf("fuxi captive: managed probe off rc %d\n",error);
+ return error;
+}
+
+// fuxi 2026-11-19: LaunchServices' store dropped at every boot (fuxi-ls-rebuild=0 keeps it), so lsd builds it again. WebContent
+// passes _container_init on the first boot after a wipe and fails it ("could not create xpc_pipe") on every later boot; upstream
+// (patches/xnu/zzyb-native-cryptex-os-view.patch, native_ls_store_drop) found lsd not registering system content again on a later
+// boot of the same OS build. The store lives in an InternalDaemon container whose UUID changes with every wipe, so each container's
+// Library/Caches is searched for com.apple.LaunchServices-* files. Reports the files removed.
+static unsigned fuxi_dir_names(const char *dir, const char *prefix, char (*names)[96], unsigned max, int dirs_only) {
+ vfs_context_t ctx = vfs_context_current();
+ vnode_t vp = NULLVP;
+ if (vnode_lookup(dir, 0, &vp, ctx)) return 0;
+ unsigned found = 0;
+ char *buffer = kalloc_data(4096, Z_WAITOK);
+ uio_t uio = buffer ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
+ int eof = 0;
+ const size_t plen = strlen(prefix);
+ while (uio && !eof && found < max) {
+  uio_reset(uio, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
+  uio_addiov(uio, CAST_USER_ADDR_T(buffer), 4096);
+  int entries = 0;
+  if (VNOP_READDIR(vp, uio, 0, &eof, &entries, ctx)) break;
+  const size_t used = 4096 - (size_t)uio_resid(uio);
+  if (!used) break;
+  for (size_t at = 0; at + offsetof(struct dirent, d_name) <= used && found < max;) {
+   const struct dirent *e = (const struct dirent *)(buffer + at);
+   if (!e->d_reclen) break;
+   const int is_dir = e->d_type == DT_DIR;
+   if (e->d_namlen < 96 && e->d_name[0] != '.' && (!dirs_only || is_dir) && !strncmp(e->d_name, prefix, plen)) {
+    memcpy(names[found], e->d_name, e->d_namlen);
+    names[found++][e->d_namlen] = 0;
+   }
+   at += e->d_reclen;
+  }
+ }
+ if (uio) uio_free(uio);
+ if (buffer) kfree_data(buffer, 4096);
+ vnode_put(vp);
+ return found;
+}
+static void fuxi_boot_ls_drop(proc_t p, uint64_t scratch) {
+ int on = 0, want = 1;
+ if (!PE_parse_boot_argn("sheng-data-skel", &on, sizeof(on)) || on != 1) return;
+ PE_parse_boot_argn("fuxi-ls-rebuild", &want, sizeof(want));
+ if (want != 1) {printf("fuxi ls store: kept\n"); return;}
+ static const char base[] = "/private/var/mobile/Containers/Data/InternalDaemon";
+ // On the heap: static tables pushed the kernel __DATA past its prelink room.
+ char (*containers)[96] = kalloc_data(48 * 96, Z_WAITOK | Z_ZERO);
+ char (*files)[96] = kalloc_data(8 * 96, Z_WAITOK | Z_ZERO);
+ if (!containers || !files) {
+  if (containers) kfree_data(containers, 48 * 96);
+  if (files) kfree_data(files, 8 * 96);
+  printf("fuxi ls store: no memory\n"); return;
+ }
+ char path[300];
+ const unsigned n = fuxi_dir_names(base, "", containers, 48, 1);
+ int removed = 0, failed = 0;
+ for (unsigned i = 0; i < n; ++i) {
+  snprintf(path, sizeof(path), "%s/%s/Library/Caches", base, containers[i]);
+  const unsigned m = fuxi_dir_names(path, "com.apple.LaunchServices-", files, 8, 0);
+  for (unsigned k = 0; k < m; ++k) {
+   char file[400];
+   snprintf(file, sizeof(file), "%s/%s", path, files[k]);
+   struct unlink_args ul = {.path = scratch + 0x200};
+   int32_t result = 0;
+   int error = copyout(file, scratch + 0x200, strlen(file) + 1);
+   if (!error) error = unlink(p, &ul, &result);
+   if (error) failed++; else removed++;
+   printf("fuxi ls store: %s %s rc %d\n", containers[i], files[k], error);
+  }
+ }
+ printf("fuxi ls store: %u containers, %d removed, %d failed\n", n, removed, failed);
+ kfree_data(containers, 48 * 96);
+ kfree_data(files, 8 * 96);
+}
+
+// fuxi 2026-11-20 (U13 test): Safari's WebContent is refused the containermanagerd lookup (launchd error 159) from the second boot
+// after a wipe only, so state kept on Data is suspected. The launchd state directory and containermanagerd's stores are renamed to
+// <name>.fuxi-asideN (never deleted) so both start fresh as after a wipe. Default on in this build; fuxi-state-aside=0 skips it.
+static void fuxi_boot_state_aside(proc_t p, uint64_t scratch) {
+ // U13 result (2026-11-20): all three moved, WebContent still refused with 159, so this is not the cause. Off by default now.
+ int want = 0;
+ PE_parse_boot_argn("fuxi-state-aside", &want, sizeof(want));
+ if (want != 1) {printf("fuxi state aside: off\n"); return;}
+ static const char *const dirs[] = {
+  "/private/var/db/com.apple.xpc.launchd",
+  "/private/var/root/Library/MobileContainerManager",
+  "/private/var/mobile/Library/MobileContainerManager",
+  "/private/var/containers/Data/System/com.apple.containermanagerd",
+ };
+ for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+  int error = ENOENT;
+  char to[160];
+  for (unsigned n = 1; n <= 9; ++n) {
+   snprintf(to, sizeof(to), "%s.fuxi-aside%u", dirs[i], n);
+   int32_t result = 0;
+   error = copyout(dirs[i], scratch, strlen(dirs[i]) + 1);
+   if (!error) error = copyout(to, scratch + 0x200, strlen(to) + 1);
+   if (error) break;
+   struct rename_args rn = {.from = scratch, .to = scratch + 0x200};
+   error = rename(p, &rn, &result);
+   if (error != EEXIST && error != ENOTEMPTY) break;
+  }
+  printf("fuxi state aside: %s -> %s rc %d\n", dirs[i], error ? "-" : to, error);
+ }
+}
+
 // One comma-separated label at *c into the policy as a disabled key; advances *c past it.
 static int append_job(const char **cursor) {
  const char *c=*cursor,*e=c;while(*e && *e!=',')++e;
@@ -301,6 +511,11 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
  (void)fuxi_boot_dictation_prefs(p,scratch);
  (void)fuxi_boot_dictation_off(p,scratch);
  (void)fuxi_boot_tu_debug(p,scratch);
+ (void)fuxi_boot_timezone(p,scratch);
+ (void)fuxi_boot_keyboards(p,scratch);
+ (void)fuxi_boot_captive(p,scratch);
+ fuxi_boot_ls_drop(p,scratch);
+ fuxi_boot_state_aside(p,scratch);
  // fuxi (2026-11-14): fairplayd.H2 needs the Apple AES engine's UID/GID keys (FairPlayIOKit generateSeed through
  // IOAESAccelerator::performAES), which this SoC does not have, so it exits at every start without checking in its Mach
  // services; launchd keeps com.apple.fairplayd.versioned, locationd's migration call waits on it forever and data

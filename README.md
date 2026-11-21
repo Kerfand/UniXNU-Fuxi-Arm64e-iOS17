@@ -14,7 +14,7 @@
 | 机型标识 | iPhone15,2 内核缓存，ADT 按 iPhone 14 Pro（D73AP）识别 |
 | 当前进度 | 进入桌面；触摸、按键、声音、存储、串口、电池、迁移、壁纸可用 |
 
-## 当前状态（2026-11-19）
+## 当前状态（2026-11-20）
 
 | 功能 | 状态 | 说明 |
 | --- | --- | --- |
@@ -26,10 +26,12 @@
 | 电池 | ✅ | 电量、充电状态 |
 | 迁移 | ✅ | 补全系统应用 |
 | 壁纸 | ✅ | 锁屏壁纸、主屏幕壁纸 |
-| 充电 | ⚠️ | 快充不工作 |
+| 充电 | ⚠️ | 公版 PPS 快充可用（单电荷泵）；小米私有快充未验证 |
 | 蓝牙 | ⚠️ | 上电及初始化完成 |
 | 基带 | ⚠️ | 正在完成第一步调解器 |
-| Wi-Fi | ⚠️ | 扫描正常、连接正常，但无法上网 |
+| Wi-Fi | ⚠️ | 可以上网，速率约 20 Mbit/s |
+| Safari | ⚠️ | 可以打开网页（内核放行 containermanagerd 查找，根因待查） |
+| 键盘 | ✅ | 打字不再卡顿 |
 | GPU | ⚠️ | 可工作，但在部分场景下崩溃 |
 | 相机 | ❌ | 不工作 |
 | 手电筒 | ❌ | 不工作 |
@@ -60,6 +62,18 @@
 脚本里的绝对路径是作者本机路径，使用前请按自己的环境修改。日用打包环境和已知坑见 [2026-11-17](#2026-11-17)。
 
 ## 进度日志
+
+### 2026-11-20
+
+- **Safari**：可以打开网页。WebContent 的 `_container_init` 向 launchd 查找 `com.apple.containermanagerd`，launchd 用 `sandbox_check_by_audit_token(mach-lookup)` 检查，内核沙盒判拒绝后回 159（沙盒限制），网页进程退出。判定结果写在调用方的 8 字节变量里（`__mac_syscall` 参数块第 0 个字指向它，返回值始终为 0）。`zzz-sandbox-check-probe.patch` 只对 WebKit 进程查找这个服务时把拒绝改为放行（`fuxi-wk-cm-allow=0` 关闭）。根因（只在清数据后第二次开机起拒绝）未查明。另：AMFI 跳过 WebKit 扩展的启动约束、`zzz-jit-separated-heap.patch` 允许 JIT 拷贝、Sandbox 用到的 3 个 VFS KPI 补进函数映射表。
+- **键盘卡顿**：已修复。根因是跳过设置向导后没有 `AppleKeyboards`，以及没有 `DictationLanguagesEnabled`，UIKit 每次都重算全部输入法。`BootWatchdogPolicy.c` 开机写入托管键盘列表、全部为 false 的听写语言字典（约 150 个键）并关闭听写。
+- **Wi-Fi**：能上网（关闭强制门户探测）；数据包缓冲改用 DMA 窗口的缓存映射（64 MiB slab，收发前后做缓存维护，`fuxi-wifi-cached=0` 关闭），工作线程修复丢唤醒竞态；速率仍只有约 20 Mbit/s，未解决。
+- **快充**：移植上游 `ShengChargeAuth`（电量计认证、小米充电头认证）；公版 PPS 实测可用（单电荷泵约 2.5 A）。插充电器期间的充电记录写入 Data（`/private/var/db/fuxi-charge-log`），下次开机输出为 `fuxi charge replay (file):`。
+- **GPU / Metal**：合并上游 Adreno740（1c9029b）与 AdrenoMetal（c9ebd2f）、官方 Mesa/Turnip 补丁系列。
+- **8 核**：打包参数 `CPUMASK=0xff` 可开 8 核（默认仍 0xf9）。
+- **时间 / 时区**：没有存储偏移时按编译日期起步，联网对时后保存本机偏移；时区不再依赖 `sheng-data-skel=1`，用户选的时区不覆盖。
+- **直接送屏（`DPU=2`，实验，默认关）**：GopFramebuffer 移植上游 df4a905，显示驱动在 NativeUfs 建好窗口后再启用（开机时窗口尚未建好），回开机帧缓冲的行宽按 fuxi 取值。可连续直接切换数百帧，但运行数十秒后整机无日志复位，原因未查明。
+- **基带**：MPSS 启动到 stage -8（SCM 调用失败）。蓝牙：BlueTool 替代版，bluetoothd 补丁点待移植。
 
 ### 2026-11-17
 

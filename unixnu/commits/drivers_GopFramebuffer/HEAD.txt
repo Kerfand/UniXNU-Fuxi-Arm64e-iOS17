@@ -1,3 +1,3 @@
-fd67bf572742736b857a3abc554f121203e3dac9 fuxi: present note method, hand-off abandon, fixed 120 Hz refresh by default (sheng-vsync-fixed)
+d13b01d1c3edf613a0d0a755444eebbd145dba72 fuxi: log every direct flip and slot remap
 https://github.com/UniXNU/GopFramebuffer.git
 base 19ef3a75ad2c53da85b8d923553d922716fce377

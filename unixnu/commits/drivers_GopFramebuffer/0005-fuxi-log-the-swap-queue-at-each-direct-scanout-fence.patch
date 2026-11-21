@@ -1,0 +1,33 @@
+From 5abe7764fd3555ee07b453d7965b2d77adc5acc8 Mon Sep 17 00:00:00 2001
+From: fuxi <fuxi@localhost>
+Date: Fri, 20 Nov 2026 10:15:31 -0600
+Subject: [PATCH 05/10] fuxi: log the swap queue at each direct-scanout fence
+ poll
+
+---
+ NativeLegacyDisplay.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+index c07fcd7..bebdef3 100644
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -510,7 +510,14 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+         return false;
+     }
+     static void fenceFired(OSObject *owner,IOTimerEventSource *) {static_cast<NativeLegacyDisplay *>(owner)->fenceTick();}
+-    void fenceTick() {transferred=false;kickSwapQueue();}
++    void fenceTick() {
++        // fuxi 2026-11-20: U31 stopped after 3 direct frames with "gpu wait: timeouts 9": the queue state at each fence poll (first 60, then
++        // every 500th), to see whether the GPU never retires the compositor's work or the queue holds the next swap.
++        {static unsigned n;uint32_t sub=0,ret=0;if(&native_adreno_fences)native_adreno_fences(&sub,&ret);
++         if(n<60 || n%500==0)IOLog("fuxi direct: fence poll %u target %u submitted %u retired %u transferred %d latch %d pending %d shown %d\n",n,
++            fenceTarget,sub,ret,transferred?1:0,latchRequest?1:0,pendingSlot,shownSlot);++n;}
++        transferred=false;kickSwapQueue();
++    }
+     static void latchFired(OSObject *owner,IOTimerEventSource *) {static_cast<NativeLegacyDisplay *>(owner)->latchTick();}
+     void latchTick() {
+         if(!latchRequest)return;
+-- 
+2.53.0
+

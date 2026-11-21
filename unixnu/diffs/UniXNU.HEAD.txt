@@ -1,2 +1,2 @@
-a0d817f9410e6959b0802058191c2ee2941e501d fuxi iOS 17: Bluetooth (QcaBluetooth tty, patched bluetoothd union and launch constraint), keychain, GPU and display probes
+ad787c573e2f6157c9fcd1df60109e63d7a1aaf7 fuxi: pin GopFramebuffer with flip and remap log
 https://github.com/SadNutWall/UniXNU.git

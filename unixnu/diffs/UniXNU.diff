@@ -1,0 +1,142 @@
+diff --git a/patches/xnu-10063-arm64e/crash-probe.patch b/patches/xnu-10063-arm64e/crash-probe.patch
+index b521789..728d7b8 100644
+--- a/patches/xnu-10063-arm64e/crash-probe.patch
++++ b/patches/xnu-10063-arm64e/crash-probe.patch
+@@ -12,7 +12,7 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+ +		static uint32_t unixnu_crash_seen;
+ +		bool reason = PROC_HAS_EXITREASON(p) && p->p_exit_reason->osr_namespace != 0;
+ +		if ((hassigprop(WTERMSIG(rv), SA_CORE) || (proc_getcsflags(p) & CS_KILLED) || reason) &&
+-+		    __atomic_fetch_add(&unixnu_crash_seen, 1, __ATOMIC_RELAXED) < 40) {
+++		    __atomic_fetch_add(&unixnu_crash_seen, 1, __ATOMIC_RELAXED) < 400) {
+ +			uint64_t st[9] = {0};
+ +			printf("unixnu crash: pid %d %s signal %d status %d reason ns %u code %#llx csflags %#x\n", proc_getpid(p),
+ +			    p->p_comm, WTERMSIG(rv), WEXITSTATUS(rv), reason ? p->p_exit_reason->osr_namespace : 0,
+diff --git a/patches/xnu-10063-arm64e/zz-btd-launch-constraint.patch b/patches/xnu-10063-arm64e/zz-btd-launch-constraint.patch
+index 3c139df..35f2179 100644
+--- a/patches/xnu-10063-arm64e/zz-btd-launch-constraint.patch
++++ b/patches/xnu-10063-arm64e/zz-btd-launch-constraint.patch
+@@ -1,7 +1,7 @@
+ diff --git a/security/mac_process.c b/security/mac_process.c
+ --- a/security/mac_process.c
+ +++ b/security/mac_process.c
+-@@ -895,6 +895,21 @@
++@@ -895,6 +895,38 @@
+  int
+  mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_reason_t *reasonp)
+  {
+@@ -19,6 +19,23 @@ diff --git a/security/mac_process.c b/security/mac_process.c
+ +			printf("fuxi btd: launch constraints skipped for the bindfs bluetoothd\n");
+ +			return 0;
+ +		}
+++	}
+++	/* fuxi 2026-11-19: Safari's WebKit extensions (ExtensionKit WebContentExtension / NetworkingExtension / GPUExtension) failed
+++	 * "Launch Constraint Violation ... Constraint not matched" and were killed at exec, so no web page ever loaded ("no network"
+++	 * while DNS and TLS worked). Executables named com.apple.WebKit.* under /System/Library/ExtensionKit are let through. */
+++	if (imgp && imgp->ip_vp) {
+++		const char *wk_name = vnode_getname_printable(imgp->ip_vp);
+++		int wk_skip = wk_name && strncmp(wk_name, "com.apple.WebKit.", 17) == 0;
+++		if (wk_name) {
+++			vnode_putname_printable(wk_name);
+++		}
+++		if (wk_skip) {
+++			static int wk_noted;
+++			if (wk_noted++ < 4) {
+++				printf("fuxi webkit: launch constraints skipped for a WebKit extension\n");
+++			}
+++			return 0;
+++		}
+ +	}
+  	char *fatal_failure_desc = NULL;
+  	size_t fatal_failure_desc_len = 0;
+diff --git a/patches/xnu-10063-arm64e/zz-hot-sampler.patch b/patches/xnu-10063-arm64e/zz-hot-sampler.patch
+index eea4562..d6654bb 100644
+--- a/patches/xnu-10063-arm64e/zz-hot-sampler.patch
++++ b/patches/xnu-10063-arm64e/zz-hot-sampler.patch
+@@ -1,6 +1,6 @@
+ --- a/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737554105 +0800
+ +++ b/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737671005 +0800
+-@@ -1966,11 +1966,247 @@
++@@ -1966,11 +1966,268 @@
+  	unixnu_pp_schedule();
+  }
+  
+@@ -55,6 +55,8 @@
+ +	os_atomic_inc(&unixnu_hot_lost, relaxed);
+ +}
+ +
+++static struct unixnu_hot_slot *unixnu_hot_r;   /* fuxi 2026-11-20: kernel callers, inclusive */
+++
+ +static void
+ +unixnu_hot_sample(__unused void *arg)
+ +{
+@@ -74,6 +76,21 @@
+ +	if (get_saved_state_cpsr(state) & 0xc) {      /* interrupted at EL1: in a trap, a fault or an interrupt */
+ +		os_atomic_inc(&unixnu_hot_kernel, relaxed);
+ +		unixnu_hot_add(unixnu_hot_k, pc);
+++		/* fuxi 2026-11-20: the kernel callers (up to 8 frames, inside this thread's kernel stack), counted once per sample each:
+++		 * the "R" table says which code a hot kernel pc was reached from. */
+++		if (unixnu_hot_r) {
+++			uint64_t kfp = get_saved_state_fp(state);
+++			const uint64_t lo = self->kernel_stack, hi = lo + kernel_stack_size;
+++			unixnu_hot_add(unixnu_hot_r, (uint64_t)ptrauth_strip((void *)get_saved_state_lr(state), ptrauth_key_return_address));
+++			for (int depth = 0; depth < 8 && kfp >= lo && kfp + 16 <= hi && !(kfp & 7); depth++) {
+++				const uint64_t ret = ((const uint64_t *)kfp)[1], next = ((const uint64_t *)kfp)[0];
+++				unixnu_hot_add(unixnu_hot_r, (uint64_t)ptrauth_strip((void *)ret, ptrauth_key_return_address));
+++				if (next <= kfp) {
+++					break;
+++				}
+++				kfp = next;
+++			}
+++		}
+ +		arm_saved_state_t *us = get_user_regs(self);
+ +		if (us) {
+ +			unixnu_hot_add(unixnu_hot_c,
+@@ -180,6 +197,9 @@
+ +		    kernel, other, lost);
+ +		unixnu_hot_print("U", unixnu_hot_u);
+ +		unixnu_hot_print("K", unixnu_hot_k);
+++		if (unixnu_hot_r) {
+++			unixnu_hot_print("R", unixnu_hot_r);
+++		}
+ +		unixnu_hot_print("C", unixnu_hot_c);
+ +		unixnu_hot_print("L", unixnu_hot_l);
+ +		unixnu_hot_print("F", unixnu_hot_f);
+@@ -224,6 +244,7 @@
+ +	}
+ +	unixnu_hot_u = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+ +	unixnu_hot_k = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+++	unixnu_hot_r = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+ +	unixnu_hot_c = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+ +	unixnu_hot_l = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+ +	unixnu_hot_f = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+diff --git a/patches/xnu-10063-arm64e/zz-msg-probe.patch b/patches/xnu-10063-arm64e/zz-msg-probe.patch
+index 76dd945..9f0b9cc 100644
+--- a/patches/xnu-10063-arm64e/zz-msg-probe.patch
++++ b/patches/xnu-10063-arm64e/zz-msg-probe.patch
+@@ -238,7 +238,7 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+  	return error;
+  }
+  
+-@@ -6947,6 +6950,34 @@
++@@ -6947,6 +6950,45 @@
+   *	namei:???
+   *	vn_stat:???
+   */
+@@ -249,6 +249,17 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+ +static void
+ +unixnu_fp_note(const char *call, user_addr_t path, enum uio_seg segflg, int error)
+ +{
+++	/* fuxi 2026-11-20: off unless unixnu-fp=1 - a path copy and 14 substring scans on every stat/open/access were a
+++	 * visible share of backboardd's kernel time (U24 hot sampler). */
+++	static int unixnu_fp_on = -1;
+++	if (unixnu_fp_on < 0) {
+++		int on = 0;
+++		(void)PE_parse_boot_argn("unixnu-fp", &on, sizeof(on));
+++		unixnu_fp_on = on == 1;
+++	}
+++	if (!unixnu_fp_on) {
+++		return;
+++	}
+ +	char buf[256];
+ +	size_t len = 0;
+ +	int copy_error = segflg == UIO_SYSSPACE ? copystr(CAST_DOWN(void *, path), buf, sizeof(buf), &len)

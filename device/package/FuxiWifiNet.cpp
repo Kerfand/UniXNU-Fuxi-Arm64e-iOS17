@@ -174,7 +174,9 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
     unsigned sport = 0, dport = 0;
     if ((proto == 6 || proto == 17) && n >= 14 + ihl + 4) { sport = ip[ihl] << 8 | ip[ihl + 1]; dport = ip[ihl + 2] << 8 | ip[ihl + 3]; }
     const bool dhcp4 = proto == 17 && (sport == 67 || sport == 68);
-    if (!dhcp4 && shown4[out]++ < 48)
+    // fuxi 2026-11-19: multicast (SSDP, mDNS, IGMP) used up the 48 lines before the first DNS query; only unicast counts now, up to 160.
+    const bool multicast = (ip[16] & 0xf0) == 0xe0 || (ip[16] == 255 && ip[17] == 255);
+    if (!dhcp4 && !multicast && shown4[out]++ < 160)
       log(6, "wifi-net: ip4 %s proto %u %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len %u%s", dir, proto, ip[12], ip[13], ip[14], ip[15], sport,
           ip[16], ip[17], ip[18], ip[19], dport, (unsigned)n, proto == 6 && n >= 14 + ihl + 14 ? ((ip[ihl + 13] & 0x02) ? (ip[ihl + 13] & 0x10 ? " syn-ack" : " syn") : (ip[ihl + 13] & 0x04 ? " rst" : "")) : "");
   }
@@ -205,6 +207,15 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
 void on_rx(const uint8_t *eth, size_t length) {
   if (!gIf || length < 14) return;
   note_frame(eth, length, false);
+  // fuxi 2026-11-18: "connected, no internet": IPv4 works (TCP handshakes, network time) but iOS sends nearly everything over IPv6 once
+  // the router advertises a prefix, and that path does not work here. Dropping router advertisements (ICMPv6 type 134) leaves only the
+  // link-local address, so name lookups and the captive check go over IPv4. fuxi-wifi-v6ra=1 lets them through again.
+  static int keepRa = -1;
+  if (keepRa < 0) { int v = 0; PE_parse_boot_argn("fuxi-wifi-v6ra", &v, sizeof v); keepRa = v ? 1 : 0; }
+  if (!keepRa && length >= 14 + 40 + 1 && eth[12] == 0x86 && eth[13] == 0xdd && eth[14 + 6] == 58 && eth[14 + 40] == 134) {
+    static unsigned dropped; if (dropped++ < 4) log(6, "wifi-net: router advertisement dropped (%u)", dropped);
+    return;
+  }
   // Two bytes ahead of the Ethernet header put the IP header on a 4-byte boundary. The packet may come back as a chain (a frame larger
   // than one cluster, or no large cluster free): each buffer gets only what fits in it. Setting the whole length on the first one (as
   // before) let the stack read past that buffer's end (i469: a data abort in m_copydata reading across a page).
@@ -499,6 +510,14 @@ void log_traffic() {
 void check_input() {
   static uint64_t lastIn; static uint32_t lastFrames; static unsigned stalled;
   struct ifnet_stats_param stats; memset(&stats, 0, sizeof stats); ifnet_stat(gIf, &stats);
+  // fuxi 2026-11-20: en0's real throughput, once a second while it moves more than 256 KiB in either direction, so a speed test is read
+  // from the kernel rather than from what the test page manages to process.
+  { static uint64_t bIn, bOut, pIn, pOut;
+    const uint64_t dIn = stats.bytes_in - bIn, dOut = stats.bytes_out - bOut;
+    if ((bIn || bOut) && (dIn > 262144 || dOut > 262144))
+      IOLog("fuxi wifi tput: in %llu Mbit/s %llu pkt/s out %llu Mbit/s %llu pkt/s\n", (unsigned long long)(dIn * 8 / 1000000),
+            (unsigned long long)(stats.packets_in - pIn), (unsigned long long)(dOut * 8 / 1000000), (unsigned long long)(stats.packets_out - pOut));
+    bIn = stats.bytes_in; bOut = stats.bytes_out; pIn = stats.packets_in; pOut = stats.packets_out; }
   const bool moving = stats.packets_in != lastIn, offered = gRxFrames != lastFrames;
   lastIn = stats.packets_in; lastFrames = gRxFrames;
   if (moving) {

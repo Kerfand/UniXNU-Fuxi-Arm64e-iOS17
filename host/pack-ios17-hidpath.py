@@ -143,7 +143,7 @@ assert nodes['/chosen'].get('text-fixups', b'') == b''.join(f.encode() + b'\0' f
 assert len([n for n in nodes if n.startswith('/cpus/')]) == len(os.environ.get('CPU_REGS', '0,0x100,0x200,0x300,0x400,0x500,0x600,0x700').split(','))
 
 args = ('serial=3 debug=0x14c kt_fixed_zones=120 qcom-usb-debug=1 armcpu-spi-ipi=1 sheng-smp=1 '
-        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0 fuxi-panic-fastboot=30 fuxi-wifi=5 sheng-adsp=2 sheng-audio=1 offline-legacy-logical-width=1125 offline-legacy-logical-height=2436 log-gpu=1 sheng-cpufreq=3 cpumask=0xf9 sheng-fb-gpu=1 '
+        '-no_slto_panic ml-timeout-lock-panic-scale=40 unixnu-unmapped=1 use_contiguous_hint=0 fuxi-panic-fastboot=30 fuxi-wifi=5 sheng-adsp=2 sheng-audio=1 offline-legacy-logical-width=1125 offline-legacy-logical-height=2436 log-gpu=1 sheng-cpufreq=3 cpumask=' + os.environ.get('CPUMASK', '0xf9') + ' sheng-fb-gpu=1 '
         # unixnu-hang-probe (log only, xnu-10063-arm64e/init-hang-probe.patch): report the init task's threads every
         # 10 s while the exec of /sbin/launchd does not return.
         # qcom-usb-diag=1: the QUD driver's diagnostic mode gives every console write a 1 ms flush window, so the
@@ -240,6 +240,29 @@ if os.environ.get('DISABLE_JOBS'):
     args = ' '.join(a for a in args.split() if a not in ('log-gpu=1', 'unixnu-iokit-probe=1'))
     args = args + ' sheng-disable-jobs=' + _labels
     print('disable-jobs: freeing log flags for the room, %d bytes' % len(args.encode()))
+# MODEM=<n> (fuxi 2026-11-18, baseband phase 1): fuxi-modem=1 survey, 2 start the modem DSP (ModemProbe.cpp).
+# fuxi-panic-fastboot=30 goes for the room, then log-gpu=1 if still short.
+if os.environ.get('MODEM'):
+    args = ' '.join(a for a in args.split() if a != 'fuxi-panic-fastboot=30') + ' fuxi-modem=' + os.environ['MODEM'][:1]
+    if len(args.encode()) > 1000:
+        args = ' '.join(a for a in args.split() if a != 'log-gpu=1')
+# DPU=2 (fuxi 2026-11-20): direct scanout like the official Pad 6S Pro option (sheng-dpu-scanout=2, NativeUfs stage 1 window, the
+# pipes on the compositor's surfaces, GPU copy as the fallback).
+if os.environ.get('DPU'):
+    # U25 (2026-11-20): without offline-legacy-validate=1 every swap failed verify_swap and the panel kept the UEFI picture, so it
+    # stays; the room comes from leaving HOT and MODEM out of DPU images.
+    # 2026-11-20 (GPU直通-说明): direct scanout and the logical size (offline-legacy-logical-width/height, 1125x2436) cannot go
+    # together - with a logical size the display stays on the copy path (U26: direct 0, flip 0). DPU images run at the panel's
+    # own 1080x2400 and drop the two logical-size arguments, which also gives the room; fuxi-panic-fastboot=30 stays.
+    args = ' '.join(a for a in args.split() if not a.startswith('offline-legacy-logical-')) + ' sheng-dpu-scanout=' + os.environ['DPU'][:1]
+# NOBL=1 (fuxi 2026-11-20, direct scanout test): no brightness writes over the DSI link (fuxi-backlight=dsi dropped), to see whether
+# the one DSI brightness write between direct flips 2 and 3 is what resets the phone about 7 s later (U30-U32).
+if os.environ.get('NOBL') == '1':
+    args = ' '.join(a for a in args.split() if a not in ('fuxi-backlight=dsi', 'sheng-backlight=1'))   # U33: without dsi the I2C fallback panicked (geni_i2c_prepare)
+# NOWIFI=1 (fuxi 2026-11-20, direct scanout test): no Wi-Fi (fuxi-wifi=5 dropped). The working next4 image has direct scanout and
+# no Wi-Fi; the Wi-Fi DMA window shares the apps SMMU with the display's stage 1 window.
+if os.environ.get('NOWIFI') == '1':
+    args = ' '.join(a for a in args.split() if a != 'fuxi-wifi=5')
 print('boot-args bytes', len(args.encode()))
 assert len(args.encode()) <= 1000
 assert 'sheng-log' not in args, 'the UFS log window stays off'
@@ -308,6 +331,9 @@ if ROOT_MODE:
             btd_trust = _TREE / 'build/fuxi-bluetoothd/trust.json'
             btd_hash = bytes.fromhex(json.loads(btd_trust.read_text())['cdhash'])
             hashes = sorted(hashes + [btd_hash])
+        # BlueTool (device-ios17/scripts/build-fuxi-bluetool.py, addon btd/BlueTool), only with BLUETOOL=1 (fuxi 2026-11-18).
+        if os.environ.get('BLUETOOL') == '1':
+            hashes = sorted(hashes + [bytes.fromhex(json.loads((_TREE / 'build/fuxi-bluetool/trust.json').read_text())['cdhash'])])
         owner = struct.pack('<I16sI', 2, hashlib.sha256(b'unixnu-fuxi-ios17-gpu-owner').digest()[:16], len(hashes))
         # Launch-constraint category per entry: 0, except the patched bluetoothd, which keeps the stock entry's category 1.
         owner += b''.join(h + bytes([2, 0, 1 if h == btd_hash else 0, 0]) for h in hashes)

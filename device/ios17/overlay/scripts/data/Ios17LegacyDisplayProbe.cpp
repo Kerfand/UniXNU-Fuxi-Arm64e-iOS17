@@ -43,7 +43,8 @@ volatile uint32_t native_legacy_transfer_calls, native_legacy_retirement_calls, 
 volatile int native_legacy_transfer_status = -1, native_legacy_client_status = -1, native_legacy_pm_status = -1;
 volatile uint32_t native_legacy_pm_stage, native_legacy_vsync_events[6];
 volatile uint32_t native_legacy_gpu_fallbacks;
-volatile uint32_t native_ufs_dpu_state;
+// fuxi 2026-11-18: weak, so NativeUfs.cpp's direct-DPU scanout (native_ufs_dpu_state, native_ufs_dpu_map) wins when it is built in.
+__attribute__((weak)) volatile uint32_t native_ufs_dpu_state;
 }
 
 static void stage(unsigned value, const char *what)
@@ -90,7 +91,7 @@ bool native_legacy_gpu_offer(void *display, IOMemoryDescriptor *memory, uint64_t
 volatile int32_t native_legacy_gpu_last_status;
 void native_legacy_gpu_fallback_observed(int status) { native_legacy_gpu_last_status = status; native_legacy_gpu_fallbacks = native_legacy_gpu_fallbacks + 1; }
 __attribute__((weak)) bool native_adreno_fences(uint32_t *submitted, uint32_t *retired) { (void)submitted; (void)retired; return false; }
-uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) { return 0; }
+__attribute__((weak)) uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) { return 0; }
 
 __attribute__((noreturn, noinline)) void native_legacy_backend_guard(unsigned slot, void *object, void *caller)
 {
@@ -262,6 +263,7 @@ extern "C" void fuxi_buttons_probe(void);
 extern "C" void sheng_bluetooth_probe(void);   // FuxiBluetooth.cpp (QcaBluetooth, fuxi 2026-11-15)
 extern "C" void fuxi_wifi_probe(void);        // fuxi-wifi=1: read-only look at the WCN7850 path
 extern "C" void sheng_audio_probe(void);      // sheng-audio=N: speakers, microphone, audio service (AudioProbe.cpp)
+extern "C" void fuxi_modem_probe(void);       // fuxi-modem=1/2: the modem DSP (ModemProbe.cpp), baseband phase 1
 extern "C" void sheng_adsp_probe(void);       // sheng-adsp=1/2: the audio DSP (AdspProbe.cpp), power.md section 3
 extern "C" void fuxi_cpufreq_start(void);     // sheng-cpufreq=N: CPU/L3 frequency votes (CpuFreqProbe.cpp, FuxiCpuFreqLog.cpp)
 extern "C" void fuxi_wifi_link_probe(void);   // fuxi-wifi=2/3/5: power, PCIe0 link; 5 runs Ath12kWifi (FuxiWifiNw21)
@@ -277,6 +279,7 @@ void native_legacy_display_late_probe(void)
 	native_touch_probe();
 	fuxi_cpufreq_start();
 	sheng_adsp_probe();
+	fuxi_modem_probe();
 	sheng_audio_probe();
 	fuxi_buttons_probe();
 	sheng_bluetooth_probe();

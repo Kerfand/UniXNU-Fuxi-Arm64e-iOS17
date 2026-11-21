@@ -1,0 +1,19 @@
+From d1b201e5bd47099ea3b4b78401311a897bcf3f41 Mon Sep 17 00:00:00 2001
+From: fuxi <fuxi@localhost>
+Date: Fri, 20 Nov 2026 10:17:00 -0600
+Subject: [PATCH 10/14] fuxi: pin GopFramebuffer
+
+---
+ drivers/GopFramebuffer | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/GopFramebuffer b/drivers/GopFramebuffer
+index 5abe776..6d54f50 160000
+--- a/drivers/GopFramebuffer
++++ b/drivers/GopFramebuffer
+@@ -1 +1 @@
+-Subproject commit 5abe7764fd3555ee07b453d7965b2d77adc5acc8
++Subproject commit 6d54f508584bdce19718bdc56d826131a6692b11
+-- 
+2.53.0
+

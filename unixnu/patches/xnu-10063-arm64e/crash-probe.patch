@@ -12,7 +12,7 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +		static uint32_t unixnu_crash_seen;
 +		bool reason = PROC_HAS_EXITREASON(p) && p->p_exit_reason->osr_namespace != 0;
 +		if ((hassigprop(WTERMSIG(rv), SA_CORE) || (proc_getcsflags(p) & CS_KILLED) || reason) &&
-+		    __atomic_fetch_add(&unixnu_crash_seen, 1, __ATOMIC_RELAXED) < 40) {
++		    __atomic_fetch_add(&unixnu_crash_seen, 1, __ATOMIC_RELAXED) < 400) {
 +			uint64_t st[9] = {0};
 +			printf("unixnu crash: pid %d %s signal %d status %d reason ns %u code %#llx csflags %#x\n", proc_getpid(p),
 +			    p->p_comm, WTERMSIG(rv), WEXITSTATUS(rv), reason ? p->p_exit_reason->osr_namespace : 0,

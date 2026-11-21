@@ -53,7 +53,8 @@ done
 # rootauth-probe.patch adds a line inside the context of offline-owner-root-binding-audit.patch. Unwind both
 # first so those shared patches keep their idempotent (reverse) check; the arm64e loop below applies them again.
 if [ "${UNIXNU_XNU_ARCH:-arm64}" = arm64e ]; then
-  for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/zz-hot-sampler.patch" \
+  for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/zzz-hot-stacks.patch" \
+      "$ROOT/patches/xnu-10063-arm64e/zz-hot-sampler.patch" \
       "$ROOT/patches/xnu-10063-arm64e/screen-quiet-after-swap.patch" \
       "$ROOT/patches/xnu-10063-arm64e/rootauth-probe.patch" \
       "$ROOT/patches/xnu-10063-arm64e/init-exec-probe.patch" \

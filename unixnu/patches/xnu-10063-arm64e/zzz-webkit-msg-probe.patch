@@ -1,0 +1,39 @@
+diff --git a/osfmk/ipc/ipc_kmsg.c b/osfmk/ipc/ipc_kmsg.c
+--- a/osfmk/ipc/ipc_kmsg.c
++++ b/osfmk/ipc/ipc_kmsg.c
+@@ -4830,6 +4830,35 @@
+ 	mach_msg_size_t         usize = 0;
+ 	ikm_deflate_context_t   dctx;
+ 
++	/* zzz-webkit-msg-probe.patch (fuxi): the first messages a WebKit process receives (launchd's lookup replies among them):
++	 * id, size, whether it carries descriptors, and the first 96 bytes of a simple message's body in hex. WebContent's
++	 * xpc_pipe_create("com.apple.containermanagerd") returns NULL from the second boot after a wipe. Log only. */
++	{
++		static uint32_t wk_msgs;
++		extern char *proc_name_address(void *p);
++		void *wk_proc = get_bsdtask_info(current_task());
++		const char *wk_name = wk_proc ? proc_name_address(wk_proc) : NULL;
++		if (wk_name && !strncmp(wk_name, "com.apple.WebKi", 15) && __atomic_fetch_add(&wk_msgs, 1, __ATOMIC_RELAXED) < 300) {
++			mach_msg_header_t *wk_hdr = ikm_header(kmsg);
++			const int wk_complex = (wk_hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
++			char wk_hex[2 * 96 + 1] = "";
++			if (!wk_complex && wk_hdr->msgh_size > sizeof(mach_msg_header_t)) {
++				const uint8_t *wk_body = (const uint8_t *)ikm_udata_from_header(kmsg);
++				size_t wk_len = wk_hdr->msgh_size - sizeof(mach_msg_header_t);
++				if (wk_len > 96) {
++					wk_len = 96;
++				}
++				static const char hexd[] = "0123456789abcdef";
++				for (size_t i = 0; wk_body && i < wk_len; i++) {
++					wk_hex[2 * i] = hexd[wk_body[i] >> 4];
++					wk_hex[2 * i + 1] = hexd[wk_body[i] & 15];
++					wk_hex[2 * i + 2] = 0;
++				}
++			}
++			printf("fuxi wkmsg: %s[%d] id %#x size %u complex %d %s\n", wk_name, proc_pid(wk_proc), wk_hdr->msgh_id,
++			    wk_hdr->msgh_size, wk_complex, wk_hex);
++		}
++	}
+ 	/*
+ 	 * After this, the kmsg() is mangled beyond recognition,
+ 	 * and calling things like ikm_header() etc.. will have

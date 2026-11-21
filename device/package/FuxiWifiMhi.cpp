@@ -224,6 +224,10 @@ bool allocate(IOBufferMemoryDescriptor *&m,size_t bytes,uint64_t &pa,uint8_t *&v
 // consecutive IOVAs. Reserved at probe time (fuxi_wifi_dma_reserve), long before the link thread's 65 s wait ends.
 ArmSmmu4KRange *gRanges;size_t gRangeCount;
 IOBufferMemoryDescriptor *gReserved;IOMemoryMap *gReservedWc;uint8_t *gReservedVa;uint64_t gReservedPa;bool gReservedContiguous;
+// fuxi 2026-11-20: the buffer's own cached mapping of the same window (gReservedVa + n is gReservedCached + n). FuxiWifiNw.cpp gives a
+// separate part of the window to packet buffers through this alias, with cache maintenance on every map and sync; that part is never
+// touched through the write-combining mapping.
+uint8_t *gReservedCached;
 bool reserveModuleWindow(size_t bytes){
  if(gReservedVa)return true;
  constexpr size_t kBlock=2u<<20;
@@ -258,6 +262,7 @@ bool reserveModuleWindow(size_t bytes){
  IOMemoryMap *wc=m->createMappingInTask(kernel_task,0,kIOMapAnywhere|kIOMapWriteCombineCache);
  if(!wc){m->complete();m->release();return false;}
  gReserved=m;gReservedWc=wc;gReservedVa=(uint8_t *)wc->getVirtualAddress()+shift;gReservedPa=gRanges[0].physical;gReservedContiguous=contiguous;
+ gReservedCached=cached+shift;
  return true;
 }
 bool dmaPrepare(){
@@ -340,6 +345,8 @@ void boot(volatile uint32_t *m,unsigned bytes){
 }
 }
 // fuxi-wifi=5: reserve the module's DMA window while memory is plentiful (fuxi_wifi_link_probe, at boot).
+// The cached alias of the window whose write-combining address is wc, or null (another window, or not reserved this way).
+extern "C" uint8_t *fuxi_wifi_dma_cached_alias(const uint8_t *wc){return gReservedCached&&wc==gReservedVa?gReservedCached:nullptr;}
 extern "C" void fuxi_wifi_dma_reserve(void){
  const bool ok=reserveModuleWindow(kModuleDmaBytes);
  IOLog("[FuxiWifi] module DMA window reserved=%u bytes=%u contiguous=%u ranges=%lu pa=%llx\n",ok?1u:0u,kModuleDmaBytes,gReservedContiguous?1u:0u,(unsigned long)gRangeCount,gReservedPa);

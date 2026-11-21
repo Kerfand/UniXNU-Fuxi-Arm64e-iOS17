@@ -40,6 +40,7 @@ void sheng_fw_close(void *handle);
 }
 
 extern "C" int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *) __attribute__((weak_import));
+extern "C" void fuxi_modem_ipcc(uint32_t id) __attribute__((weak));   // ModemProbe.cpp (fuxi 2026-11-18)
 // [0] stage (see Stage; negative: the step that failed), [1] last error, [2] IPCC interrupts, [3] the DSP's slave-kernel bits (-1 no
 // item), [4] items (bit 0 SMP2P in 443, 1 out 429, 2 GLINK 478, 3 479, 4 480, 8 our partition, 9 global partition), [5] QMP state | AOSS
 // link bits << 8, [6] RSC DRV id, [7] adsp.mbn KiB, [8] ms from the start call to "ready", [9] GLINK messages in, [10] out, [11] channels
@@ -59,7 +60,7 @@ constexpr uint32_t kPasAdsp = 1, kPasDtb = 36, kRemotePid = 2, kItemIn = 443, kI
 constexpr uint32_t kItemGlinkDesc = 478, kItemGlinkTx = 479, kItemGlinkRx = 480, kGlinkFifo = 0x4000;
 constexpr uint32_t kSpiIpcc = 229, kSpiRsc = 5;
 constexpr uint32_t kFatal = 1u << 0, kReady = 1u << 1, kHandover = 1u << 2;
-constexpr uint32_t kEvSmp2p = 1, kEvGlink = 2, kEvAop = 4, kEvRsc = 8, kEvSend = 16;
+constexpr uint32_t kEvSmp2p = 1, kEvGlink = 2, kEvAop = 4, kEvRsc = 8, kEvSend = 16, kEvQmpRequest = 32;
 constexpr unsigned kClients = 4, kQueue = 8;
 
 struct Window {IOMemoryMap *map; volatile uint8_t *va;};
@@ -88,7 +89,9 @@ QcomSmemPartition gPart;
 QcomSmp2p gP2p;
 int gStopEntry = -1;
 QcomQmp gQmp;
-QcomGlink gGlink;
+// fuxi 2026-11-19: on the heap (several KiB of __bss): see FuxiCpuFreqLog.cpp gCpu. Allocated in sheng_adsp_probe before any thread.
+QcomGlink *gGlinkHeap;
+#define gGlink (*gGlinkHeap)
 bool gGlinkStarted;
 QcomRscLayout gLayout;
 uint32_t gRscIrqBits;
@@ -129,6 +132,7 @@ void ipccIrq(void *) {
         if (id == qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_SMP2P)) bits |= kEvSmp2p;
         else if (id == qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_GLINK_QMP)) bits |= kEvGlink;
         else if (id == qcom_ipcc_id(QCOM_IPCC_CLIENT_AOP, QCOM_IPCC_SIGNAL_GLINK_QMP)) bits |= kEvAop;
+        else if ((id >> 16) == 2 && fuxi_modem_ipcc) fuxi_modem_ipcc(id);   // fuxi 2026-11-18: MPSS doorbells go to ModemProbe.cpp
     }
     native_adsp_stats[2] = native_adsp_stats[2] + 1;
     if (bits) wake(bits);
@@ -396,8 +400,21 @@ void serviceGlink() {
     if (gGlink.version_agreed && native_adsp_stats[0] >= StReady && native_adsp_stats[0] < StGlink) stage(StGlink);
     if (up && native_adsp_stats[0] >= StGlink) stage(StChannel);
 }
+// fuxi 2026-11-18: one AOSS message on behalf of ModemProbe.cpp (this thread owns the mailbox). State: 0 idle, 1 queued, 2 sent,
+// 3 answered, negative failed.
+char gQmpRequest[96];
+volatile int gQmpRequestState;
+void serviceQmpRequest() {
+    if (gQmpRequestState == 1) {
+        if (gQmp.state != QcomQmpOpen) {gQmpRequestState = -19; thread_wakeup((event_t)&gQmpRequestState); return;}
+        qcom_qmp_send(&gQmp, gQmpRequest);
+        gQmpRequestState = 2;
+    }
+    if (gQmpRequestState == 2 && qcom_qmp_step(&gQmp) == QcomQmpOpen) {gQmpRequestState = 3; thread_wakeup((event_t)&gQmpRequestState);}
+}
 void service(uint32_t bits) {
     if (bits & kEvAop) qcom_qmp_step(&gQmp);
+    if ((bits & (kEvAop | kEvQmpRequest)) && gQmpRequestState > 0) serviceQmpRequest();
     if (bits & (kEvSmp2p | kEvGlink)) serviceSmp2p();
     if (bits & (kEvGlink | kEvSend)) {applyClients(); serviceGlink();}
 }
@@ -668,6 +685,23 @@ extern "C" ShengAdspChannel *sheng_adsp_channel(const char *name, uint32_t inten
     return c;
 }
 
+// fuxi 2026-11-18: ModemProbe.cpp's AOSS load_state message; waits up to timeout_ms for the answer. 0 answered.
+extern "C" int fuxi_adsp_qmp_request(const char *message, uint32_t timeout_ms) {
+    if (!message || gQmpRequestState > 0 && gQmpRequestState < 3) return -16;
+    strlcpy(gQmpRequest, message, sizeof gQmpRequest);
+    gQmpRequestState = 1;
+    wake(kEvQmpRequest);
+    for (uint32_t waited = 0; waited < timeout_ms; waited += 50) {
+        if (gQmpRequestState == 3 || gQmpRequestState < 0) break;
+        IOSleep(50);
+        if (gQmpRequestState == 2) wake(kEvQmpRequest);   // the answer is read by stepping the mailbox
+    }
+    const int state = gQmpRequestState;
+    if (state != 3) {gQmpRequestState = 0; return state < 0 ? state : -60;}
+    gQmpRequestState = 0;
+    return 0;
+}
+
 extern "C" int sheng_adsp_send(ShengAdspChannel *c, const void *data, uint32_t length) {
     if (!c || !data || !length) return -2;
     if (length > SHENG_ADSP_MAX_MESSAGE) return -1;
@@ -718,6 +752,8 @@ extern "C" void sheng_adsp_probe(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("sheng-adsp", &mode, sizeof mode) || !mode || native_adsp_stats[0]) return;
     gClientLock = IOLockAlloc();
+    gGlinkHeap = static_cast<QcomGlink *>(IOMallocZeroData(sizeof(QcomGlink)));
+    if (!gGlinkHeap) {fail(StMapped, -12); return;}
     if (gClientLock && mode >= 2) sheng_qrtr_start();  // the router link registers before the DSP can open it
     thread_t thread = nullptr;
     if (!gClientLock || kernel_thread_start(adspThread, nullptr, &thread) != KERN_SUCCESS) {fail(StMapped, -7); return;}

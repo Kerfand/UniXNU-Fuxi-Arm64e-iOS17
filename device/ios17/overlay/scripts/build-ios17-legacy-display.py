@@ -737,6 +737,8 @@ print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_
 # QcomRpmh.c (osfmk startup.c's command); the probe and the firmware reader take the probe's C++ command.
 adsp_objs = []
 for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmware.cpp',
+            # fuxi 2026-11-18: the modem DSP (fuxi-modem=1/2), baseband phase 1
+            ROOT / 'kits/sheng/ModemProbe.cpp',
             # the speaker/microphone path and the audio service (sheng-audio): AudioProbe.cpp on fuxi's CS35L41
             ROOT / 'kits/sheng/AudioProbe.cpp', ROOT / 'kits/sheng/ShengAudioService.cpp',
             # the battery (power.md section 4): PMIC GLINK battery manager on the ADSP, an IOPMPowerSource for powerd
@@ -756,7 +758,7 @@ for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmwa
         obj = late_obj
     adsp_objs.append(obj)
 for src in ('QcomGlink.c', 'QcomMdt.c', 'QcomQmp.c', 'QcomSmem.c', 'QcomSmp2p.c', 'QcomQrtr.c', 'ShengQrtr.c', 'FatVolume.c',
-            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c', 'ShengBattmgr.c'):
+            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c', 'ShengBattmgr.c', 'ShengChargeAuth.c', 'FuxiUcsiStubs.c'):
     src = ROOT / 'kits/sheng' / src
     obj = OUT / (src.stem + '.ios17.o')
     sargs, scmd, k = startup_record['arguments'], [], 0

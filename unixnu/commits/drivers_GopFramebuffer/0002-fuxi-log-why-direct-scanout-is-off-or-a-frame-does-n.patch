@@ -1,0 +1,51 @@
+From dfb3f8db09b8814ae60c52bde901a517f4bc8808 Mon Sep 17 00:00:00 2001
+From: fuxi <fuxi@localhost>
+Date: Fri, 20 Nov 2026 09:44:00 -0600
+Subject: [PATCH 02/10] fuxi: log why direct scanout is off or a frame does not
+ flip
+
+---
+ NativeLegacyDisplay.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+index 27fd840..478acc7 100644
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -408,7 +408,12 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+     static constexpr uint32_t kVig[2]={0x4000,0x6000},kCtlFlush=0x15018,kBootIova=0xb8000000U,kBootStride=0x2fa0;
+     void startDirect() {
+         unsigned mode=0;PE_parse_boot_argn("sheng-dpu-scanout",&mode,sizeof(mode));
+-        if(mode<2 || !&native_ufs_dpu_map || !&native_ufs_dpu_state || !(native_ufs_dpu_state>>31) || !primary)return;
++        // fuxi 2026-11-20: every outcome is logged ("fuxi direct:"), the refusals were silent (U26-U28: 0 flips).
++        if(mode<2 || !&native_ufs_dpu_map || !&native_ufs_dpu_state || !(native_ufs_dpu_state>>31) || !primary) {
++            if(mode>=2)IOLog("fuxi direct: off at start: map %d state %#x primary %d\n",&native_ufs_dpu_map?1:0,
++                             &native_ufs_dpu_state?(unsigned)native_ufs_dpu_state:0u,primary?1:0);
++            return;
++        }
+         IODeviceMemory *memory=IODeviceMemory::withRange(0xae01000,0x8f000);
+         mdpMap=memory?memory->map(kIOMapAnywhere|kIOMapInhibitCache):nullptr;
+         if(memory)memory->release();
+@@ -423,6 +428,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+         }
+         mdp=reinterpret_cast<volatile uint32_t *>(mdpMap->getVirtualAddress());
+         directOn=true;gDirectDisplay=this;
++        IOLog("fuxi direct: on (state %#x, scaled %d)\n",(unsigned)native_ufs_dpu_state,gScaled?1:0);
+     }
+     // The diagnostic screenshot reads the boot memory, which the display no longer scans: draw the surface on screen into it (rows of the
+     // visible width) so the picture shows what the panel shows.
+@@ -760,6 +766,11 @@ public:
+         noteSurface(surface,memory);
+         const bool half=nativeHalf(native_legacy_surface_format(surface),native_legacy_surface_planes(surface));
+         const bool xr=nativeXr(native_legacy_surface_format(surface),native_legacy_surface_planes(surface));
++        // fuxi 2026-11-20: why a frame does not flip directly, once per distinct reason set (bits: 1 off, 2 half, 4 xr, 8 GPU bypass, 16 latch
++        // in flight, 32 scaled), with the surface's format and planes.
++        {static uint64_t seen;const uint32_t why=(directOn?0u:1u)|(half?2u:0u)|(xr?4u:0u)|(gpuBypass?8u:0u)|(latchRequest?16u:0u)|(gScaled?32u:0u);
++         if(why && !(seen&(1ull<<why))){seen|=1ull<<why;IOLog("fuxi direct: frame not flipped, why %#x format %#x planes %u\n",why,
++            (unsigned)native_legacy_surface_format(surface),(unsigned)native_legacy_surface_planes(surface));}}
+         if(directOn && !half && !xr && !gpuBypass && latchRequest)stat(5);
+         if(directOn && !half && !xr && !gpuBypass && !latchRequest && !gScaled) {
+             if(!gpuWrote(request)) {transferred=true;return;}
+-- 
+2.53.0
+

@@ -1,0 +1,19 @@
+From 168b4cc12354284922abf16fcf12fcab4d97da8c Mon Sep 17 00:00:00 2001
+From: fuxi <fuxi@localhost>
+Date: Fri, 20 Nov 2026 10:06:26 -0600
+Subject: [PATCH 08/14] fuxi: pin GopFramebuffer with direct flip fault logging
+
+---
+ drivers/GopFramebuffer | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/GopFramebuffer b/drivers/GopFramebuffer
+index e0da500..e38ceb8 160000
+--- a/drivers/GopFramebuffer
++++ b/drivers/GopFramebuffer
+@@ -1 +1 @@
+-Subproject commit e0da5000b619f795e91d2fdfc562b4daa442c7e6
++Subproject commit e38ceb8efc6e26d7e5a08df138b3aafaa3b8c734
+-- 
+2.53.0
+

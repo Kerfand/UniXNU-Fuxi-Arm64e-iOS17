@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737554105 +0800
 +++ b/osfmk/arm64/pcb.c	2026-11-12 21:48:11.737671005 +0800
-@@ -1966,11 +1966,247 @@
+@@ -1966,11 +1966,268 @@
  	unixnu_pp_schedule();
  }
  
@@ -55,6 +55,8 @@
 +	os_atomic_inc(&unixnu_hot_lost, relaxed);
 +}
 +
++static struct unixnu_hot_slot *unixnu_hot_r;   /* fuxi 2026-11-20: kernel callers, inclusive */
++
 +static void
 +unixnu_hot_sample(__unused void *arg)
 +{
@@ -74,6 +76,21 @@
 +	if (get_saved_state_cpsr(state) & 0xc) {      /* interrupted at EL1: in a trap, a fault or an interrupt */
 +		os_atomic_inc(&unixnu_hot_kernel, relaxed);
 +		unixnu_hot_add(unixnu_hot_k, pc);
++		/* fuxi 2026-11-20: the kernel callers (up to 8 frames, inside this thread's kernel stack), counted once per sample each:
++		 * the "R" table says which code a hot kernel pc was reached from. */
++		if (unixnu_hot_r) {
++			uint64_t kfp = get_saved_state_fp(state);
++			const uint64_t lo = self->kernel_stack, hi = lo + kernel_stack_size;
++			unixnu_hot_add(unixnu_hot_r, (uint64_t)ptrauth_strip((void *)get_saved_state_lr(state), ptrauth_key_return_address));
++			for (int depth = 0; depth < 8 && kfp >= lo && kfp + 16 <= hi && !(kfp & 7); depth++) {
++				const uint64_t ret = ((const uint64_t *)kfp)[1], next = ((const uint64_t *)kfp)[0];
++				unixnu_hot_add(unixnu_hot_r, (uint64_t)ptrauth_strip((void *)ret, ptrauth_key_return_address));
++				if (next <= kfp) {
++					break;
++				}
++				kfp = next;
++			}
++		}
 +		arm_saved_state_t *us = get_user_regs(self);
 +		if (us) {
 +			unixnu_hot_add(unixnu_hot_c,
@@ -180,6 +197,9 @@
 +		    kernel, other, lost);
 +		unixnu_hot_print("U", unixnu_hot_u);
 +		unixnu_hot_print("K", unixnu_hot_k);
++		if (unixnu_hot_r) {
++			unixnu_hot_print("R", unixnu_hot_r);
++		}
 +		unixnu_hot_print("C", unixnu_hot_c);
 +		unixnu_hot_print("L", unixnu_hot_l);
 +		unixnu_hot_print("F", unixnu_hot_f);
@@ -224,6 +244,7 @@
 +	}
 +	unixnu_hot_u = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
 +	unixnu_hot_k = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
++	unixnu_hot_r = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
 +	unixnu_hot_c = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
 +	unixnu_hot_l = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
 +	unixnu_hot_f = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);

@@ -3,10 +3,15 @@
 #include "lx_plat.h"
 
 /* ---- packet buffers: one allocation holds the shared info, the head room, the data and the tail room ---- */
+extern void *fuxi_wifi_dma_alloc_stream(size_t n, u64 *bus) __attribute__((weak));
 struct sk_buff *alloc_skb(unsigned int size, gfp_t f) {
   (void)f; struct sk_buff *s = lx_alloc(sizeof *s, 1); if (!s) return 0;
-  /* packet data lives in the DMA window: the device reads and writes it */
-  size = ALIGN(size, 4); u64 bus; u8 *b = lx_plat->dma_alloc(size + sizeof(struct skb_shared_info) + 64, &bus); if (!b) { lx_free(s); return 0; }
+  /* packet data lives in the DMA window: the device reads and writes it. fuxi 2026-11-20: from the platform's cached packet slab when it
+   * has one (FuxiWifiNw21.cpp); the data ends on a 64-byte line so the CPU-only shared info never shares a line with the device's data. */
+  size = ALIGN(size, 64); u64 bus;
+  u8 *b = fuxi_wifi_dma_alloc_stream ? fuxi_wifi_dma_alloc_stream(size + sizeof(struct skb_shared_info) + 64, &bus)
+                                     : lx_plat->dma_alloc(size + sizeof(struct skb_shared_info) + 64, &bus);
+  if (!b) { lx_free(s); return 0; }
   s->head = s->data = s->tail = b; s->end = b + size; s->truesize = size; return s; }
 struct sk_buff *__dev_alloc_skb(unsigned int size, gfp_t f) { struct sk_buff *s = alloc_skb(size + 32, f); if (s) skb_reserve(s, 32); return s; }
 void kfree_skb(struct sk_buff *s) { if (!s) return; lx_plat->dma_free(0, s->head, 0); lx_free(s); }

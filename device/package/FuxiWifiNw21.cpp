@@ -13,6 +13,7 @@
 #include <libkern/c++/OSMetaClass.h>
 #include <mach/kmod.h>
 #include <kern/thread.h>
+#include <kern/sched_prim.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
@@ -103,13 +104,77 @@ void arenaFree(void *p){
   return;
  }
 }
+// fuxi 2026-11-20: packet buffers (nw_net.c alloc_skb through fuxi_wifi_dma_alloc_stream) come from gStream, the top kStreamBytes of the
+// window reached through its cached alias (FuxiWifiMhi.cpp fuxi_wifi_dma_cached_alias): the stack copied every packet byte by byte from
+// write-combining memory and searched the whole block list for every allocation, so a 1000 Mbps link measured under 100 Mbps. gStream
+// is a slab: size classes of 512 B .. 64 KiB, each block a 64-byte CPU-only header (its class) and then the buffer, freed blocks kept
+// on their class's list. That part of the window is never touched through the write-combining mapping. Every map and sync of a gStream
+// buffer does the cache maintenance: clean before the device reads it, clean+invalidate before and after the device writes it. Rings and
+// all other coherent allocations stay in gArena. fuxi-wifi-cached=0 keeps the whole window write-combining as before.
+constexpr size_t kStreamBytes=64u<<20;
+constexpr unsigned kStreamClasses=8;   // 512 << class
+struct Stream {uint8_t *va;uint64_t iova;size_t bytes,next;void *free[kStreamClasses];unsigned live,failures;} gStream;
+bool gStreamOn;
+IOSimpleLock *gStreamLock;
+inline bool inStream(const void *p){return gStreamOn&&(const uint8_t *)p>=gStream.va&&(const uint8_t *)p<gStream.va+gStream.bytes;}
+inline bool busInStream(uint64_t bus){return gStreamOn&&bus>=gStream.iova&&bus<gStream.iova+gStream.bytes;}
+void cacheLines(const uint8_t *p,size_t n,bool invalidate){
+ uintptr_t a=(uintptr_t)p&~(uintptr_t)63;const uintptr_t end=(uintptr_t)p+n;
+ if(invalidate)for(;a<end;a+=64)__asm__ volatile("dc civac, %0"::"r"(a):"memory");
+ else for(;a<end;a+=64)__asm__ volatile("dc cvac, %0"::"r"(a):"memory");
+ __asm__ volatile("dsb sy":::"memory");
+}
+void *streamAlloc(size_t n,uint64_t *bus){
+ unsigned c=0;while(c<kStreamClasses&&(512u<<c)<n)++c;
+ if(c==kStreamClasses)return nullptr;
+ const size_t block=64+(512u<<c);
+ IOSimpleLockLock(gStreamLock);
+ uint8_t *h=static_cast<uint8_t *>(gStream.free[c]);
+ if(h)gStream.free[c]=*reinterpret_cast<void **>(h+8);
+ else if(gStream.next+block<=gStream.bytes){h=gStream.va+gStream.next;gStream.next+=block;}
+ if(h)++gStream.live;else ++gStream.failures;
+ IOSimpleLockUnlock(gStreamLock);
+ if(!h)return nullptr;
+ *reinterpret_cast<uint32_t *>(h)=c;
+ if(bus)*bus=gStream.iova+(uint64_t)(h+64-gStream.va);
+ return h+64;
+}
+void streamFree(void *p){
+ uint8_t *h=static_cast<uint8_t *>(p)-64;
+ const uint32_t c=*reinterpret_cast<uint32_t *>(h);
+ if(c>=kStreamClasses)return;
+ IOSimpleLockLock(gStreamLock);
+ *reinterpret_cast<void **>(h+8)=gStream.free[c];gStream.free[c]=h;--gStream.live;
+ IOSimpleLockUnlock(gStreamLock);
+}
+extern "C" uint8_t *fuxi_wifi_dma_cached_alias(const uint8_t *wc);
+// Called before arenaInit: takes the top of the window for gStream and returns the bytes left for gArena.
+size_t streamInit(uint8_t *va,uint64_t iova,size_t bytes){
+ unsigned want=1;PE_parse_boot_argn("fuxi-wifi-cached",&want,sizeof want);
+ uint8_t *cached=want==1?fuxi_wifi_dma_cached_alias(va):nullptr;
+ if(cached&&bytes>=2*kStreamBytes&&(gStreamLock=IOSimpleLockAlloc())){
+  gStream.va=cached+(bytes-kStreamBytes);gStream.iova=iova+(bytes-kStreamBytes);gStream.bytes=kStreamBytes;gStream.next=0;
+  gStreamOn=true;bytes-=kStreamBytes;
+ }
+ IOLog("[FuxiNw] packet buffers: %s\n",gStreamOn?"cached alias, 64 MiB slab":"write-combining window");
+ return bytes;
+}
 void *pDmaAlloc(size_t n,uint64_t *bus){return arenaAlloc(n,bus);}
-void pDmaFree(size_t,void *p,uint64_t){arenaFree(p);}
-uint64_t pDmaMap(void *p,size_t,int){
+void pDmaFree(size_t,void *p,uint64_t){if(inStream(p))streamFree(p);else arenaFree(p);}
+uint64_t pDmaMap(void *p,size_t n,int dir){
+ if(inStream(p)){
+  // Handing a packet buffer to the device: write back what the CPU wrote; for a receive buffer also drop the lines, so no dirty line can
+  // be evicted over the device's data later.
+  cacheLines(static_cast<const uint8_t *>(p),n,dir!=1 /* DMA_TO_DEVICE */);
+  return gStream.iova+(uint64_t)((uint8_t *)p-gStream.va);
+ }
  if((uint8_t *)p<gArena.va||(uint8_t *)p>=gArena.va+gArena.bytes)return 0;
  return gArena.iova+((uint8_t *)p-gArena.va);
 }
-void pDmaSync(uint64_t,size_t,int){__asm__ volatile("dsb sy":::"memory");}   // the CPU sees the window write-combined (normal non-cacheable)
+void pDmaSync(uint64_t bus,size_t n,int dir){
+ if(busInStream(bus)){cacheLines(gStream.va+(bus-gStream.iova),n,dir!=1);return;}
+ __asm__ volatile("dsb sy":::"memory");   // the CPU sees the rest of the window write-combined (normal non-cacheable)
+}
 void pSleep(unsigned ms){IOSleep(ms);}
 void pPoll(){}
 void pHalt(){for(;;)IOSleep(1000);}
@@ -204,7 +269,12 @@ constexpr uint32_t kMsiAddrLo=0x820,kMsiAddrHi=0x824,kMsiEnable0=0x828,kMsiMask0
 volatile uint32_t gMsiCount,gMsiBits,gWake;
 bool gMsiAttached;
 IOLock *gWakeLock;
-void wakeWorker(){__atomic_store_n(&gWake,1u,__ATOMIC_RELEASE);if(gWakeLock)IOLockWakeup(gWakeLock,(void *)&gWake,false);}
+// fuxi 2026-11-20: the worker used to check gWake under gWakeLock and then sleep, while the MSI handler set it and woke the event without
+// that lock: an interrupt between the check and the sleep was lost and the worker slept the full 10 ms (en0 measured ~22 Mbit/s at
+// ~2000 packets/s on a 1000 Mbps link). Now the worker asserts the wait first and checks the flag after, so a wakeup can no longer fall
+// between them; thread_wakeup is safe from the interrupt. gWorkerStats: waits, returns with work already flagged, woken, timed out.
+volatile uint32_t gWorkerStats[4];
+void wakeWorker(){__atomic_store_n(&gWake,1u,__ATOMIC_RELEASE);thread_wakeup((event_t)&gWake);}
 void msiIrq(void *){
  const uint32_t status=gDbi[kMsiStatus0/4];
  if(status)gDbi[kMsiStatus0/4]=status;
@@ -225,11 +295,13 @@ int msiAttach(){
  return rc;
 }
 void workerWait(unsigned ms){
- if(__atomic_exchange_n(&gWake,0u,__ATOMIC_ACQ_REL))return;
+ gWorkerStats[0]=gWorkerStats[0]+1;
+ if(__atomic_exchange_n(&gWake,0u,__ATOMIC_ACQ_REL)){gWorkerStats[1]=gWorkerStats[1]+1;return;}
  uint64_t deadline=0;clock_interval_to_deadline(ms,kMillisecondScale,&deadline);
- IOLockLock(gWakeLock);
- if(!__atomic_load_n(&gWake,__ATOMIC_ACQUIRE))IOLockSleepDeadline(gWakeLock,(void *)&gWake,*reinterpret_cast<AbsoluteTime *>(&deadline),THREAD_UNINT);
- IOLockUnlock(gWakeLock);
+ assert_wait_deadline((event_t)&gWake,THREAD_UNINT,deadline);
+ if(__atomic_exchange_n(&gWake,0u,__ATOMIC_ACQ_REL)){clear_wait(current_thread(),THREAD_AWAKENED);gWorkerStats[1]=gWorkerStats[1]+1;return;}
+ const wait_result_t r=thread_block(THREAD_CONTINUE_NULL);
+ if(r==THREAD_TIMED_OUT)gWorkerStats[3]=gWorkerStats[3]+1;else gWorkerStats[2]=gWorkerStats[2]+1;
  __atomic_store_n(&gWake,0u,__ATOMIC_RELEASE);
 }
 
@@ -254,6 +326,8 @@ void watchThread(void *,wait_result_t){
   nwLog(5,"watch: start-done %u stage %u scans %u bss %u frames %u last_err %d where kind %llu fn %llx since %llu repeats %u MSIs %u DMA %zu/%zu",
         gStartDone,nw_wifi_stats.stage,nw_wifi_stats.scans,nw_wifi_stats.bss_seen,nw_wifi_stats.frames,nw_wifi_stats.last_err,
         nw_wifi_where[0],nw_wifi_where[1],nw_wifi_where[3],gLogRepeats,gMsiCount,gArena.used,gArena.peak);
+  nwLog(5,"watch: worker waits %u flagged %u woken %u timeouts %u; packet slab live %u failures %u",gWorkerStats[0],gWorkerStats[1],
+        gWorkerStats[2],gWorkerStats[3],gStream.live,gStream.failures);
   if(gStartDone)continue;
   const uint32_t cmd=gCfg[1],id=gCfg[0];
   if(id!=0x110717cbu||!(cmd&2u))continue;
@@ -263,6 +337,11 @@ void watchThread(void *,wait_result_t){
 }
 }  // namespace
 
+// nw_net.c alloc_skb: a packet buffer from the cached slab, or the write-combining window when that is off or the class is full.
+extern "C" void *fuxi_wifi_dma_alloc_stream(size_t n,uint64_t *bus){
+ if(gStreamOn)if(void *p=streamAlloc(n,bus))return p;
+ return arenaAlloc(n,bus);
+}
 // The network side asks the worker to send a queued frame now (FuxiWifiNet.cpp if_output) instead of at its next wake.
 extern "C" void fuxi_wifi_wake(void){wakeWorker();}
 // The address in /chosen at boot, before userland: with /defaults/vmm-present (the iOS 17 ADT) MobileGestalt answers the wifi
@@ -282,7 +361,7 @@ extern "C" void fuxi_wifi_nw_run(volatile uint32_t *bar,size_t barBytes,volatile
  gCfg=cfg;gDbi=dbi;gBar=bar;gFault=fault;gFar=far;
  PE_parse_boot_argn("fuxi-wifi-log",&gLogLevel,sizeof gLogLevel);
  gWakeLock=IOLockAlloc();
- if(!gWakeLock||!arenaInit(va,iova,bytes)){nwLog(3,"wifi: arena setup failed");return;}
+ if(!gWakeLock||!arenaInit(va,iova,streamInit(va,iova,bytes))){nwLog(3,"wifi: arena setup failed");return;}
  if(!findCaps()){nwLog(3,"wifi: PCIe/MSI capability not found");return;}
  publishMac();
  nwLog(5,"wifi: Ath12kWifi f6bf561 (21H461 runtime) start: BAR %zu bytes, DMA window %zu MiB at iova %llx, PCIe cap %x MSI cap %x",barBytes,bytes>>20,iova,gPcieCap,gMsiCap);

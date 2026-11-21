@@ -1,7 +1,7 @@
 diff --git a/security/mac_process.c b/security/mac_process.c
 --- a/security/mac_process.c
 +++ b/security/mac_process.c
-@@ -895,6 +895,21 @@
+@@ -895,6 +895,38 @@
  int
  mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_reason_t *reasonp)
  {
@@ -17,6 +17,23 @@ diff --git a/security/mac_process.c b/security/mac_process.c
 +		}
 +		if (btd_skip) {
 +			printf("fuxi btd: launch constraints skipped for the bindfs bluetoothd\n");
++			return 0;
++		}
++	}
++	/* fuxi 2026-11-19: Safari's WebKit extensions (ExtensionKit WebContentExtension / NetworkingExtension / GPUExtension) failed
++	 * "Launch Constraint Violation ... Constraint not matched" and were killed at exec, so no web page ever loaded ("no network"
++	 * while DNS and TLS worked). Executables named com.apple.WebKit.* under /System/Library/ExtensionKit are let through. */
++	if (imgp && imgp->ip_vp) {
++		const char *wk_name = vnode_getname_printable(imgp->ip_vp);
++		int wk_skip = wk_name && strncmp(wk_name, "com.apple.WebKit.", 17) == 0;
++		if (wk_name) {
++			vnode_putname_printable(wk_name);
++		}
++		if (wk_skip) {
++			static int wk_noted;
++			if (wk_noted++ < 4) {
++				printf("fuxi webkit: launch constraints skipped for a WebKit extension\n");
++			}
 +			return 0;
 +		}
 +	}

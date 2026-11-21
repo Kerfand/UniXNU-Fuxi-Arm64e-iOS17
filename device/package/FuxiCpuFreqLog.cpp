@@ -139,7 +139,15 @@ void frameRow() {
 // TASK_POWER_INFO (flavor 21): total_user, total_system (mach time, terminated threads included), task_interrupt_wakeups, ...
 struct PowerInfo {uint64_t totalUser, totalSystem, interruptWakeups, platformIdleWakeups, timerWakeupsBin1, timerWakeupsBin2;};
 struct CpuSlot {int pid; uint64_t last; uint64_t delta;};
-CpuSlot gCpu[640];
+// fuxi 2026-11-19: on the heap (15 KiB): the upstream Adreno740 merge left the kernel __DATA 32 KiB over its prelink room.
+constexpr unsigned kCpuSlots = 640;
+CpuSlot *gCpuSlots;
+struct CpuRange {CpuSlot *b, *e; CpuSlot *begin() const {return b;} CpuSlot *end() const {return e;}};
+CpuRange cpuSlots() {
+    if (!gCpuSlots) gCpuSlots = static_cast<CpuSlot *>(IOMallocZeroData(sizeof(CpuSlot) * kCpuSlots));
+    return gCpuSlots ? CpuRange{gCpuSlots, gCpuSlots + kCpuSlots} : CpuRange{nullptr, nullptr};
+}
+#define gCpu cpuSlots()
 int cpuCallout(proc_t p, void *) {
     const int pid = proc_pid(p);
     task_t t = proc_task(p);

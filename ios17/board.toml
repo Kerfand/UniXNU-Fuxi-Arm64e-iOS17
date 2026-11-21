@@ -13,7 +13,7 @@ kit = "sheng"
 # The target OS image (was the iPad7,1 iPadOS 17.7.11 restore image). Give --ipsw PATH to use a local file; without
 # it the remote url is read with range requests, only the members that are needed.
 [ipsw]
-url = "0000000000000000000000000000000000000000000000000000000000000000"
+url = "file:///mnt/c/Users/Xiaomi/Downloads/iPhone15,2_17.7_21H16_Restore.ipsw"
 product = "iPhone15,2"
 version = "17.7"
 build = "21H16"

@@ -86,7 +86,10 @@ bool offsetFile(bool write,int64_t *offset){
  vfs_context_t ctx=vfs_context_create(nullptr);
  if(!ctx)return false;
  vnode_t vp=nullptr;
- int error=vnode_open(kOffsetPath,write?(O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW):(O_RDONLY|O_NOFOLLOW),0644,0,&vp,ctx);
+ // vnode_open takes FREAD/FWRITE (1/2), not O_RDONLY/O_WRONLY (0/1): with O_WRONLY the file was opened as a reader and
+ // vnode_close(FWRITE) took the write count to -1, a panic (vnode_rele_ext ... writecount -ve) the first time the network set
+ // the time after a Wi-Fi join (2026-11-18).
+ int error=vnode_open(kOffsetPath,write?(FWRITE|O_CREAT|O_TRUNC|O_NOFOLLOW):(FREAD|O_NOFOLLOW),0644,0,&vp,ctx);
  bool ok=false;
  if(!error){
   char text[32]={};int resid=0;
@@ -124,14 +127,33 @@ void readRtc(uint32_t count){
  int rc=rtcSeconds(&secs,&ctrl);
  fuxi_rtc_stats[1]=secs;fuxi_rtc_stats[2]=ctrl;
  if(rc){fuxi_rtc_stats[0]=(uint32_t)-2;IOLog("fuxi rtc: read error %d\n",rc);return;}
+ // fuxi 2026-11-17: a static offset when there is no stored one. calendar - RTC measured on three boots of 2026-11-17 (USB log capture
+ // start in UTC against the "fuxi rtc" reading: 1794549623, ...629, ...624; the reading comes a few seconds after the capture opens),
+ // so the clock is right from the first boot without Settings or the network. Order: boot argument fuxi-time-offset=<seconds>, the
+ // offset Settings stored on Data, this constant.
+ // 2026-11-18: the network time after a Wi-Fi join gave calendar - RTC = 1794549681 ("fuxi rtc: calendar set to 1795000399,
+ // rtc 450718"); the USB-capture estimate above was 54 s slow.
+ static const int64_t kStaticRtcOffset=1794549681;
  int64_t offset=0;
- const bool stored=offsetFile(false,&offset);
- const int64_t calendar=(int64_t)secs+(stored?offset:0);
- const bool plausible=(ctrl&0x80) && calendar>=1704067200 && calendar<2208988800;   // 2024-01-01 .. 2040-01-01
+ const char *source="static";
+ uint64_t arg=0;
+ if(PE_parse_boot_argn("fuxi-time-offset",&arg,sizeof(arg))&&arg){offset=(int64_t)arg;source="boot-arg";}
+ else if(offsetFile(false,&offset))source="stored";
+ else offset=kStaticRtcOffset;
+ const bool stored=true;
+ // 2026-11-19: the PMK8550 RTC does not count Unix time; each phone's counter starts from its own point, so the static offset above
+ // is right only on the phone it was measured on. On another phone the result is accepted only between this build's date and two
+ // years later; otherwise the calendar starts at the build date (TLS certificates then validate) until the network time or Settings
+ // sets it, which stores this phone's own offset for later boots.
+ static const int64_t kBuildFloor=1795046400;   // 2026-11-19 00:00 UTC
+ int64_t calendar=(int64_t)secs+offset;
+ bool plausible=(ctrl&0x80) && calendar>=kBuildFloor-86400 && calendar<kBuildFloor+2*31536000LL;
+ if(!plausible && strcmp(source,"static")==0){calendar=kBuildFloor;plausible=true;source="build-date";}
  if(plausible)clock_set_calendar_microtime((clock_sec_t)calendar,0);
  fuxi_rtc_stats[0]=plausible?2u:1u;
- IOLog("fuxi rtc: apid %d ctrl %#x rtc %u offset %lld (%s) -> %s\n",apid,(unsigned)ctrl,secs,(long long)offset,
-     stored?"stored":"none",plausible?"calendar set":"left alone");
+ (void)stored;
+ IOLog("fuxi rtc: apid %d ctrl %#x rtc %u offset %lld (%s) calendar %lld -> %s\n",apid,(unsigned)ctrl,secs,(long long)offset,
+     source,(long long)calendar,plausible?"calendar set":"left alone");
 }
 bool setup(){
  gArb.ee=0;

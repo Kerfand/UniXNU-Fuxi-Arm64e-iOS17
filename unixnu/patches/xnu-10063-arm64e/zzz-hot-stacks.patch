@@ -1,0 +1,137 @@
+--- a/osfmk/arm64/pcb.c	2026-11-18 05:37:34.130882948 -0600
++++ b/osfmk/arm64/pcb.c	2026-11-18 05:37:34.131080448 -0600
+@@ -1984,6 +1984,86 @@
+ };
+ /* from the heap at arm time: in bss the 96 KiB took the fileset kernel's native __DATA past its room */
+ static struct unixnu_hot_slot *unixnu_hot_u, *unixnu_hot_k, *unixnu_hot_c, *unixnu_hot_l, *unixnu_hot_f;
++/*
++ * zzz-hot-stacks.patch (fuxi 2026-11-18): the whole interrupted user stack (pc, lr, up to 12 return addresses of the frame chain)
++ * and the thread id as one key, so a report shows which call chains the time goes to, not only which addresses are hot.
++ */
++#define UNIXNU_HOT_STACKS 512
++#define UNIXNU_HOT_DEPTH 14
++struct unixnu_hot_stack {
++	uint64_t key;
++	uint32_t count;
++	uint32_t depth;
++	uint64_t tid;
++	uint64_t pc[UNIXNU_HOT_DEPTH];
++};
++static struct unixnu_hot_stack *unixnu_hot_s;
++static uint32_t unixnu_hot_s_lost;
++
++static void
++unixnu_hot_stack_add(uint64_t tid, const uint64_t *pc, unsigned n)
++{
++	if (!unixnu_hot_s || !n) {
++		return;
++	}
++	uint64_t key = 1469598103934665603ULL ^ tid;
++	for (unsigned i = 0; i < n; i++) {
++		key = (key ^ pc[i]) * 1099511628211ULL;
++	}
++	if (!key) {
++		key = 1;
++	}
++	uint32_t h = (uint32_t)(key >> 7) & (UNIXNU_HOT_STACKS - 1);
++	for (int i = 0; i < 16; i++) {
++		struct unixnu_hot_stack *s = &unixnu_hot_s[(h + i) & (UNIXNU_HOT_STACKS - 1)];
++		uint64_t current = os_atomic_load(&s->key, relaxed);
++		if (current == 0) {
++			if (os_atomic_cmpxchg(&s->key, 0ULL, key, relaxed)) {
++				s->tid = tid;
++				s->depth = n;
++				for (unsigned j = 0; j < n; j++) {
++					s->pc[j] = pc[j];
++				}
++				current = key;
++			} else {
++				current = os_atomic_load(&s->key, relaxed);
++			}
++		}
++		if (current == key) {
++			os_atomic_inc(&s->count, relaxed);
++			return;
++		}
++	}
++	os_atomic_inc(&unixnu_hot_s_lost, relaxed);
++}
++
++static void
++unixnu_hot_print_stacks(void)
++{
++	if (!unixnu_hot_s) {
++		return;
++	}
++	for (int n = 0; n < 12; n++) {
++		struct unixnu_hot_stack *best = NULL;
++		for (int i = 0; i < UNIXNU_HOT_STACKS; i++) {
++			if (unixnu_hot_s[i].count && (!best || unixnu_hot_s[i].count > best->count)) {
++				best = &unixnu_hot_s[i];
++			}
++		}
++		if (!best) {
++			break;
++		}
++		char line[400];
++		int at = snprintf(line, sizeof(line), "unixnu hot: S %u tid %llu", best->count, (unsigned long long)best->tid);
++		for (uint32_t j = 0; j < best->depth && j < UNIXNU_HOT_DEPTH && at > 0 && at < (int)sizeof(line) - 12; j++) {
++			at += snprintf(line + at, sizeof(line) - (size_t)at, " %llx", (unsigned long long)best->pc[j]);
++		}
++		printf("%s\n", line);
++		best->count = 0;
++	}
++	printf("unixnu hot: S lost %u\n", os_atomic_xchg(&unixnu_hot_s_lost, 0, relaxed));
++	bzero(unixnu_hot_s, sizeof(struct unixnu_hot_stack) * UNIXNU_HOT_STACKS);
++}
+ static uint32_t unixnu_hot_samples, unixnu_hot_user, unixnu_hot_kernel, unixnu_hot_other, unixnu_hot_lost, unixnu_hot_ticks;
+ static uint32_t unixnu_hot_cpu[8];   /* the sampled process's samples per CPU (SM8550: cpu0-2 A510, 3-6 A715/A710, 7 X3) */
+ static task_t unixnu_hot_task;
+@@ -2044,6 +2124,10 @@
+ 	} else {
+ 		os_atomic_inc(&unixnu_hot_user, relaxed);
+ 		unixnu_hot_add(unixnu_hot_u, pc & 0xfffffffffULL);
++		uint64_t stack[UNIXNU_HOT_DEPTH];
++		unsigned sdepth = 0;
++		stack[sdepth++] = pc & 0xfffffffffULL;
++		stack[sdepth++] = (uint64_t)ptrauth_strip((void *)get_saved_state_lr(state), ptrauth_key_return_address) & 0xfffffffffULL;
+ 		/* the interrupted lr: for a leaf (objc_msgSend, malloc) the code that called it */
+ 		unixnu_hot_add(unixnu_hot_l,
+ 		    (uint64_t)ptrauth_strip((void *)get_saved_state_lr(state), ptrauth_key_return_address) & 0xfffffffffULL);
+@@ -2062,11 +2146,15 @@
+ 			const uint64_t *record = (const uint64_t *)phystokv(pa);
+ 			uint64_t next = record[0], ret = record[1];
+ 			unixnu_hot_add(unixnu_hot_f, (uint64_t)ptrauth_strip((void *)ret, ptrauth_key_return_address) & 0xfffffffffULL);
++			if (sdepth < UNIXNU_HOT_DEPTH) {
++				stack[sdepth++] = (uint64_t)ptrauth_strip((void *)ret, ptrauth_key_return_address) & 0xfffffffffULL;
++			}
+ 			if (next <= ufp) {
+ 				break;
+ 			}
+ 			ufp = next;
+ 		}
++		unixnu_hot_stack_add(thread_tid(self), stack, sdepth);
+ 	}
+ }
+ 
+@@ -2145,7 +2233,11 @@
+ 		unixnu_hot_print("C", unixnu_hot_c);
+ 		unixnu_hot_print("L", unixnu_hot_l);
+ 		unixnu_hot_print("F", unixnu_hot_f);
+-		unixnu_hot_rounds++;
++		unixnu_hot_print_stacks();
++		/* zzz-hot-stacks.patch: a round without a sample of the process (a prewarmed app not yet used) does not count */
++		if (samples) {
++			unixnu_hot_rounds++;
++		}
+ 	}
+ 	if (found && found != unixnu_hot_task) {
+ 		task_t old = unixnu_hot_task;
+@@ -2189,6 +2281,7 @@
+ 	unixnu_hot_c = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+ 	unixnu_hot_l = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
+ 	unixnu_hot_f = kalloc_data(sizeof(struct unixnu_hot_slot) * UNIXNU_HOT_SLOTS, Z_WAITOK | Z_ZERO);
++	unixnu_hot_s = kalloc_data(sizeof(struct unixnu_hot_stack) * UNIXNU_HOT_STACKS, Z_WAITOK | Z_ZERO);
+ 	if (!unixnu_hot_u || !unixnu_hot_k || !unixnu_hot_c || !unixnu_hot_l || !unixnu_hot_f) {
+ 		printf("unixnu hot: no memory for the tables\n");
+ 		return;

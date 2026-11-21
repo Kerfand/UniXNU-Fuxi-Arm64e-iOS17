@@ -1,0 +1,86 @@
+diff --git a/security/mac_base.c b/security/mac_base.c
+--- a/security/mac_base.c
++++ b/security/mac_base.c
+@@ -1614,6 +1614,82 @@
+ 	}
+ 
+ done:
++/* U15: launchd's sandbox checks of WebKit processes for com.apple.containermanagerd (WebContent's _container_init lookup, refused
++ * with launchd error 159 from the second boot after a wipe): logged with their own counter (all of WebKit's, plus the first 10 of
++ * other processes), and for WebKit processes forced to "allowed" (error 0, retv 0) unless fuxi-wk-cm-allow=0. */
++if (strcmp(target, "Sandbox") == 0 && proc_pid(p) == 1 && uap->call == 2 && uap->arg) {
++	static uint32_t cm_other_logged, cm_webkit_logged;
++	extern boolean_t PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_arg);
++	uint64_t lw[8] = {0};
++	char ls[48];
++	size_t got = 0;
++	if (!copyin(uap->arg, lw, sizeof(lw)) && lw[4] >= 0x100000000ULL && lw[4] <= 0x7fffffffffffULL &&
++	    !copyinstr((user_addr_t)lw[4], ls, sizeof(ls), &got) && strcmp(ls, "com.apple.containermanagerd") == 0) {
++		/* libsystem_sandbox sandbox_check_common: word 0 points at the caller's 8-byte verdict (non-zero = denied), word 1 is the
++		 * checked pid. The syscall itself returns 0 either way. */
++		char who[MAXCOMLEN + 1] = "?";
++		const int tpid = (int)lw[1];
++		proc_name(tpid, who, sizeof(who));
++		const int wk = strncmp(who, "com.apple.WebKi", 15) == 0;
++		int allow = 1;
++		PE_parse_boot_argn("fuxi-wk-cm-allow", &allow, sizeof(allow));
++		uint64_t verdict = 0, after = 0;
++		const int got_verdict = lw[0] >= 0x100000000ULL && !copyin((user_addr_t)lw[0], &verdict, sizeof(verdict));
++		after = verdict;
++		if (wk && allow == 1 && got_verdict && verdict) {
++			const uint64_t zero = 0;
++			if (!copyout(&zero, (user_addr_t)lw[0], sizeof(zero))) {
++				after = 0;
++			}
++		}
++		const int before_error = error, before_rv = retv ? *retv : 0;
++		if ((wk && __atomic_fetch_add(&cm_webkit_logged, 1, __ATOMIC_RELAXED) < 60) ||
++		    (!wk && __atomic_fetch_add(&cm_other_logged, 1, __ATOMIC_RELAXED) < 10)) {
++			printf("fuxi sandbox cmlookup: %s[%d] error %d retv %d verdict %llx -> %llx words %llx %llx %llx %llx %llx\n", who, tpid,
++			    before_error, before_rv, verdict, after, lw[1], lw[3], lw[5], lw[6], lw[7]);
++		}
++	}
++}
++	/* zzz-sandbox-check-probe.patch (fuxi): Sandbox policy calls that fail (call 4 / ENOTSUP left out: cfprefsd makes
++	 * hundreds of those), every call a WebKit process makes, and launchd's calls that return anything but 0/0 (plus its
++	 * first 20): launchd answered WebContent's com.apple.containermanagerd lookup with error 159, "Sandbox restriction".
++	 * Printing every launchd call stalled pid 1 at boot (U8). For containermanagerd's failures (call 7 EINVAL, call 16
++	 * ENAMETOOLONG) also the argument block (64 bytes) and the strings its first pointers lead to. Log only. */
++	{
++		static uint32_t sbx_fail_logged, sbx_webkit_logged, sbx_launchd_logged, sbx_launchd_seen, sbx_cm_logged;
++		const int sbx_launchd = proc_pid(p) == 1;
++		const int sbx_rv = retv ? *retv : 0;
++		const int sbx_launchd_early = sbx_launchd && __atomic_fetch_add(&sbx_launchd_seen, 1, __ATOMIC_RELAXED) < 20;
++		if (strcmp(target, "Sandbox") == 0 && (sbx_launchd_early || error || sbx_rv || !sbx_launchd)) {
++			char sbx_name[MAXCOMLEN + 1];
++			proc_name(proc_pid(p), sbx_name, sizeof(sbx_name));
++			const int sbx_webkit = strncmp(sbx_name, "com.apple.WebKi", 15) == 0;
++			if ((sbx_launchd && (sbx_launchd_early || ((error || sbx_rv) && __atomic_fetch_add(&sbx_launchd_logged, 1, __ATOMIC_RELAXED) < 300))) ||
++			    (sbx_webkit && __atomic_fetch_add(&sbx_webkit_logged, 1, __ATOMIC_RELAXED) < 200) ||
++			    (!sbx_launchd && error && !(uap->call == 4 && error == ENOTSUP) &&
++			    __atomic_fetch_add(&sbx_fail_logged, 1, __ATOMIC_RELAXED) < 300)) {
++				printf("fuxi sandbox: %s[%d] call %d error %d retv %d\n", sbx_name, proc_pid(p), uap->call, error, sbx_rv);
++			}
++			if (error && !strncmp(sbx_name, "containermanage", 15) && __atomic_fetch_add(&sbx_cm_logged, 1, __ATOMIC_RELAXED) < 40) {
++				uint64_t sbx_words[8] = {0};
++				if (uap->arg && !copyin(uap->arg, sbx_words, sizeof(sbx_words))) {
++					printf("fuxi sandbox args: call %d %llx %llx %llx %llx %llx %llx %llx %llx\n", uap->call,
++					    sbx_words[0], sbx_words[1], sbx_words[2], sbx_words[3], sbx_words[4], sbx_words[5], sbx_words[6], sbx_words[7]);
++					for (int k = 0; k < 4; k++) {
++						const uint64_t ptr = sbx_words[k];
++						if (ptr < 0x100000000ULL || ptr > 0x7fffffffffffULL) {
++							continue;
++						}
++						char sbx_str[200];
++						size_t got = 0;
++						if (!copyinstr((user_addr_t)ptr, sbx_str, sizeof(sbx_str), &got) && got > 1) {
++							printf("fuxi sandbox args: call %d word %d \"%s\"\n", uap->call, k, sbx_str);
++						}
++					}
++				}
++			}
++		}
++	}
+ 	return error;
+ }
+ 

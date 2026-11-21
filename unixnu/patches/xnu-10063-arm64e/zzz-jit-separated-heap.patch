@@ -1,0 +1,31 @@
+diff --git a/osfmk/vm/vm_map.h b/osfmk/vm/vm_map.h
+--- a/osfmk/vm/vm_map.h
++++ b/osfmk/vm/vm_map.h
+@@ -1682,9 +1682,10 @@
+ VM_MAP_POLICY_ALLOW_JIT_SHARING(
+ 	vm_map_t map __unused)
+ {
+-	if (VM_MAP_IS_ALIEN(map)) {
+-		return false;
+-	}
++	/* fuxi (zzz-jit-separated-heap.patch): this CPU has no fast JIT permissions, so JavaScriptCore keeps its JIT
++	 * memory as a separated W^X heap: an executable view and a writable alias made by remapping the MAP_JIT region.
++	 * iOS maps are all "alien" here, which stripped execute from the remapped JIT entry (WebContent died at every
++	 * page). Only entries already used_for_jit (processes AMFI granted JIT) are affected. */
+ 	return true;
+ }
+ 
+@@ -1692,9 +1693,10 @@
+ VM_MAP_POLICY_ALLOW_JIT_COPY(
+ 	vm_map_t map __unused)
+ {
+-	if (VM_MAP_IS_ALIEN(map)) {
+-		return false;
+-	}
++	/* fuxi (zzz-jit-separated-heap.patch): this CPU has no fast JIT permissions, so JavaScriptCore keeps its JIT
++	 * memory as a separated W^X heap: an executable view and a writable alias made by remapping the MAP_JIT region.
++	 * iOS maps are all "alien" here, which stripped execute from the remapped JIT entry (WebContent died at every
++	 * page). Only entries already used_for_jit (processes AMFI granted JIT) are affected. */
+ 	return true;
+ }
+ 

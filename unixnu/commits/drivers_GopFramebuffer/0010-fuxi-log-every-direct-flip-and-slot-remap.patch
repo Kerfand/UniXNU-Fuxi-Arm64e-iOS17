@@ -1,0 +1,34 @@
+From d13b01d1c3edf613a0d0a755444eebbd145dba72 Mon Sep 17 00:00:00 2001
+From: fuxi <fuxi@localhost>
+Date: Fri, 20 Nov 2026 20:19:29 -0600
+Subject: [PATCH 10/10] fuxi: log every direct flip and slot remap
+
+---
+ NativeLegacyDisplay.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+index b3a5075..e10dcd9 100644
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -487,6 +487,8 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+         }
+         if(pick<0)return -1;
+         DirectSlot &slot=directSlots[pick];
++        IOLog("fuxi direct: map slot %d (shown %d pending %d) old surface %p new %p bytes %llu\n",pick,shownSlot,pendingSlot,slot.surface,
++              surface,(unsigned long long)memory->getLength());
+         if(slot.surface) {
+             slot.memory->complete();OSSafeReleaseNULL(slot.memory);OSSafeReleaseNULL(slot.surface);
+             native_legacy_direct[6]=native_legacy_direct[6]+1;
+@@ -838,7 +840,7 @@ public:
+             const int slot=directSlot(surface,memory);
+             if(slot>=0) {
+                 native_legacy_swap_stage(1);
+-                {static unsigned flips;if(flips++<20)IOLog("fuxi direct: flip %u slot %d iova %#x stride %llu bytes %llu w %u h %u fsr %#x\n",flips,slot,
++                {static unsigned flips;if(flips++<100000)IOLog("fuxi direct: flip %u slot %d iova %#x stride %llu bytes %llu w %u h %u fsr %#x\n",flips,slot,
+                     directSlots[slot].iova,(unsigned long long)sourceStride,(unsigned long long)memory->getLength(),width,height,
+                     &native_ufs_dpu_live?native_ufs_dpu_live(1):0u);}
+                 flip(directSlots[slot].iova,uint32_t(sourceStride));directBoot=false;lastFlipAt=mach_absolute_time();
+-- 
+2.53.0
+

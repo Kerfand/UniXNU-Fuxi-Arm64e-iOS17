@@ -1,0 +1,19 @@
+From 25613fba37b54557635bda53edb85b30e46e580d Mon Sep 17 00:00:00 2001
+From: fuxi <fuxi@localhost>
+Date: Fri, 20 Nov 2026 19:43:59 -0600
+Subject: [PATCH 11/14] fuxi: pin GopFramebuffer with direct heartbeat
+
+---
+ drivers/GopFramebuffer | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/GopFramebuffer b/drivers/GopFramebuffer
+index 6d54f50..11e7d10 160000
+--- a/drivers/GopFramebuffer
++++ b/drivers/GopFramebuffer
+@@ -1 +1 @@
+-Subproject commit 6d54f508584bdce19718bdc56d826131a6692b11
++Subproject commit 11e7d104bb068f71e719c58e6ca632878fca93bd
+-- 
+2.53.0
+
