@@ -241,3 +241,10 @@ unique_chip_id = "required"          # the platform seed is not stored in any re
 # fuxi.dtb already contains /reserved-memory/splash_region, so do not add it again.
 # The legacy `unixnu bootimg` node patch fails on that node with FDT_ERR_EXISTS;
 # `unixnu bootimage` packs the live tree as-is and tolerates nodes that already exist.
+
+# Device packaging (UniXNU templates/package.sh, docs/porting/packaging.md)
+[package]
+unixnu = "../UniXNU"
+
+[package.defconfig]
+17 = "fuxi_ios17_kernel_defconfig"
