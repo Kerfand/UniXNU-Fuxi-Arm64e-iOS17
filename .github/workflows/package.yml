@@ -1,0 +1,87 @@
+name: package
+
+# Stage 1 of building the fuxi iOS 17 image in Actions (docs: https://unixnu.com/zh/porting/packaging):
+# rebuilds the full source tree this snapshot was taken from (tools/reconstruct.sh), runs the device packaging script's
+# check (scripts/package.sh --check, the same script as UniXNU templates/package.sh) and uploads the rebuilt sources.
+# Later stages add the kernel build, the GPU addon and boot.img. Nothing from Apple is downloaded or uploaded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: OS profile passed to scripts/package.sh --os
+        required: true
+        default: "17"
+      upload_sources:
+        description: Upload the rebuilt source tree as an artifact
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the snapshot
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Rebuild the source tree
+        run: tools/reconstruct.sh "$RUNNER_TEMP/src"
+
+      - name: Check the rebuilt tree against the snapshot
+        run: |
+          set -euo pipefail
+          src=$RUNNER_TEMP/src
+          # Every kernel patch and device source of the snapshot must be in the rebuilt tree unchanged.
+          diff -rq unixnu/patches/xnu-10063-arm64e "$src/UniXNU/patches/xnu-10063-arm64e"
+          diff -rq device/package "$src/device/package"
+          for m in $(awk '$1!="UniXNU" && $1!="device"{print $1}' unixnu/commits/BASES.txt); do
+            p=${m/_//}; echo "$p $(git -C "$src/UniXNU/$p" log --oneline -1)"
+          done
+
+      - name: Packaging check (scripts/package.sh --check)
+        env:
+          OS_PROFILE: ${{ inputs.os }}
+        run: |
+          cd "$RUNNER_TEMP/src"
+          device-ios17/scripts/package.sh --os "$OS_PROFILE" --check --no-deps 2>&1 | tee "$RUNNER_TEMP/package-check.log"
+
+      - name: Pack the sources
+        if: inputs.upload_sources
+        run: |
+          cd "$RUNNER_TEMP/src"
+          tar --exclude=.git -czf "$RUNNER_TEMP/fuxi-ios17-sources.tar.gz" UniXNU device device-ios17 build-ios17-kernel.sh pack-ios17-hidpath.py
+
+      - name: Upload the sources
+        if: inputs.upload_sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuxi-ios17-sources-${{ github.run_number }}
+          path: ${{ runner.temp }}/fuxi-ios17-sources.tar.gz
+          retention-days: 7
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuxi-ios17-package-logs-${{ github.run_number }}
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: ignore
+          retention-days: 7
