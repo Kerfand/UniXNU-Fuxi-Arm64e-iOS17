@@ -1,1 +1,0 @@
-../../device/scripts/check-boot-fault-probe.py

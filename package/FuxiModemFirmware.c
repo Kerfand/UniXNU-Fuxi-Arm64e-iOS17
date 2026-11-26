@@ -1,0 +1,426 @@
+/* fuxi 2026-11-26: from ljhhkx529/unixnu-fuxi (FuxiAdspFirmware.c), the modem GLINK/QRTR renamed modem_glink_/modem_qrtr_. */
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+// Fuxi firmware files for the remote processors (they are never part of the build), from one of two places:
+// - "modem:NAME": the device's own split image NAME.b00, NAME.b01, ... in /image of its firmware partition (modem_a, else modem_b), a
+//   FAT volume read in place through the UFS driver (read only; nothing is installed and the boot image does not grow);
+// - any other path: a file on a mounted volume (such as adsp.mbn installed by the owner below /private/var/firmware), read through VFS.
+// Plain reads on the caller's thread: the ADSP thread is the only caller and it runs no interrupt work, so a slow read only delays that
+// bring-up.
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <sys/proc.h>
+#include <sys/vnode.h>
+#include <sys/uio.h>
+#include <sys/fcntl.h>
+#include <sys/kauth.h>
+#include <IOKit/IOLib.h>
+#include "FuxiAdspFirmware.h"
+#include "FatVolume.h"
+#include "QcomMdt.h"
+
+/* fuxi 2026-11-26: plain allocations, no __kalloc_type views: the iOS 17 fileset leaves __LASTDATA_CONST only 0xb10 bytes ahead
+ * of the retained kext data, and this file's typed views pushed it over. */
+#undef IOMallocType
+#undef IOFreeType
+#define IOMallocType(T) ((T *)IOMallocZero(sizeof(T)))
+#define IOFreeType(p, T) IOFree((p), sizeof(T))
+
+extern int native_ufs_part_find(const char *name, uint32_t *lun, uint64_t *first, uint64_t *blocks) __attribute__((weak_import));
+extern int native_ufs_part_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst) __attribute__((weak_import));
+extern int native_ufs_part_ready(void) __attribute__((weak_import));
+
+int fuxi_adsp_fw_ready(void)
+{
+    return native_ufs_part_ready && native_ufs_part_ready();
+}
+
+// ---- the firmware partition ----
+struct partition {
+    uint32_t lun;
+    uint64_t first;
+    uint64_t cached;  // block in block (UINT64_MAX: none)
+    uint8_t block[4096];
+};
+static struct partition *gPart;
+static FatVolume *gVolume;
+
+// Bytes of the partition: whole blocks straight into to, the ends of a range through the one-block cache.
+static int partitionRead(void *context, uint64_t offset, void *to, size_t length)
+{
+    struct partition *p = context;
+    uint8_t *out = to;
+    while (length) {
+        const uint64_t lba = offset / 4096;
+        const size_t within = (size_t)(offset % 4096);
+        if (!within && length >= 4096) {
+            const uint32_t n = length / 4096 > 256 ? 256 : (uint32_t)(length / 4096);
+            if (!native_ufs_part_read(p->lun, p->first + lba, n, out)) return EIO;
+            out += (size_t)n * 4096; offset += (uint64_t)n * 4096; length -= (size_t)n * 4096;
+            continue;
+        }
+        if (p->cached != lba) {
+            p->cached = UINT64_MAX;
+            if (!native_ufs_part_read(p->lun, p->first + lba, 1, p->block)) return EIO;
+            p->cached = lba;
+        }
+        const size_t take = 4096 - within < length ? 4096 - within : length;
+        memcpy(out, p->block + within, take);
+        out += take; offset += take; length -= take;
+    }
+    return 0;
+}
+
+/* The volume of one named partition, or of the first of the two that carries the firmware.
+ * "modem_b" and "modem_a" are the two slots; the first one is used by default. A caller that wants
+ * to know what is in each slot asks for the slot by name. */
+static FatVolume *volumeOf(const char *name, struct partition **out_part)
+{
+    static const char *const names[] = {"modem_b", "modem_a"};
+    if (!native_ufs_part_find || !native_ufs_part_read) return NULL;
+    struct partition *p = IOMallocType(struct partition);
+    FatVolume *v = NULL;
+    int rc = ENOENT;
+    for (unsigned i = 0; i < 2 && rc; ++i) {
+        const char *const which = name ? name : names[i];
+        uint64_t blocks = 0;
+        // ENXIO while the UFS driver is not ready yet: the caller tries again later
+        if (!native_ufs_part_find(which, &p->lun, &p->first, &blocks)) {rc = ENXIO; continue;}
+        p->cached = UINT64_MAX;
+        v = IOMallocType(FatVolume);
+        rc = fat_mount(v, blocks * 4096, partitionRead, p) ? EFTYPE : 0;
+        if (rc) { IOFreeType(v, FatVolume); v = NULL; }
+    }
+    if (rc) {IOFreeType(p, struct partition); return NULL;}
+    *out_part = p;
+    return v;
+}
+
+static int mountPartition(void)
+{
+    /* The active modem slot on this phone can be B; try it first so an
+     * anti-rollback-protected ADSP image is not taken from a stale A. */
+    if (gVolume) return 0;
+    struct partition *p = NULL;
+    FatVolume *v = volumeOf(NULL, &p);
+    if (!v) return ENXIO;
+    gPart = p;
+    gVolume = v;
+    return 0;}
+
+struct modem_image {
+    QcomMdtSplit split;
+    FatFile piece[QCOM_MDT_MAX_SEGMENTS];
+    FatFile mdt;      /* NAME.mdt itself: the header part followed by the hash segment */
+};
+
+static int pieceRead(void *context, unsigned piece, uint64_t offset, void *to, size_t length)
+{
+    struct modem_image *m = context;
+    return fat_read(gVolume, &m->piece[piece], offset, to, length);
+}
+
+struct slot_read {
+    FatVolume *volume;
+    struct modem_image *image;
+};
+
+static int pieceReadIn(void *context, unsigned piece, uint64_t offset, void *to, size_t length)
+{
+    struct slot_read *r = context;
+    return fat_read(r->volume, &r->image->piece[piece], offset, to, length);
+}
+
+/* The joined image of one named slot, read from that slot's own volume rather than from the
+ * default one. So a caller can hold the same file out of two slots and compare them.
+ *
+ * The .mdt file of that slot is returned as well, when mdt is not null: the secure world
+ * authenticates the metadata out of it, so a caller that hands the metadata over needs those bytes
+ * and not only the joined image. */
+int fuxi_adsp_fw_read_slot(const char *slot, const char *name, uint64_t *size, void **out, void **mdt, uint64_t *mdt_size)
+{
+    struct partition *p = NULL;
+    FatVolume *v = volumeOf(slot, &p);
+    if (!v) return ENXIO;
+    char path[48];
+    struct modem_image *m = IOMallocType(struct modem_image);
+    int rc = 0;
+    snprintf(path, sizeof path, "image/%s.b00", name);
+    FatFile headers;
+    rc = fat_open(v, path, &headers);
+    if (rc == FatNotFound) rc = ENOENT;
+    else if (rc) rc = EIO;
+    else if (headers.size < 52 || headers.size > 64 * 1024) rc = EFTYPE;
+    uint8_t *bytes = rc ? NULL : IOMallocData(headers.size);
+    if (!rc && fat_read(v, &headers, 0, bytes, headers.size)) rc = EIO;
+    if (!rc && qcom_mdt_split(&m->split, bytes, headers.size)) rc = EFTYPE;
+    if (bytes) IOFreeData(bytes, headers.size);
+    /* The .mdt file itself: the header part followed by the hash segment. The secure world
+     * authenticates the metadata out of this file, not out of the joined image. A firmware without
+     * one is not refused here: the caller falls back to the joined image and says so. */
+    if (!rc) {
+        snprintf(path, sizeof path, "image/%s.mdt", name);
+        if (fat_open(v, path, &m->mdt)) memset(&m->mdt, 0, sizeof m->mdt);
+    }
+    for (unsigned i = 0; !rc && i < m->split.count; ++i) {
+        if (!m->split.piece[i].size) continue;
+        snprintf(path, sizeof path, "image/%s.b%02u", name, i);
+        if (fat_open(v, path, &m->piece[i])) rc = ENOENT;
+        else if (m->piece[i].size < m->split.piece[i].size) rc = EFTYPE;
+    }
+    if (rc) {
+        IOFreeType(m, struct modem_image);
+        IOFreeType(p, struct partition);
+        IOFreeType(v, FatVolume);
+        return rc;
+    }
+    /* The whole joined image is copied out, so the caller can hold it after the volume is released. */
+    const uint64_t total = m->split.size;
+    uint8_t *joined = IOMallocData(total);
+    if (!joined) {
+        IOFreeType(m, struct modem_image);
+        IOFreeType(p, struct partition);
+        IOFreeType(v, FatVolume);
+        return ENOMEM;
+    }
+    struct slot_read reader = {v, m};
+    if (qcom_mdt_split_read(&m->split, pieceReadIn, &reader, 0, joined, total)) {
+        IOFreeData(joined, total);
+        IOFreeType(m, struct modem_image);
+        IOFreeType(p, struct partition);
+        IOFreeType(v, FatVolume);
+        return EIO;
+    }
+    /* The .mdt file is copied out as well, when the caller wants it. */
+    uint8_t *mdt_bytes = NULL;
+    if (mdt && mdt_size) {
+        *mdt = NULL;
+        *mdt_size = 0;
+        if (m->mdt.size) {
+            mdt_bytes = IOMallocData(m->mdt.size);
+            if (!mdt_bytes || fat_read(v, &m->mdt, 0, mdt_bytes, m->mdt.size)) {
+                if (mdt_bytes) IOFreeData(mdt_bytes, m->mdt.size);
+                IOFreeData(joined, total);
+                IOFreeType(m, struct modem_image);
+                IOFreeType(p, struct partition);
+                IOFreeType(v, FatVolume);
+                return EIO;
+            }
+            *mdt = mdt_bytes;
+            *mdt_size = m->mdt.size;
+        }
+    }
+    IOFreeType(m, struct modem_image);
+    IOFreeType(p, struct partition);
+    IOFreeType(v, FatVolume);
+    *size = total;
+    *out = joined;
+    return 0;
+}
+
+static int openModem(const char *name, struct modem_image **image, uint64_t *size)
+{
+    char path[48];
+    int rc = mountPartition();
+    if (rc) return rc;
+    struct modem_image *m = IOMallocType(struct modem_image);
+    snprintf(path, sizeof path, "image/%s.b00", name);
+    FatFile headers;
+    rc = fat_open(gVolume, path, &headers);
+    if (rc == FatNotFound) rc = ENOENT;
+    else if (rc) rc = EIO;
+    else if (headers.size < 52 || headers.size > 64 * 1024) rc = EFTYPE;
+    uint8_t *bytes = rc ? NULL : IOMallocData(headers.size);
+    if (!rc && fat_read(gVolume, &headers, 0, bytes, headers.size)) rc = EIO;
+    if (!rc && qcom_mdt_split(&m->split, bytes, headers.size)) rc = EFTYPE;
+    if (bytes) IOFreeData(bytes, headers.size);
+    /* The .mdt file itself: the header part followed by the hash segment. The secure world
+     * authenticates the metadata out of this file, not out of the joined image. A firmware without
+     * one is not refused here: the caller falls back to the joined image and says so. */
+    if (!rc) {
+        snprintf(path, sizeof path, "image/%s.mdt", name);
+        if (fat_open(gVolume, path, &m->mdt)) memset(&m->mdt, 0, sizeof m->mdt);
+    }
+    for (unsigned i = 0; !rc && i < m->split.count; ++i) {
+        if (!m->split.piece[i].size) continue;
+        snprintf(path, sizeof path, "image/%s.b%02u", name, i);
+        if (fat_open(gVolume, path, &m->piece[i])) rc = ENOENT;
+        else if (m->piece[i].size < m->split.piece[i].size) rc = EFTYPE;
+    }
+    if (rc) {IOFreeType(m, struct modem_image); return rc;}
+    *image = m;
+    *size = m->split.size;
+    return 0;
+}
+
+// ---- both kinds ----
+struct fuxi_adsp_fw {
+    vnode_t vnode;
+    struct modem_image *modem;
+};
+
+int fuxi_adsp_fw_open(const char *path, void **handle, uint64_t *size)
+{
+    struct fuxi_adsp_fw *fw = IOMallocType(struct fuxi_adsp_fw);
+    int error;
+    if (!strncmp(path, "modem:", 6)) {
+        error = openModem(path + 6, &fw->modem, size);
+    } else {
+        vfs_context_t ctx = vfs_context_kernel();
+        struct vnode_attr va;
+        error = vnode_open(path, FREAD, 0, 0, &fw->vnode, ctx);
+        if (!error) {
+            VATTR_INIT(&va);
+            VATTR_WANTED(&va, va_data_size);
+            if ((error = vnode_getattr(fw->vnode, &va, ctx)) || !VATTR_IS_SUPPORTED(&va, va_data_size) || !va.va_data_size) {
+                vnode_close(fw->vnode, FREAD, ctx);
+                fw->vnode = NULLVP;
+                if (!error) error = EFTYPE;
+            } else {
+                *size = va.va_data_size;
+            }
+        }
+    }
+    if (error) {IOFreeType(fw, struct fuxi_adsp_fw); return error;}
+    *handle = fw;
+    return 0;
+}
+
+int fuxi_adsp_fw_read(void *handle, uint64_t offset, void *to, size_t length)
+{
+    struct fuxi_adsp_fw *fw = handle;
+    if (fw->modem) return qcom_mdt_split_read(&fw->modem->split, pieceRead, fw->modem, offset, to, length) ? EIO : 0;
+    vfs_context_t ctx = vfs_context_kernel();
+    uint8_t *out = (uint8_t *)to;
+    while (length) {
+        const int want = length > (1u << 30) ? (1 << 30) : (int)length;
+        int resid = want;
+        const int error = vn_rdwr(UIO_READ, fw->vnode, (caddr_t)out, want, (off_t)offset, UIO_SYSSPACE, IO_NOAUTH,
+                                  vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
+        if (error) return error;
+        if (resid == want) return EIO;  /* end of file before the bytes asked for */
+        out += want - resid;
+        offset += (uint64_t)(want - resid);
+        length -= (size_t)(want - resid);
+    }
+    return 0;
+}
+
+/* Reads the .mdt file of a modem firmware. The secure world authenticates the metadata out of this
+ * file, so it is read on its own and not out of the joined image of the .bNN pieces. */
+int fuxi_adsp_fw_read_mdt(void *handle, uint64_t offset, void *to, size_t length)
+{
+    struct fuxi_adsp_fw *fw = handle;
+    if (!fw || !fw->modem) return EIO;
+    return fat_read(gVolume, &fw->modem->mdt, offset, to, length) ? EIO : 0;
+}
+
+uint64_t fuxi_adsp_fw_mdt_size(void *handle)
+{
+    struct fuxi_adsp_fw *fw = handle;
+    return fw && fw->modem ? fw->modem->mdt.size : 0;
+}
+
+void fuxi_adsp_fw_close(void *handle)
+{
+    struct fuxi_adsp_fw *fw = handle;
+    if (!fw) return;
+    if (fw->modem) IOFreeType(fw->modem, struct modem_image);
+    if (fw->vnode) vnode_close(fw->vnode, FREAD, vfs_context_kernel());
+    IOFreeType(fw, struct fuxi_adsp_fw);
+}
+
+/* Lists a directory of one named slot's volume, read only. "modem_a" and "modem_b" are the two
+ * slots; the volume is mounted for the call and released after it, so the caller can see what each
+ * slot holds rather than the one the default path picks. The caller drives it: entry = 0 for the
+ * first entry, and the directory ends when the call returns an entry whose name is empty. */
+/* The identity of one named partition: its LUN, the first block it starts at and how many blocks
+ * it has. Two partitions that are the same region have the same three numbers, so this is what
+ * tells two slots apart from one partition seen twice. */
+int fuxi_adsp_fw_slot_info(const char *slot, uint32_t *lun, uint64_t *first, uint64_t *blocks)
+{
+    if (!lun || !first || !blocks) return EINVAL;
+    if (!native_ufs_part_find) return ENXIO;
+    return native_ufs_part_find(slot, lun, first, blocks) ? 0 : ENOENT;
+}
+
+int fuxi_adsp_fw_list_slot(const char *slot, const char *path, unsigned index, char *name, size_t name_length,
+                            uint64_t *size, int *is_directory)
+{
+    if (!name || !name_length) return EINVAL;
+    name[0] = 0;
+    if (size) *size = 0;
+    if (is_directory) *is_directory = 0;
+    struct partition *p = NULL;
+    FatVolume *v = volumeOf(slot, &p);
+    if (!v) return ENXIO;
+    FatFile directory;
+    const int found = fat_open(v, path && *path ? path : "/", &directory);
+    if (found) {
+        IOFreeType(p, struct partition);
+        IOFreeType(v, FatVolume);
+        return found == FatNotFound ? ENOENT : EIO;
+    }
+    FatEntry entry;
+    const int rc = fat_list(v, &directory, index, &entry);
+    if (!rc) {
+        strlcpy(name, entry.name, name_length);
+        if (size) *size = entry.size;
+        if (is_directory) *is_directory = entry.directory;
+    }
+    IOFreeType(p, struct partition);
+    IOFreeType(v, FatVolume);
+    return rc;
+}
+
+int fuxi_adsp_fw_list(const char *path, unsigned index, char *name, size_t name_length, uint64_t *size,
+                      int *is_directory)
+{
+    if (!name || !name_length) return EINVAL;
+    name[0] = 0;
+    if (size) *size = 0;
+    if (is_directory) *is_directory = 0;
+    const int rc = mountPartition();
+    if (rc) return rc;
+    FatFile directory;
+    const int found = fat_open(gVolume, path && *path ? path : "/", &directory);
+    if (found) return found == FatNotFound ? ENOENT : EIO;
+    if (!directory.directory) return ENOTDIR;
+    FatEntry entry;
+    const int listed = fat_list(gVolume, &directory, index, &entry);
+    if (listed) return EIO;
+    if (!entry.name[0]) return 0;  /* the directory ended */
+    const size_t length = strlen(entry.name);
+    if (length + 1 > name_length) return ENAMETOOLONG;
+    memcpy(name, entry.name, length + 1);
+    if (size) *size = entry.size;
+    if (is_directory) *is_directory = entry.directory;
+    return 0;
+}
+
+/* Reads a plain file out of the firmware partition, whole, read only. The path is inside the volume, as for
+   the listing above ("image/modemr.jsn"). The caller frees the buffer with the size it is given.
+ *
+ * The split images have their own reader, because they are a set of pieces with a header; a file that is
+   one file, like the service registry's own tables, is read here. */
+int fuxi_adsp_fw_read_file(const char *path, uint64_t *size, void **out)
+{
+    if (!path || !size || !out) return EINVAL;
+    *size = 0;
+    *out = NULL;
+    const int rc = mountPartition();
+    if (rc) return rc;
+    FatFile file;
+    const int found = fat_open(gVolume, path && *path ? path : "/", &file);
+    if (found) return found == FatNotFound ? ENOENT : EIO;
+    if (file.directory) return EISDIR;
+    uint8_t *bytes = IOMallocData(file.size);
+    if (!bytes) return ENOMEM;
+    if (fat_read(gVolume, &file, 0, bytes, file.size)) {
+        IOFreeData(bytes, file.size);
+        return EIO;
+    }
+    *size = file.size;
+    *out = bytes;
+    return 0;
+}
+

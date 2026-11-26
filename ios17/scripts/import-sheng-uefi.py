@@ -1,1 +1,0 @@
-../../device/scripts/import-sheng-uefi.py

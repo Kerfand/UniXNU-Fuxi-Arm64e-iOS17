@@ -1,1 +1,0 @@
-../../device/scripts/run-sheng-unattended.sh

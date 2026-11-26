@@ -1,0 +1,51 @@
+Subject: [PATCH] fuxi: iOS 17 snapshot of the drivers/ArmCpu changes (2026-11-26)
+
+diff --git a/ArmCpu.cpp b/ArmCpu.cpp
+index 2dc44dd..36c83ef 100644
+--- a/ArmCpu.cpp
++++ b/ArmCpu.cpp
+@@ -204,6 +204,10 @@ static uint64_t gBootAffinity = 0;
+ extern "C" {
+ volatile uint64_t armcpu_spi_unhandled = 0;
+ volatile uint32_t armcpu_spi_unhandled_id = 0;
++// fuxi probe: a software-generated interrupt other than the IPI's SGI 0 (panicked before, 2026-11-14 "unexpected architectural IRQ 2"
++// at idle after data migration): counted, its INTID, the receiving core and ICC_IAR1's source bits kept, then acknowledged.
++volatile uint64_t armcpu_sgi_unexpected = 0;
++volatile uint32_t armcpu_sgi_unexpected_id = 0, armcpu_sgi_unexpected_core = 0, armcpu_sgi_unexpected_mask = 0;
+ }
+ 
+ IOService *ArmCpu::probe (IOService *provider, SInt32 *score)
+@@ -650,6 +654,11 @@ void ArmCpu::interrupt (void)
+         armcpu_spi_unhandled = armcpu_spi_unhandled + 1;
+         armcpu_spi_unhandled_id = intid;
+         write32 (gDist, 0x180 + (intid / 32) * 4, 1U << (intid % 32));
++      } else if (intid < 16) {
++        armcpu_sgi_unexpected = armcpu_sgi_unexpected + 1;
++        armcpu_sgi_unexpected_id = intid;
++        armcpu_sgi_unexpected_core = logicalId;
++        armcpu_sgi_unexpected_mask |= 1U << intid;
+       } else {
+         panic ("ArmCpu: unexpected architectural IRQ %llu", id);
+       }
+@@ -865,6 +874,21 @@ extern "C" IOReturn armcpu_spi_attach (uint32_t intid, bool edge, void (*handler
+   return kIOReturnSuccess;
+ }
+ 
++extern "C" IOReturn armcpu_spi_mask (uint32_t intid, bool masked)
++{
++  if (gDist == 0 || armcpu_gic_ready == 0) { return kIOReturnNotReady; }
++  const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
++  for (uint32_t slot = 0; slot < used; slot++) {
++    if (gSpi[slot].id == intid) {
++      const uint32_t word = (intid / 32) * 4, bit = 1U << (intid % 32);
++      write32 (gDist, (masked ? 0x180 : 0x100) + word, bit);
++      __asm__ volatile ("dsb sy" ::: "memory");
++      return kIOReturnSuccess;
++    }
++  }
++  return kIOReturnNotFound;
++}
++
+ extern "C" uint64_t armcpu_spi_count (uint32_t intid)
+ {
+   const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);

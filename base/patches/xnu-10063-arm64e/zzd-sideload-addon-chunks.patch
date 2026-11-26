@@ -1,0 +1,151 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7430,6 +7430,99 @@
+ 	}
+ 	return 0;
+ }
++/* Chunked entries (fuxi 2026-11-21, sideloading step 1 under the 64 MiB addon): an application bundle whose largest file
++ * does not fit one boot's addon is delivered over several boots. A name "apps/<path>#<8 hex digits>" holds the bytes
++ * [offset, offset + size) of /private/var/ngpu/apps/<path>; only names below apps/ are read that way, so every ordinary file
++ * keeps the whole-file path below. The write is a sequence of vn_rdwr calls at explicit offsets, so replaying a chunk in a
++ * later boot writes the same bytes at the same place and nothing is duplicated. The inflated bytes never sit in one buffer: a
++ * 1 MiB window goes straight to the vnode, which keeps a 100 MiB executable out of a single kalloc_data. */
++static int
++native_gpu_addon_chunk_offset(const char *name, uint64_t *offset)
++{
++	const size_t length = strlen(name);
++	if (length < 12 || strncmp(name, "apps/", 5) || name[length - 9] != 0x23) {
++		return 0;
++	}
++	uint64_t value = 0;
++	for (size_t i = length - 8; i < length; ++i) {
++		char c = name[i];
++		unsigned digit;
++		if (c >= 0x30 && c <= 0x39) {
++			digit = (unsigned)(c - 0x30);
++		} else if (c >= 0x61 && c <= 0x66) {
++			digit = (unsigned)(c - 0x61 + 10);
++		} else {
++			return 0;
++		}
++		value = (value << 4) | digit;
++	}
++	*offset = value;
++	return 1;
++}
++static int
++native_gpu_addon_stream(const char *path, const uint8_t *packed, uint64_t packed_size, uint64_t size, uint64_t offset,
++	uint32_t mode, vfs_context_t ctx)
++{
++	vnode_t vp = NULLVP;
++	/* The first chunk starts the file again; the rest land at their own offset. */
++	int error = vnode_open(path, O_CREAT | FWRITE | O_NOFOLLOW | (offset ? 0 : O_TRUNC), mode, 0, &vp, ctx);
++	if (error) {
++		return error;
++	}
++	z_stream stream;
++	memset(&stream, 0, sizeof(stream));
++	stream.zalloc = native_gpu_addon_zalloc;
++	stream.zfree = native_gpu_addon_zfree;
++	stream.next_in = (Bytef *)(uintptr_t)packed;
++	stream.avail_in = (uInt)packed_size;
++	const uint32_t window = 1 << 20;
++	uint8_t *buffer = kalloc_data(window, Z_WAITOK);
++	if (inflateInit(&stream) != Z_OK) {
++		error = ENOMEM;
++	} else {
++		if (!buffer) {
++			error = ENOMEM;
++		}
++		uint64_t written = 0;
++		while (!error && written < size) {
++			uint64_t left = size - written;
++			uInt want = (uInt)(left > window ? window : left);
++			stream.next_out = buffer;
++			stream.avail_out = want;
++			int z = inflate(&stream, Z_NO_FLUSH);
++			if ((z != Z_OK && z != Z_STREAM_END) || stream.avail_out == want) {
++				error = EINVAL;
++				break;
++			}
++			uint32_t got = want - stream.avail_out;
++			int resid = 0;
++			error = vn_rdwr(UIO_WRITE, vp, (caddr_t)buffer, (int)got, (off_t)(offset + written), UIO_SYSSPACE,
++				IO_NOAUTH | IO_UNIT, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++			if (!error && resid) {
++				error = EIO;
++			}
++			written += got;
++		}
++		if (!error && (written != size || stream.avail_in)) {
++			error = EINVAL;
++		}
++		inflateEnd(&stream);
++	}
++	if (buffer) {
++		kfree_data(buffer, window);
++	}
++	if (!error) {
++		struct vnode_attr va;
++		VATTR_INIT(&va);
++		VATTR_SET(&va, va_mode, mode);
++		error = vnode_setattr(vp, &va, ctx);
++	}
++	if (!error) {
++		error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
++	}
++	int close_error = vnode_close(vp, FWRITE, ctx);
++	return error ? error : close_error;
++}
+ static void
+ native_gpu_addon_install(proc_t p, user_addr_t scratch)
+ {
+@@ -7497,17 +7590,30 @@
+ 		at += 24;
+ 		const char *name = (const char *)(addon + at);
+ 		at += (name_bytes + 7) & ~7ULL;
+-		snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);
+-		uint8_t *data = kalloc_data(size ? size : 1, Z_WAITOK);
+-		int error = data ? native_gpu_addon_inflate(addon + at, packed, data, size) : ENOMEM;
+-		if (!error) {
+-			error = native_gpu_addon_write(path, data, size, mode, ctx);
++		uint64_t offset = 0;
++		uint8_t *data = NULL;
++		int error;
++		if (native_gpu_addon_chunk_offset(name, &offset)) {
++			/* The suffix is the offset; the path is everything before the 0x23 marker. */
++			int length = (int)(strlen(name) - 9);
++			snprintf(path, sizeof(path), "/private/var/ngpu/%.*s", length, name);
++			error = native_gpu_addon_stream(path, addon + at, packed, size, offset, mode, ctx);
+ 			if (error == ENOENT && !(error = native_gpu_addon_parents(p, scratch, path))) {
++				error = native_gpu_addon_stream(path, addon + at, packed, size, offset, mode, ctx);
++			}
++		} else {
++			snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);
++			data = kalloc_data(size ? size : 1, Z_WAITOK);
++			error = data ? native_gpu_addon_inflate(addon + at, packed, data, size) : ENOMEM;
++			if (!error) {
+ 				error = native_gpu_addon_write(path, data, size, mode, ctx);
++				if (error == ENOENT && !(error = native_gpu_addon_parents(p, scratch, path))) {
++					error = native_gpu_addon_write(path, data, size, mode, ctx);
++				}
++			}
++			if (data) {
++				kfree_data(data, size ? size : 1);
+ 			}
+-		}
+-		if (data) {
+-			kfree_data(data, size ? size : 1);
+ 		}
+ 		if (error < 0) {
+ 			native_gpu_addon_same++;
+@@ -7519,6 +7625,8 @@
+ 		}
+ 		at += (packed + 7) & ~7ULL;
+ 	}
++	printf("fuxi gpu addon: %d files, %d written, %d same, %d failed, last error %d\n", native_gpu_addon_files,
++	    native_gpu_addon_written, native_gpu_addon_same, native_gpu_addon_failed, native_gpu_addon_error);
+ }
+ static void
+ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)

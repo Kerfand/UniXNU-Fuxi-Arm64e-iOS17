@@ -1,0 +1,218 @@
+schema_version = 1
+
+[device]
+name = "fuxi"
+soc = "SM8550"
+os_profile = "ios-17.7-21H16"
+summary = "Xiaomi 13 (fuxi, SM8550) running iOS 17.7 21H16 on the iPhone15,2 arm64e kernelcache. Boots to the home screen; status per area below (2026-11-26)."
+
+[[area]]
+id = "configuration"
+status = "implemented"
+components = []
+paths = ["board.toml", "feeds.toml", "unixnu.lock", "configs/**", ".github/**", ".gitignore", "local.toml.example", "base/**", "tools/**"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["The base UniXNU changes are a patch stack (base/commits, base/patches) rebuilt by tools/reconstruct.sh."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["The ios-17.7-21H16 OS profile is not in UniXNU yet; scripts/package.sh is the unchanged template and does not build this profile."]
+next_action = ["Upstream the iOS 17 profile, then switch the package workflow from tools/reconstruct.sh to scripts/package.sh."]
+evidence = [{kind = "source", reference = "docs/evidence/2026-11-26.md", result = "Implemented in this snapshot; see the evidence summary."}]
+
+[[area]]
+id = "firmware"
+status = "device-verified"
+components = []
+paths = ["proprietary-files.txt", "build-boot-image.sh", "scripts/*firmware*", "scripts/gen-touch-firmware.py"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["DarwinBoot hands off to the kernel from the Mu UEFI; boot.img boots with fastboot boot."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["Firmware files are not in the repository; proprietary-files.txt lists their sources."]
+next_action = ["None."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "cpu"
+status = "device-verified"
+components = []
+paths = ["package/CpuFreq*", "package/FuxiCpuFreqLog.cpp", "scripts/*armcpu*"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["Eight cores online; EPSS votes with sheng-cpufreq-turbo=1 reach 2016/2803/3187 MHz (A510/A715/X3) and L3 1804 MHz.", "E/P cluster types with the Edge scheduler booted but ran slower (no CLPC); they stay off."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["One SMP cluster; no performance controller."]
+next_action = ["Revisit big.LITTLE once a perfcontrol stand-in exists."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "memory"
+status = "implemented"
+components = []
+paths = ["dts/**", "package/*Smmu*", "scripts/*smmu*"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["The native kernel __DATA/__DATA_CONST share the fileset with AppleARMPlatform; large statics live on the heap (base/patches, package/coachz_baseband.cpp, NativeUfs)."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["About 20 KiB of native __DATA and 2 KiB of __DATA_CONST are left before AppleARMPlatform."]
+next_action = ["Move AppleARMPlatform data like --move-code moves its code."]
+evidence = [{kind = "source", reference = "docs/evidence/2026-11-26.md", result = "Implemented in this snapshot; see the evidence summary."}]
+
+[[area]]
+id = "storage"
+status = "device-verified"
+components = []
+paths = ["drivers/NativeUfs/**", "drivers/NativeRamBlock/**", "scripts/*ufs*", "scripts/*root*", "scripts/*userdata*"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["UFS root and the persistent Data volume; data kept across reboots."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["None known."]
+next_action = ["None."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "display"
+status = "device-verified"
+components = []
+paths = ["package/*Display*", "package/*Backlight*", "package/AppleARMBacklight.cpp", "package/GeniI2c*", "scripts/*display*", "scripts/*gop*"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["GOP framebuffer with a GPU copy per frame; DSI backlight."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["No zero-copy scanout; the screen-sleep/lock path resets the phone (IOSurface calls an unmapped kernel function)."]
+next_action = ["Fix the lock-screen reset; then DPU flips."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "input"
+status = "device-verified"
+components = []
+paths = ["drivers/FuxiFtsTouch/**", "drivers/NativeHidInput/**", "drivers/NativeNovatekTouch/**", "package/*Touch*", "package/FuxiButtons.cpp"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["FTM5 touch and the power/volume buttons."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["None known."]
+next_action = ["None."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "gpu"
+status = "device-verified"
+components = []
+paths = ["scripts/*adreno*", "scripts/*gmu*", "scripts/*gpu*", "package/*Gpu*"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["Adreno740 (upstream 2962e28 + fuxi), Turnip, AdrenoMetal and metal2vulkan 87a869f built in WSL; sheng-gpu-coherent=1 for HOST_CACHED memory."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["Web pages render as a solid colour in some builds (under investigation)."]
+next_action = ["Track down the WebKit compositing failure."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "network"
+status = "device-verified"
+components = []
+paths = ["drivers/Ath12kWifi/**", "drivers/Ath12kWifiLegacy/**", "package/*Wifi*"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["WCN7850 Wi-Fi associates and carries traffic."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["About 20 Mbit/s."]
+next_action = ["None."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "cellular"
+status = "implemented"
+components = []
+paths = ["package/FuxiModem*", "package/fuxi_modem.c", "package/ModemGlink*", "package/modem_qrtr*", "package/fuxi_ipa*", "package/coachz_*", "package/QcomBaseband.h", "base/patches/xnu-10063-arm64e/zz-xpc-manifest-mount.patch", "base/patches/xnu-10063-arm64e/zz-vmm-hide.patch", "scripts/make-fuxi-manifest.py", "scripts/build-fuxi-logdump.py", "package/fuxi-logdump.m"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["Modem PAS/GLINK/QRTR up (49 QMI services), RMTFS and TFTP served; the SIM is read (USIM ready, ICCID, IMSI).", "The CommCenter bridge (ljhhkx529/QcomBaseband fuxi 0b7f150) runs in the native kernel; the radio comes online and searches.", "The appended launchd manifest runs fuxi-logdump; the cellular CommCenter branch registers its services."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["MobileGestalt answers HasBaseband 0 (IsVirtualDevice 1 from vmm-present); ABM never opens AppleBaseband; no registration yet."]
+next_action = ["Hide vmm-present from userspace without starting watchdogd, then follow ABM with the logdump probes."]
+evidence = [{kind = "source", reference = "docs/evidence/2026-11-26.md", result = "Implemented in this snapshot; see the evidence summary."}]
+
+[[area]]
+id = "audio"
+status = "device-verified"
+components = []
+paths = ["package/*Audio*", "package/Cs35*", "package/CirrusCs35l41*", "package/QcomAudio*", "package/QcomAdsp*", "package/AdspProbe.cpp", "hal/**"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["ADSP, the audio graph and the CS35L41 speakers."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["A recent build was reported silent; not investigated."]
+next_action = ["Re-check playback."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "power"
+status = "device-verified"
+components = []
+paths = ["package/*Battery*", "package/*Charge*", "package/*Rpmh*"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["Battery level, charging and PPS/PD fast charging."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["Xiaomi proprietary fast charge not verified."]
+next_action = ["None."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "usb"
+status = "planned"
+components = []
+paths = ["package/QcomDwc3.cpp", "package/UsbProbe.cpp", "package/AppleUSBXDCI_abi.s", "package/OriginalUsbXdciABI.h", "drivers/QcomXnuUsbDebug/**"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["The QUD USB CDC-ACM debug console works (logs, screenshots, reboot control)."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["The Apple USB device stack (AppleUSBXDCI on QcomDwc3, usbmux for 3uTools/iTunes) is unfinished and not part of this snapshot."]
+next_action = ["Finish the AppleUSBXDCI hand-over on the 21H16 class layout."]
+evidence = []
+
+[[area]]
+id = "packaging"
+status = "device-verified"
+components = []
+paths = ["scripts/package.sh", "scripts/build-*.py", "scripts/data/**", "build-boot-image.sh"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["boot.img with kernel, ADT, trust caches and the GPU addon."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["Built with tools/host/pack-ios17-hidpath.py, not scripts/package.sh."]
+next_action = ["See configuration."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+
+[[area]]
+id = "diagnostics"
+status = "device-verified"
+components = []
+paths = ["tests/**", "etc/**", "docs/**", "statusbar/**", "assets/**", "README.md", "AGENTS.md"]
+inputs = ["Xiaomi 13 (fuxi, SM8550) board facts: mainline sm8550-xiaomi-fuxi DTS, UEFI handoff, the 21H16 iPhone15,2 kernelcache."]
+configuration = ["board.toml, configs/fuxi_ios17_kernel_defconfig, boot arguments built by tools/host/pack-ios17-hidpath.py."]
+procedure = ["tools/host/build-ios17-kernel.sh; tools/host/pack-ios17-hidpath.py; fastboot boot (temporary boot only); QUD USB serial capture."]
+findings = ["Panic and heartbeat stop reboot to fastboot after 5 s (QUD panic path, Gunyah watchdog 20 s); logdump reads telephony logs."]
+completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
+limits = ["None."]
+next_action = ["None."]
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
+

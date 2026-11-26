@@ -12,9 +12,26 @@
 | 目标系统 | iOS 17.7，build 21H16 |
 | 内核 | xnu-10063，arm64e |
 | 机型标识 | iPhone15,2 内核缓存，ADT 按 iPhone 14 Pro（D73AP）识别 |
-| 当前进度 | 进入桌面；触摸、按键、声音、存储、串口、电池、迁移、壁纸可用 |
+| 当前进度 | 进入桌面；触摸、按键、声音、存储、串口、电池、迁移、壁纸可用；8 核 turbo；SIM 卡可读 |
 
-## 当前状态（2026-11-20）
+## 仓库布局（2026-11-26 起，按 https://unixnu.com/zh/contributing/repository 的设备仓库布局）
+
+| 路径 | 内容 |
+| --- | --- |
+| `board.toml` `porting.toml` `feeds.toml` `unixnu.lock` | 板级配置、移植记录（各模块状态与证据）、源码钉选 |
+| `configs/` `dts/` | 内核 defconfig、设备树 |
+| `patches/xnu/series` | 板级 XNU 补丁及应用顺序 |
+| `package/` | 板级驱动与探针源码（构建树里是 `kits/sheng`） |
+| `drivers/` | 板级驱动（UFS、触摸、HID、Wi-Fi、QUD 调试串口等） |
+| `scripts/` | 构建、打包、检查脚本；`scripts/package.sh` 是官方模板 |
+| `base/` | 对主仓库 UniXNU 及其子模块的补丁栈（`base/commits/BASES.txt` 记录基线），以及 iOS 17 内核补丁 `base/patches/xnu-10063-arm64e` |
+| `tools/` | 宿主机工具；`tools/host/` 是构建入口 `build-ios17-kernel.sh`、`pack-ios17-hidpath.py` 和 Windows 抓日志脚本 |
+| `docs/` | 进度记录、证据、跳过清单 |
+| `.github/workflows/` | `package.yml`（重建源码树并检查）、`porting-record.yml`（移植记录检查） |
+
+`tools/reconstruct.sh OUT` 从 `base/` 和本仓库根目录重建出完整工作树（`OUT/UniXNU`、`OUT/device`、`OUT/device-ios17`）。iOS 17.7（21H16）的 OS profile 尚未进入 UniXNU 上游，所以目前用 `tools/host/` 里的脚本构建，`scripts/package.sh` 暂不能直接构建本机型。
+
+## 当前状态（2026-11-26）
 
 | 功能 | 状态 | 说明 |
 | --- | --- | --- |
@@ -30,9 +47,11 @@
 | 键盘 | ✅ | 打字不再卡顿(非完美修复，在部分场景下可能还会卡顿) |
 | Wi-Fi | ✅ | 上网、速率约 20 Mbit/s、连接速率较低 |
 | 蓝牙 | ⚠️ | 上电及初始化完成 |
-| 基带 | ⚠️ | 正在完成第一步调解器 |
+| 基带 | ⚠️ | 调制解调器上线、49 个 QMI 服务、读出 SIM 卡（ICCID/IMSI）；CommCenter 桥接已在内核，射频上线搜网；ABM 尚未启动，未注册网络 |
 | Safari | ⚠️ | 可以打开网页（内核放行 containermanagerd 查找，根因待查） |
-| GPU | ⚠️ | 可工作，但效率较低 |
+| GPU | ⚠️ | 已合并上游 Adreno740、AdrenoMetal、metal2vulkan 87a869f；部分版本网页显示纯色，排查中 |
+| CPU | ✅ | 8 核在线，turbo 档位（A510 2016 / A715 2803 / X3 3187 MHz）；大小核调度关闭（无 CLPC 时更慢） |
+| USB（爱思助手） | ❌ | 苹果 USB 设备栈移植中，未包含在本次提交 |
 | 相机 | ❌ | 不工作 |
 | 手电筒 | ❌ | 不工作 |
 

@@ -1,1 +1,0 @@
-../../device/scripts/fetch-sheng-dts.py

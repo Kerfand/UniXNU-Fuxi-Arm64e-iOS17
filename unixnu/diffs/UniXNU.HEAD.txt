@@ -1,2 +1,0 @@
-ad787c573e2f6157c9fcd1df60109e63d7a1aaf7 fuxi: pin GopFramebuffer with flip and remap log
-https://github.com/SadNutWall/UniXNU.git

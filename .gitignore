@@ -1,0 +1,26 @@
+# Local overrides and generated output (https://unixnu.com/zh/porting/device-repository)
+local.toml
+unixnu.local.toml
+out/
+build/
+.cache/
+# Apple files, firmware and build products never enter the repository
+*.ipsw
+*.dmg
+*.img
+*.macho
+*.bbfw
+*.mbn
+*.bin
+*.o
+*.a
+*.dylib
+*.decompressed
+# Local backups and logs
+*.before-*
+*.orig-*
+*.bak
+*.log
+__pycache__/
+*.pyc
+.DS_Store

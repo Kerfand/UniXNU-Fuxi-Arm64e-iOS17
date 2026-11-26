@@ -1,1 +1,0 @@
-../../device/scripts/stage-quartzcore-ios-cached-image.py

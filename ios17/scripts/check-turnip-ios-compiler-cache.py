@@ -1,1 +1,0 @@
-../../device/scripts/check-turnip-ios-compiler-cache.py

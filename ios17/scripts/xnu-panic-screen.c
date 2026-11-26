@@ -1,1 +1,0 @@
-../../device/scripts/xnu-panic-screen.c

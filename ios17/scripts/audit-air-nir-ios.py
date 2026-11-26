@@ -1,1 +1,0 @@
-../../device/scripts/audit-air-nir-ios.py

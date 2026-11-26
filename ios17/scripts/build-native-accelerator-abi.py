@@ -1,1 +1,0 @@
-../../device/scripts/build-native-accelerator-abi.py

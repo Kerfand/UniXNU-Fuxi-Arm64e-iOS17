@@ -1,0 +1,20 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c	2026-11-21 01:41:35.192966264 -0600
++++ b/bsd/kern/kern_exec.c	2026-11-21 01:41:35.193233764 -0600
+@@ -7575,6 +7575,16 @@
+ 	native_gpu_addon_mount(p, scratch, 0xc00, btd_source, sizeof(btd_source), btd_point, sizeof(btd_point),
+ 	    "/usr/sbin/BlueTool", "/usr/sbin/bluetoothd", &btd_stage, &btd_status);
+ 	printf("fuxi btd mount: stage %d status %d\n", btd_stage, btd_status);
++	/* fuxi 2026-11-21 (zz-sideload-apps-mount.patch, sideloading step 1): apps preinstalled at pack time
++	 * (device-ios17/scripts/build-fuxi-sideload.py, addon apps/<Name>.app) over /Applications. Their Mach-O files are
++	 * ad hoc signed and their CDHashes are in the owner trust module (pack SIDELOAD=1). The union keeps the system apps
++	 * visible; apps/.fuxi-sideload marks the addon's own layer. The audio slot 0xe00 is free again: each mount copies
++	 * its arguments before the next one runs. */
++	static volatile int apps_stage = 0, apps_status = -1;
++	static const char apps_source[] = "/private/var/ngpu/apps", apps_point[] = "/Applications";
++	native_gpu_addon_mount(p, scratch, 0xe00, apps_source, sizeof(apps_source), apps_point, sizeof(apps_point),
++	    "/Applications/Preferences.app", "/Applications/.fuxi-sideload", &apps_stage, &apps_status);
++	printf("fuxi sideload apps mount: stage %d status %d\n", apps_stage, apps_status);
+ 	/* fuxi probe (2026-11-13): what a readdir of the plug-in directory returns through the union (the audio server scans it with
+ 	 * opendir/readdir for "*.driver"). */
+ 	{

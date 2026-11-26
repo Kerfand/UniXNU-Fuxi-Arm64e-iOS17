@@ -1,1 +1,0 @@
-../../device/scripts/run-fuxi-usb-kernel.py

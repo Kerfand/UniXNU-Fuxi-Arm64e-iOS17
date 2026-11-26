@@ -1,1 +1,0 @@
-../../device/scripts/check-quartzcore-turnip-cache-host.py

@@ -1,0 +1,30 @@
+fuxi 2026-11-26: /private/var/ngpu/xpc over /System/Library/xpc (appended launchd manifest) and
+/private/var/ngpu/owner-apps/firmware over /usr/standalone/firmware (Mav16 baseband firmware).
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c	2026-11-26 20:39:03.894666937 +0800
++++ b/bsd/kern/kern_exec.c	2026-11-26 20:39:03.905827437 +0800
+@@ -7781,6 +7781,23 @@
+ 	native_gpu_addon_mount(p, scratch, 0xe00, apps_source, sizeof(apps_source), apps_point, sizeof(apps_point),
+ 	    "/Applications/Preferences.app", "/Applications/.fuxi-sideload", &apps_stage, &apps_status);
+ 	printf("fuxi sideload apps mount: stage %d status %d\n", apps_stage, apps_status);
++	/* fuxi 2026-11-26 (zz-xpc-manifest-mount.patch, the cellular side): the boot manifest launchd reads, with our jobs
++	 * appended at the binary-plist level (device-ios17/scripts/make-fuxi-manifest.py, after ljhhkx529/unixnu-fuxi) and
++	 * signed detached; the signature's CodeDirectory hash is in the owner trust module, which launchd_cache_loader asks
++	 * AMFI about before it maps the file. Addon xpc/ over /System/Library/xpc; the union keeps the rest visible.
++	 * Scratch 0xe00 again: each mount copies its arguments before the next one runs. */
++	static volatile int xpc_stage = 0, xpc_status = -1;
++	static const char xpc_source[] = "/private/var/ngpu/xpc", xpc_point[] = "/System/Library/xpc";
++	native_gpu_addon_mount(p, scratch, 0xe00, xpc_source, sizeof(xpc_source), xpc_point, sizeof(xpc_point),
++	    "/System/Library/xpc/launchd.plist", "/System/Library/xpc/.fuxi-manifest", &xpc_stage, &xpc_status);
++	printf("fuxi xpc manifest mount: stage %d status %d\n", xpc_stage, xpc_status);
++	/* The baseband firmware ABM looks for (BootControllerLegacy::prepare: /usr/standalone/firmware/Baseband/<chipset>):
++	 * the Mav16 bundle the addon carries unpacked under owner-apps/firmware, ljhhkx529's layout, over the sealed tree. */
++	static volatile int fw_stage = 0, fw_status = -1;
++	static const char fw_source[] = "/private/var/ngpu/owner-apps/firmware", fw_point[] = "/usr/standalone/firmware";
++	native_gpu_addon_mount(p, scratch, 0xe00, fw_source, sizeof(fw_source), fw_point, sizeof(fw_point),
++	    "/usr/standalone/firmware", "/usr/standalone/firmware/Baseband/Mav16/Info.plist", &fw_stage, &fw_status);
++	printf("fuxi baseband firmware mount: stage %d status %d\n", fw_stage, fw_status);
+ 	/* fuxi probe (2026-11-13): what a readdir of the plug-in directory returns through the union (the audio server scans it with
+ 	 * opendir/readdir for "*.driver"). */
+ 	{

@@ -1,2 +1,0 @@
-a52dad25a69d59ac8c80b5512c0507cc02710191 fuxi ios17e: MTLMathMode constants for the iOS 17 SDK; runtime patch 0065 (copied::read_pages on iOS)
-https://github.com/UniXNU/AdrenoMetal.git

@@ -1,1 +1,0 @@
-../../device/scripts/prepare-sheng-gpu-smmu.py

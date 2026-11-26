@@ -1,0 +1,382 @@
+diff --git a/osfmk/ipc/ipc_kmsg.c b/osfmk/ipc/ipc_kmsg.c
+--- a/osfmk/ipc/ipc_kmsg.c
++++ b/osfmk/ipc/ipc_kmsg.c
+@@ -5263,6 +5263,68 @@
+ 	ip_mq_lock(port);
+ 
+ 	/*
++	 * unixnu probe (zz-msg-probe.patch, log only): locationd's message 1203 (a header-only request it waits on during data
++	 * migration): the destination port's kernel object type and the task holding its receive right.
++	 */
++	{
++		extern char *proc_name_address(void *p);
++		static int unixnu_msg_left = 20;
++		void *sp_proc = get_bsdtask_info(current_task());
++		const char *sender = sp_proc ? proc_name_address(sp_proc) : NULL;
++		/* fuxi 2026-11-15: every message to or from bluetoothd (which clients talk to it), first 400 */
++		static int unixnu_btd_left = 400;
++		if (unixnu_btd_left > 0 && sender && ip_active(port) && ip_in_a_space(port)) {
++			ipc_space_t bspace = ip_get_receiver(port);
++			task_t btask = (bspace != IS_NULL && bspace != ipc_space_kernel) ? bspace->is_task : TASK_NULL;
++			void *bproc = btask ? get_bsdtask_info(btask) : NULL;
++			const char *bname = bproc ? proc_name_address(bproc) : "-";
++			/* fuxi 2026-11-15: the names in bluetoothd's notifyd requests (inline strings of simple messages) */
++			static int unixnu_btn_left = 150;
++			if (unixnu_btn_left > 0 && !strcmp(sender, "bluetoothd") && !strcmp(bname, "notifyd") &&
++			    !(hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) && hdr->msgh_size > sizeof(mach_msg_header_t)) {
++				const char *body = (const char *)ikm_udata_from_header(kmsg);
++				size_t len = hdr->msgh_size - sizeof(mach_msg_header_t);
++				if (len > 600) {
++					len = 600;
++				}
++				for (size_t at = 0; body && at < len && unixnu_btn_left > 0;) {
++					size_t n = 0;
++					while (at + n < len && body[at + n] >= 32 && body[at + n] < 127) {
++						n++;
++					}
++					if (n >= 6) {
++						unixnu_btn_left--;
++						printf("unixnu btnotify: id %d \"%.*s\"\n", hdr->msgh_id, (int)(n > 120 ? 120 : n), body + at);
++					}
++					at += n ? n : 1;
++				}
++			}
++			if (!strcmp(bname, "bluetoothd") && strcmp(sender, "launchd") && strcmp(sender, "securityd") && strcmp(sender, "cfprefsd") && strcmp(sender, "notifyd") && strcmp(sender, "logd") && strcmp(sender, "configd")) {
++				struct mach_service_port_info bspi = { .mspi_string_name = "-" };
++				if (port->ip_service_port && port->ip_splabel) {
++					ipc_service_port_label_get_info((ipc_service_port_label_t)port->ip_splabel, &bspi);
++				}
++				unixnu_btd_left--;
++				printf("unixnu btmsg: %s[%d] -> %s id %d size %u service %s\n", sender, sp_proc ? proc_pid(sp_proc) : -1, bname,
++				    hdr->msgh_id, hdr->msgh_size, bspi.mspi_string_name);
++			}
++		}
++		if (hdr->msgh_id == 1203 && unixnu_msg_left > 0 && sender && !strcmp(sender, "locationd")) {
++			ipc_space_t space = (ip_active(port) && ip_in_a_space(port)) ? ip_get_receiver(port) : IS_NULL;
++			task_t rtask = (space != IS_NULL && space != ipc_space_kernel) ? space->is_task : TASK_NULL;
++			void *rproc = rtask ? get_bsdtask_info(rtask) : NULL;
++			struct mach_service_port_info spi = { .mspi_string_name = "-" };
++			if (port->ip_service_port && port->ip_splabel) {
++				ipc_service_port_label_get_info((ipc_service_port_label_t)port->ip_splabel, &spi);
++			}
++			unixnu_msg_left--;
++			printf("unixnu msg: %s id %d bits %#x -> active %d kotype %u kernel %d receiver %s pid %d service %d %s\n", sender,
++			    hdr->msgh_id, hdr->msgh_bits, ip_active(port), ip_kotype(port), space == ipc_space_kernel,
++			    rproc ? proc_name_address(rproc) : "-", rproc ? proc_pid(rproc) : -1, port->ip_service_port, spi.mspi_string_name);
++		}
++	}
++
++	/*
+ 	 * If the destination has been guarded with a reply context, and the
+ 	 * sender is consuming a send-once right, then assume this is a reply
+ 	 * to an RPC and we need to validate that this sender is currently in
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1945,6 +1945,113 @@
+ 
+ 	struct uthread *ut;
+ 	thread_t self = current_thread();
++
++	/* zz-msg-probe.patch (log only): every exit of fairplayd (KeepAlive, never seen running during data migration). */
++	if (!strncmp(p->p_comm, "fairplayd", 9) || !strncmp(p->p_comm, "bluetoothd", 10) || !strncmp(p->p_comm, "BlueTool", 8)) {
++		printf("unixnu fp exit: %s pid %d rv %#x signal %d status %d reason ns %u code %#llx\n", p->p_comm, proc_getpid(p), rv,
++		    WTERMSIG(rv), WEXITSTATUS(rv), p->p_exit_reason ? p->p_exit_reason->osr_namespace : 0,
++		    p->p_exit_reason ? (unsigned long long)p->p_exit_reason->osr_code : 0ULL);
++		/* fuxi 2026-11-15: where bluetoothd called exit: words on its stack that point into its own text (first 3 exits). */
++		static int unixnu_bt_exit_scans = 3;
++		if ((WEXITSTATUS(rv) || WTERMSIG(rv) == 6 || WTERMSIG(rv) == 5) && !strncmp(p->p_comm, "bluetoothd", 10) && unixnu_bt_exit_scans > 0) {
++			extern int unixnu_thread_user_state(thread_t, uint64_t *);
++			extern int fill_procregioninfo(task_t, uint64_t, struct proc_regioninfo_internal *, uintptr_t *, uint32_t *);
++			uint64_t st[9] = {0};
++			task_t bt_task = proc_task(p);
++			unixnu_bt_exit_scans--;
++			if (bt_task && unixnu_thread_user_state(current_thread(), st)) {
++				uint64_t text_lo = 0, text_hi = 0, text_off = 0;
++				int shown = 0;
++				printf("unixnu bt exit: pc %#llx lr %#llx sp %#llx\n", st[0], st[1], st[2]);
++				{
++					/* the fatal-error routines keep the status in x20 (0x10069060c result) */
++					extern int unixnu_thread_user_regs(thread_t, uint64_t *);
++					uint64_t r[29] = {0};
++					if (unixnu_thread_user_regs(current_thread(), r)) {
++						printf("unixnu bt exit: x19 %#llx x20 %#llx x21 %#llx x22 %#llx x23 %#llx x24 %#llx\n", r[19], r[20], r[21], r[22], r[23], r[24]);
++					}
++				}
++				for (uint64_t at = st[2]; at < st[2] + 8192 && shown < 32; at += 8 * 64) {
++					uint64_t words[64];
++					if (copyin((user_addr_t)at, words, sizeof(words))) {
++						break;
++					}
++					for (int w = 0; w < 64 && shown < 32; w++) {
++						uint64_t v = words[w] & 0x0000007fffffffffULL;
++						if (v < 0x100000000ULL || v >= 0x180000000ULL) {
++							continue;
++						}
++						if (!(text_lo <= v && v < text_hi)) {
++							struct proc_regioninfo region = {0};
++							uintptr_t vnodeaddr = 0;
++							uint32_t vnodeid = 0;
++							char path[MAXPATHLEN];
++							int length = sizeof(path);
++							path[0] = 0;
++							if (!fill_procregioninfo(bt_task, v, (struct proc_regioninfo_internal *)&region, &vnodeaddr, &vnodeid)) {
++								continue;
++							}
++							if (vnodeaddr && vnode_getwithvid((vnode_t)vnodeaddr, vnodeid) == 0) {
++								vn_getpath((vnode_t)vnodeaddr, path, &length);
++								vnode_put((vnode_t)vnodeaddr);
++							}
++							if (!strnstr(path, "sbin/bluetoothd", sizeof(path)) || !(region.pri_protection & VM_PROT_EXECUTE)) {
++								continue;
++							}
++							text_lo = region.pri_address; text_hi = region.pri_address + region.pri_size; text_off = region.pri_offset;
++							printf("unixnu bt exit: text [%#llx +%#llx] file offset %#llx\n", text_lo, region.pri_size, text_off);
++						}
++						printf("unixnu bt exit: sp+%#llx %#llx file+%#llx\n", at + 8 * (uint64_t)w - st[2], v, v - text_lo + text_off);
++						shown++;
++					}
++				}
++				/* the messages: printable runs on the stack itself and at the addresses its words hold */
++				int texts = 0;
++				for (uint64_t at = st[2]; at < st[2] + 8192 && texts < 24; at += 512) {
++					uint8_t raw[512];
++					if (copyin((user_addr_t)at, raw, sizeof(raw))) {
++						break;
++					}
++					for (int k = 0; k < 512 && texts < 24;) {
++						int n = 0;
++						while (k + n < 512 && raw[k + n] >= 32 && raw[k + n] < 127) {
++							n++;
++						}
++						if (n >= 10) {
++							char run[100];
++							int m = n < 99 ? n : 99;
++							memcpy(run, raw + k, m); run[m] = 0;
++							printf("unixnu bt exit: stack sp+%#llx \"%s\"\n", at + k - st[2], run);
++							texts++;
++						}
++						k += n ? n : 1;
++					}
++					for (int w = 0; w < 64 && texts < 24; w++) {
++						uint64_t v;
++						memcpy(&v, raw + 8 * w, 8);
++						v &= 0x0000007fffffffffULL;
++						if (v < 0x100000000ULL || v >= 0x400000000ULL || (text_lo <= v && v < text_hi)) {
++							continue;
++						}
++						char s[100];
++						if (copyin((user_addr_t)v, s, sizeof(s) - 1)) {
++							continue;
++						}
++						s[sizeof(s) - 1] = 0;
++						int n = 0;
++						while (n < 99 && s[n] >= 32 && s[n] < 127) {
++							n++;
++						}
++						if (n >= 10) {
++							s[n] = 0;
++							printf("unixnu bt exit: ->sp+%#llx %#llx \"%s\"\n", at + 8 * (uint64_t)w - st[2], v, s);
++							texts++;
++						}
++					}
++				}
++			}
++		}
++	}
+ 	ut = get_bsdthread_info(self);
+ 	struct rusage_superset *rup;
+ 	int kr = 0;
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4713,6 +4713,12 @@
+ 		proc_knote(p, NOTE_EXEC);
+ 	}
+ 
++	/* zz-msg-probe.patch (log only): every spawn of fairplayd, its result. */
++	if (imgp != NULL && imgp->ip_strings != NULL && strnstr(imgp->ip_strings, "fairplayd", MAXPATHLEN)) {
++		printf("unixnu fp spawn: %s error %d pid %d decryptfail %d\n", imgp->ip_strings, error, proc_getpid(p),
++		    (p->p_lflag & P_LTERM_DECRYPTFAIL) != 0);
++	}
++
+ 	if (imgp != NULL) {
+ 		uthread_set_exec_data(current_uthread(), NULL);
+ 		if (imgp->ip_vp) {
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -147,6 +147,7 @@
+ #if CONFIG_MACF
+ #include <security/mac.h>
+ #include <security/mac_framework.h>
++static void unixnu_fp_note(const char *call, user_addr_t path, enum uio_seg segflg, int error);   /* zz-msg-probe.patch */
+ #endif
+ 
+ #if CONFIG_FSE
+@@ -5115,6 +5116,7 @@
+ 	    segflg, path, ctx);
+ 
+ 	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
++	unixnu_fp_note("open", path, segflg, error);
+ 
+ 	kfree_type(typeof(*__open_data), __open_data);
+ 
+@@ -6918,6 +6920,7 @@
+ 	if (!(flag & AT_EACCESS)) {
+ 		kauth_cred_unref(&context.vc_ucred);
+ 	}
++	unixnu_fp_note("access", path, segflg, error);
+ 	return error;
+ }
+ 
+@@ -6947,6 +6950,45 @@
+  *	namei:???
+  *	vn_stat:???
+  */
++/*
++ * zz-msg-probe.patch (log only): stat/access/open of a path naming fairplayd (launchd never spawns fairplayd.H2 during data
++ * migration): caller, call, errno and path.
++ */
++static void
++unixnu_fp_note(const char *call, user_addr_t path, enum uio_seg segflg, int error)
++{
++	/* fuxi 2026-11-20: off unless unixnu-fp=1 - a path copy and 14 substring scans on every stat/open/access were a
++	 * visible share of backboardd's kernel time (U24 hot sampler). */
++	static int unixnu_fp_on = -1;
++	if (unixnu_fp_on < 0) {
++		int on = 0;
++		(void)PE_parse_boot_argn("unixnu-fp", &on, sizeof(on));
++		unixnu_fp_on = on == 1;
++	}
++	if (!unixnu_fp_on) {
++		return;
++	}
++	char buf[256];
++	size_t len = 0;
++	int copy_error = segflg == UIO_SYSSPACE ? copystr(CAST_DOWN(void *, path), buf, sizeof(buf), &len)
++	    : copyinstr(path, buf, sizeof(buf), &len);
++	if (copy_error && copy_error != ENAMETOOLONG) {
++		return;
++	}
++	buf[sizeof(buf) - 1] = 0;
++	if (!strnstr(buf, "fairplayd", sizeof(buf)) && !strnstr(buf, ".HEIC", sizeof(buf)) && !strnstr(buf, ".heic", sizeof(buf)) &&
++	    !strnstr(buf, "Wallpaper", sizeof(buf)) && !strnstr(buf, "Poster", sizeof(buf)) && !strnstr(buf, "ExtensionPoint", sizeof(buf)) &&
++	    !strnstr(buf, "ExtensionKit", sizeof(buf)) && !strnstr(buf, "PosterKit", sizeof(buf)) &&
++	    !strnstr(buf, "Managed Preferences", sizeof(buf)) && !strnstr(buf, "com.apple.Preferences.plist", sizeof(buf)) &&
++	    !strnstr(buf, "keyboard.preferences", sizeof(buf)) && !strnstr(buf, "assistant.support", sizeof(buf)) &&
++	    !strnstr(buf, "luetoo", sizeof(buf)) && !strnstr(buf, "bluetool", sizeof(buf))) {
++		return;
++	}
++	char name[MAXCOMLEN + 1];
++	proc_selfname(name, sizeof(name));
++	printf("unixnu fp %s: %s error %d %s\n", call, name, error, buf);
++}
++
+ static int
+ fstatat_internal(vfs_context_t ctx, user_addr_t path, user_addr_t ub,
+     user_addr_t xsecurity, user_addr_t xsecurity_size, int isstat64,
+@@ -7126,6 +7152,7 @@
+ 	if (fsec != KAUTH_FILESEC_NONE) {
+ 		kauth_filesec_free(fsec);
+ 	}
++	unixnu_fp_note("stat", path, segflg, error);
+ 	return error;
+ }
+ 
+diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -180,6 +180,31 @@
+ 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
+ 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
++	/* zz-msg-probe.patch (log only): fairplayd's BSD system calls (it exits 0 before any IOKit call during data migration). */
++	{
++		static int unixnu_fp_sys_left = 600;
++		if (unixnu_fp_sys_left > 0 && (!strncmp(proc->p_comm, "fairplayd", 9) ||
++		    (error && !strncmp(proc->p_comm, "PosterBoard", 11)))) {
++			unixnu_fp_sys_left--;
++			printf("unixnu fp sys %d pid %d err %d rv %#llx a0 %#llx a1 %#llx\n", code, pid, error,
++			    (unsigned long long)uthread->uu_rval[0], (unsigned long long)uthread->uu_arg[0],
++			    (unsigned long long)uthread->uu_arg[1]);
++		}
++		/* fuxi 2026-11-15: bluetoothd exits on its own before opening /dev/uart.bluetooth: its failing calls. */
++		static int unixnu_bt_sys_left = 400;
++		if (error && unixnu_bt_sys_left > 0 && !strncmp(proc->p_comm, "bluetoothd", 10)) {
++			unixnu_bt_sys_left--;
++			char bt_path[160] = "";
++			if (code == 5 || code == 398 || code == 338 || code == 340 || code == 33 || code == 463 || code == 464) {
++				size_t bt_len = 0;
++				(void)copyinstr((user_addr_t)((code == 463 || code == 464) ? uthread->uu_arg[1] : uthread->uu_arg[0]), bt_path,
++				    sizeof(bt_path), &bt_len);
++				bt_path[sizeof(bt_path) - 1] = 0;
++			}
++			printf("unixnu bt sys %d pid %d err %d a0 %#llx a1 %#llx a2 %#llx %s\n", code, pid, error,
++			    (unsigned long long)uthread->uu_arg[0], (unsigned long long)uthread->uu_arg[1], (unsigned long long)uthread->uu_arg[2], bt_path);
++		}
++	}
+ 
+ #if CONFIG_MACF
+ skip_syscall:
+diff --git a/osfmk/arm64/bsd_arm64.c b/osfmk/arm64/bsd_arm64.c
+--- a/osfmk/arm64/bsd_arm64.c
++++ b/osfmk/arm64/bsd_arm64.c
+@@ -279,6 +279,19 @@
+ 
+ 
+ 	retval = mach_call(&args);
++	/* zz-msg-probe.patch (log only): fairplayd's Mach traps. */
++	{
++		extern char *proc_name_address(void *p);
++		static int unixnu_fp_trap_left = 400;
++		void *fp_proc = get_bsdtask_info(current_task());
++		const char *fp_name = fp_proc ? proc_name_address(fp_proc) : NULL;
++		if (unixnu_fp_trap_left > 0 && fp_name && !strncmp(fp_name, "fairplayd", 9)) {
++			unixnu_fp_trap_left--;
++			printf("unixnu fp trap %d ret %#x a0 %#llx a1 %#llx a2 %#llx a3 %#llx a4 %#llx\n", call_number, retval,
++			    (unsigned long long)args.arg1, (unsigned long long)args.arg2, (unsigned long long)args.arg3,
++			    (unsigned long long)args.arg4, (unsigned long long)args.arg5);
++		}
++	}
+ 
+ skip_machcall:
+ 
+diff --git a/osfmk/kern/host.c b/osfmk/kern/host.c
+--- a/osfmk/kern/host.c
++++ b/osfmk/kern/host.c
+@@ -1244,7 +1244,14 @@
+ 		return KERN_INVALID_RIGHT;
+ 	}
+ 
+-	return host_set_special_port(host_priv, id, port);
++	/* zz-msg-probe.patch (log only): user sets of host special ports (fairplayd's com.apple.unfreed is HostSpecialPort 17). */
++	kern_return_t unixnu_kr = host_set_special_port(host_priv, id, port);
++	{
++		extern char *proc_name_address(void *p);
++		void *hp = get_bsdtask_info(current_task());
++		printf("unixnu hsp set: %s id %d port valid %d -> %d\n", hp ? proc_name_address(hp) : "-", id, IP_VALID(port), unixnu_kr);
++	}
++	return unixnu_kr;
+ }
+ 
+ kern_return_t
+@@ -1302,7 +1309,17 @@
+ 		return KERN_NO_ACCESS;
+ 	}
+ get_special_port:
+-	return host_get_special_port(host_priv, node, id, portp);
++	{
++		/* zz-msg-probe.patch (log only): user gets of host special ports above the kernel range. */
++		kern_return_t unixnu_kr = host_get_special_port(host_priv, node, id, portp);
++		if (id > HOST_MAX_SPECIAL_KERNEL_PORT) {
++			extern char *proc_name_address(void *p);
++			void *hp = get_bsdtask_info(current_task());
++			printf("unixnu hsp get: %s id %d -> %d port valid %d\n", hp ? proc_name_address(hp) : "-", id, unixnu_kr,
++			    unixnu_kr == KERN_SUCCESS && IP_VALID(*portp));
++		}
++		return unixnu_kr;
++	}
+ }
+ 
+ kern_return_t

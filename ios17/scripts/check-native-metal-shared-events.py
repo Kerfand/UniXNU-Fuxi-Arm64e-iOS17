@@ -1,1 +1,0 @@
-../../device/scripts/check-native-metal-shared-events.py

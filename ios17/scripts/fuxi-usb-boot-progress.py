@@ -1,1 +1,0 @@
-../../device/scripts/fuxi-usb-boot-progress.py

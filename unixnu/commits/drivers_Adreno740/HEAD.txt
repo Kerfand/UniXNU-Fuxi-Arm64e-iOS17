@@ -1,2 +1,0 @@
-f4a9fbb3da01457a35a127e62be64ab702bd2c18 Merge commit '1c9029bc3216a39d9e514ba41dee12e95e8f3598' into fuxi-upstream-merge-20261118
-https://github.com/UniXNU/Adreno740.git

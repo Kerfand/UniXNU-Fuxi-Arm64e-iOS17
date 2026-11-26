@@ -1,1 +1,0 @@
-../../device/scripts/build-native-adreno-kits.py

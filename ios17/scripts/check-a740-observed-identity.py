@@ -1,1 +1,0 @@
-../../device/scripts/check-a740-observed-identity.py

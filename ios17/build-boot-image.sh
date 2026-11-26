@@ -1,1 +1,0 @@
-../device/build-boot-image.sh

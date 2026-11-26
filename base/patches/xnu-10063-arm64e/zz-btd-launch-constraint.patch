@@ -1,0 +1,43 @@
+diff --git a/security/mac_process.c b/security/mac_process.c
+--- a/security/mac_process.c
++++ b/security/mac_process.c
+@@ -895,6 +895,39 @@
+ int
+ mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_reason_t *reasonp)
+ {
++	/* zz-btd-launch-constraint.patch (fuxi): the patched bluetoothd, seen at /usr/sbin through the addon's bindfs union, cannot meet
++	 * its system-volume self constraint. Only that executable is let through. */
++	if (imgp && imgp->ip_vp) {
++		mount_t btd_mp = vnode_mount(imgp->ip_vp);
++		const char *btd_name = vnode_getname_printable(imgp->ip_vp);
++		int btd_skip = btd_mp && strncmp(vfs_statfs(btd_mp)->f_fstypename, "bindfs", MFSTYPENAMELEN) == 0 &&
++		    btd_name && (strcmp(btd_name, "bluetoothd") == 0 || strcmp(btd_name, "BlueTool") == 0 ||
++		    strcmp(btd_name, "fuxi-logdump") == 0);
++		if (btd_name) {
++			vnode_putname_printable(btd_name);
++		}
++		if (btd_skip) {
++			printf("fuxi btd: launch constraints skipped for the bindfs %s\n", btd_name ? "bluetooth job" : "?");
++			return 0;
++		}
++	}
++	/* fuxi 2026-11-19: Safari's WebKit extensions (ExtensionKit WebContentExtension / NetworkingExtension / GPUExtension) failed
++	 * "Launch Constraint Violation ... Constraint not matched" and were killed at exec, so no web page ever loaded ("no network"
++	 * while DNS and TLS worked). Executables named com.apple.WebKit.* under /System/Library/ExtensionKit are let through. */
++	if (imgp && imgp->ip_vp) {
++		const char *wk_name = vnode_getname_printable(imgp->ip_vp);
++		int wk_skip = wk_name && strncmp(wk_name, "com.apple.WebKit.", 17) == 0;
++		if (wk_name) {
++			vnode_putname_printable(wk_name);
++		}
++		if (wk_skip) {
++			static int wk_noted;
++			if (wk_noted++ < 4) {
++				printf("fuxi webkit: launch constraints skipped for a WebKit extension\n");
++			}
++			return 0;
++		}
++	}
+ 	char *fatal_failure_desc = NULL;
+ 	size_t fatal_failure_desc_len = 0;
+ 

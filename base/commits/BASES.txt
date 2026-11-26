@@ -1,0 +1,7 @@
+UniXNU dec111b629bb66d3ec195c653853d8916db42b2a https://github.com/SadNutWall/UniXNU.git
+drivers_Adreno740 a9a2cbb43b89d672e2921e19721a6438b738b17f https://github.com/UniXNU/Adreno740.git
+drivers_AdrenoMetal a0f0287be80a5d8aef5c6b97a6cab62129e152bd https://github.com/UniXNU/AdrenoMetal.git
+drivers_AppleKeyStoreState 42ff83e08b2265fe741d4adaf084bebe003452ba https://github.com/UniXNU/AppleKeyStoreState.git
+drivers_ArmCpu 93a5030c5d983d0ef90f0fca93879d6e36ad1ba8 https://github.com/UniXNU/ArmCpu.git
+drivers_GopFramebuffer 19ef3a75ad2c53da85b8d923553d922716fce377 https://github.com/UniXNU/GopFramebuffer.git
+kits_XnuPrelink b1888c12456c46a2226d63c794465dfcee08d465 https://github.com/UniXNU/XnuPrelink.git

@@ -1,1 +1,0 @@
-../../device/scripts/probe-native-metal-shared-events.py

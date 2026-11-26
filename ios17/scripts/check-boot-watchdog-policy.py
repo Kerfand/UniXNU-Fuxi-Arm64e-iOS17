@@ -1,1 +1,0 @@
-../../device/scripts/check-boot-watchdog-policy.py

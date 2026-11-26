@@ -1,1 +1,0 @@
-../../device/scripts/probe-original-metal-layer.py

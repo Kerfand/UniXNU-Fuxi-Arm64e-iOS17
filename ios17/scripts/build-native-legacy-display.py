@@ -1,1 +1,0 @@
-../../device/scripts/build-native-legacy-display.py

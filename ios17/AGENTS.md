@@ -1,1 +1,0 @@
-../device/AGENTS.md

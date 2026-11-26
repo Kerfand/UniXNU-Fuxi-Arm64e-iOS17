@@ -1,1 +1,0 @@
-../../device/scripts/check-renderbox-presentation.py
