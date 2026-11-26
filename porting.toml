@@ -18,7 +18,7 @@ findings = ["The base UniXNU changes are a patch stack (base/commits, base/patch
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["The ios-17.7-21H16 OS profile is not in UniXNU yet; scripts/package.sh is the unchanged template and does not build this profile."]
 next_action = ["Upstream the iOS 17 profile, then switch the package workflow from tools/reconstruct.sh to scripts/package.sh."]
-evidence = []
+evidence = [{kind = "source", reference = "docs/evidence/2026-11-26.md", result = "Implemented in this snapshot; see the evidence summary."}]
 
 [[area]]
 id = "firmware"
@@ -32,7 +32,7 @@ findings = ["DarwinBoot hands off to the kernel from the Mu UEFI; boot.img boots
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["Firmware files are not in the repository; proprietary-files.txt lists their sources."]
 next_action = ["None."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "cpu"
@@ -46,7 +46,7 @@ findings = ["Eight cores online; EPSS votes with sheng-cpufreq-turbo=1 reach 201
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["One SMP cluster; no performance controller."]
 next_action = ["Revisit big.LITTLE once a perfcontrol stand-in exists."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "memory"
@@ -60,7 +60,7 @@ findings = ["The native kernel __DATA/__DATA_CONST share the fileset with AppleA
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["About 20 KiB of native __DATA and 2 KiB of __DATA_CONST are left before AppleARMPlatform."]
 next_action = ["Move AppleARMPlatform data like --move-code moves its code."]
-evidence = []
+evidence = [{kind = "source", reference = "docs/evidence/2026-11-26.md", result = "Implemented in this snapshot; see the evidence summary."}]
 
 [[area]]
 id = "storage"
@@ -74,7 +74,7 @@ findings = ["UFS root and the persistent Data volume; data kept across reboots."
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["None known."]
 next_action = ["None."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "display"
@@ -88,7 +88,7 @@ findings = ["GOP framebuffer with a GPU copy per frame; DSI backlight."]
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["No zero-copy scanout; the screen-sleep/lock path resets the phone (IOSurface calls an unmapped kernel function)."]
 next_action = ["Fix the lock-screen reset; then DPU flips."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "input"
@@ -102,7 +102,7 @@ findings = ["FTM5 touch and the power/volume buttons."]
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["None known."]
 next_action = ["None."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "gpu"
@@ -116,7 +116,7 @@ findings = ["Adreno740 (upstream 2962e28 + fuxi), Turnip, AdrenoMetal and metal2
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["Web pages render as a solid colour in some builds (under investigation)."]
 next_action = ["Track down the WebKit compositing failure."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "network"
@@ -130,7 +130,7 @@ findings = ["WCN7850 Wi-Fi associates and carries traffic."]
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["About 20 Mbit/s."]
 next_action = ["None."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "cellular"
@@ -144,7 +144,7 @@ findings = ["Modem PAS/GLINK/QRTR up (49 QMI services), RMTFS and TFTP served; t
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["MobileGestalt answers HasBaseband 0 (IsVirtualDevice 1 from vmm-present); ABM never opens AppleBaseband; no registration yet."]
 next_action = ["Hide vmm-present from userspace without starting watchdogd, then follow ABM with the logdump probes."]
-evidence = []
+evidence = [{kind = "source", reference = "docs/evidence/2026-11-26.md", result = "Implemented in this snapshot; see the evidence summary."}]
 
 [[area]]
 id = "audio"
@@ -158,7 +158,7 @@ findings = ["ADSP, the audio graph and the CS35L41 speakers."]
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["A recent build was reported silent; not investigated."]
 next_action = ["Re-check playback."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "power"
@@ -172,7 +172,7 @@ findings = ["Battery level, charging and PPS/PD fast charging."]
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["Xiaomi proprietary fast charge not verified."]
 next_action = ["None."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "usb"
@@ -200,7 +200,7 @@ findings = ["boot.img with kernel, ADT, trust caches and the GPU addon."]
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["Built with tools/host/pack-ios17-hidpath.py, not scripts/package.sh."]
 next_action = ["See configuration."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
 [[area]]
 id = "diagnostics"
@@ -214,5 +214,5 @@ findings = ["Panic and heartbeat stop reboot to fastboot after 5 s (QUD panic pa
 completion = ["See findings; device results are from fastboot temporary boots on Xiaomi 13."]
 limits = ["None."]
 next_action = ["None."]
-evidence = []
+evidence = [{kind = "device", reference = "docs/evidence/2026-11-26.md", result = "Temporary boots on Xiaomi 13, 2026-11-20 to 2026-11-26; see the summary.", command = "tools/host/build-ios17-kernel.sh && tools/host/pack-ios17-hidpath.py && fastboot boot boot.img", revision = "a2342fc3f679d6dc7d6c43aa04b2d651c94519f1"}]
 
