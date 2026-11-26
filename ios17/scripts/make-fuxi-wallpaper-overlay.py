@@ -1,1 +1,0 @@
-../../device/scripts/make-fuxi-wallpaper-overlay.py

@@ -1,1 +1,0 @@
-../../device/scripts/check-adreno-vpc.py

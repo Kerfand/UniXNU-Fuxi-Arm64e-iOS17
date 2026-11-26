@@ -1,1 +1,0 @@
-../../device/scripts/sheng-abl-dtb.py

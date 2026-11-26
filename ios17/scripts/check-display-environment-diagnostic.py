@@ -1,1 +1,0 @@
-../../device/scripts/check-display-environment-diagnostic.py

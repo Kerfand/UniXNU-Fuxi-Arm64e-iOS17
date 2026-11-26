@@ -1,1 +1,0 @@
-../../device/scripts/prepare-fuxi-gmu.py

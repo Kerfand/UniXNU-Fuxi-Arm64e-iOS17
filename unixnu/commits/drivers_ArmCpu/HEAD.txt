@@ -1,3 +1,0 @@
-6558ec0c68ce6cb4b8908d244c4e0c761594438c fuxi: ArmCpu changes for the iOS 17 bring-up
-https://github.com/UniXNU/ArmCpu.git
-base 93a5030c5d983d0ef90f0fca93879d6e36ad1ba8

@@ -1,3 +1,0 @@
-d13b01d1c3edf613a0d0a755444eebbd145dba72 fuxi: log every direct flip and slot remap
-https://github.com/UniXNU/GopFramebuffer.git
-base 19ef3a75ad2c53da85b8d923553d922716fce377

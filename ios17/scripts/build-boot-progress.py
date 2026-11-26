@@ -1,1 +1,0 @@
-../../device/scripts/build-boot-progress.py

@@ -1,1 +1,0 @@
-../../device/scripts/build-smmu4k-probe.py

@@ -1,1 +1,0 @@
-../../device/scripts/check-original-framebuffer-protocol.py

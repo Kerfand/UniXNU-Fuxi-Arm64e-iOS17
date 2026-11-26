@@ -1,1 +1,0 @@
-../../device/scripts/build-adreno-pm4-probe.py

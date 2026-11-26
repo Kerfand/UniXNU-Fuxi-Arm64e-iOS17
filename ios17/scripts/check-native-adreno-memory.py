@@ -1,1 +1,0 @@
-../../device/scripts/check-native-adreno-memory.py

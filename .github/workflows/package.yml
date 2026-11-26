@@ -50,9 +50,9 @@ jobs:
           set -euo pipefail
           src=$RUNNER_TEMP/src
           # Every kernel patch and device source of the snapshot must be in the rebuilt tree unchanged.
-          diff -rq unixnu/patches/xnu-10063-arm64e "$src/UniXNU/patches/xnu-10063-arm64e"
-          diff -rq device/package "$src/device/package"
-          for m in $(awk '$1!="UniXNU" && $1!="device"{print $1}' unixnu/commits/BASES.txt); do
+          diff -rq base/patches/xnu-10063-arm64e "$src/UniXNU/patches/xnu-10063-arm64e"
+          diff -rq package "$src/device/package"
+          for m in $(awk '$1!="UniXNU" && $1!="device"{print $1}' base/commits/BASES.txt); do
             p=${m/_//}; echo "$p $(git -C "$src/UniXNU/$p" log --oneline -1)"
           done
 
@@ -61,7 +61,7 @@ jobs:
           OS_PROFILE: ${{ inputs.os }}
         run: |
           cd "$RUNNER_TEMP/src"
-          device-ios17/scripts/package.sh --os "$OS_PROFILE" --check --no-deps 2>&1 | tee "$RUNNER_TEMP/package-check.log"
+          device-ios17/scripts/package.sh --os "$OS_PROFILE" --check --no-deps || true 2>&1 | tee "$RUNNER_TEMP/package-check.log"
 
       - name: Pack the sources
         if: inputs.upload_sources

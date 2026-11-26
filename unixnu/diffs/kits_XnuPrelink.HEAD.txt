@@ -1,2 +1,0 @@
-0161b5298adb55267b0b2937112098a105c7e71e fuxi: prelink and fileset emit updates for the 21H16 kernel collection
-https://github.com/UniXNU/XnuPrelink.git

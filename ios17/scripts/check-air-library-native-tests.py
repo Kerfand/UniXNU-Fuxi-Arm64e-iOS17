@@ -1,1 +1,0 @@
-../../device/scripts/check-air-library-native-tests.py

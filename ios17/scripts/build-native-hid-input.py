@@ -1,1 +1,0 @@
-../../device/scripts/build-native-hid-input.py

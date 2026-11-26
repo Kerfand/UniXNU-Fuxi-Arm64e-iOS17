@@ -1,0 +1,105 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5134,6 +5134,91 @@
+  *
+  * TODO:	Dynamic linker header address on stack is copied via suword()
+  */
++/* The kernel message buffer as a plain file the panel can read (fuxi 2026-11-24). The USB CDC console is the only other channel, and
++ * usb=1 takes it away when the DWC3 goes to AppleUSBXDCI, so a bring-up that fails there leaves nothing to look at. This runs from
++ * execve(), where the process context of the exec is current: the first version of this wrote from a kernel thread with no process and
++ * the boot panicked. Every eighth exec is enough to keep the file fresh and keeps the cost out of the boot path. Two paths are tried in
++ * order, because the app's own probe answers with the sandbox's verdict: /private/var/log answers ENOENT (allowed, no file yet), while
++ * /private/var/ngpu answers EPERM (denied), so the readable one comes first. The copy keeps the newest 64 KiB of the ring, oldest
++ * first, without the NUL padding. */
++struct fuxi_msgbuf_layout {
++	int msg_magic, msg_size, msg_bufx, msg_bufr;
++	char *msg_bufc;
++};
++extern struct fuxi_msgbuf_layout *msgbufp;
++volatile int native_usb_debug_export_status = -1;
++volatile int native_usb_debug_export_path = -1;
++volatile uint32_t native_usb_debug_export_writes;
++static uint32_t native_usb_debug_export_calls;
++static const char *const native_usb_debug_export_paths[] = {
++	/* The app's own bundle first: /Applications/FuxiUsbDebug.app is this Data layer under the apps union, and a bundle file is the
++	 * one path the sandbox lets an app read (both /private/var/log and /private/var/ngpu answer EPERM to it). */
++	"/private/var/ngpu/apps/FuxiUsbDebug.app/usb-debug.log",
++	"/private/var/log/usb-debug.log",
++	"/private/var/ngpu/usb-debug.log",
++};
++
++static int
++native_usb_debug_export_write(const char *path, const char *data, size_t size)
++{
++	vnode_t vp = NULLVP;
++	vfs_context_t ctx = vfs_context_current();
++	int error = vnode_open(path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, 0, &vp, ctx);
++	if (error) {
++		return error;
++	}
++	int resid = 0;
++	if (size) {
++		error = vn_rdwr(UIO_WRITE, vp, (caddr_t)(uintptr_t)data, (int)size, 0, UIO_SYSSPACE, IO_NOAUTH | IO_UNIT,
++		    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++		if (!error && resid) {
++			error = EIO;
++		}
++	}
++	int close_error = vnode_close(vp, FWRITE, ctx);
++	return error ? error : close_error;
++}
++
++static void
++native_usb_debug_export(void)
++{
++	if ((native_usb_debug_export_calls++ & 7) != 0) {
++		return;
++	}
++	struct fuxi_msgbuf_layout *m = msgbufp;
++	if (!m || !m->msg_bufc || m->msg_size <= 0) {
++		native_usb_debug_export_status = EINVAL;
++		return;
++	}
++	const uint32_t window = 64 * 1024;
++	const uint32_t ring = (uint32_t)m->msg_size;
++	uint32_t want = ring < window ? ring : window;
++	uint32_t start = (ring <= window) ? 0 : ((uint32_t)(m->msg_bufx + ring - window)) % ring;
++	char *text = kalloc_data(want, Z_WAITOK);
++	if (!text) {
++		native_usb_debug_export_status = ENOMEM;
++		return;
++	}
++	uint32_t n = 0;
++	for (uint32_t i = 0; i < want; ++i) {
++		char c = m->msg_bufc[(start + i) % ring];
++		if (c) {
++			text[n++] = c;
++		}
++	}
++	int error = ENXIO;
++	for (size_t i = 0; i < sizeof(native_usb_debug_export_paths) / sizeof(native_usb_debug_export_paths[0]); ++i) {
++		error = native_usb_debug_export_write(native_usb_debug_export_paths[i], text, n);
++		if (!error) {
++			native_usb_debug_export_path = (int)i;
++			++native_usb_debug_export_writes;
++			break;
++		}
++	}
++	kfree_data(text, want);
++	native_usb_debug_export_status = error;
++}
++
+ /* ARGSUSED */
+ int
+ execve(proc_t p, struct execve_args *uap, int32_t *retval)
+@@ -5142,6 +5227,9 @@
+ 	int err;
+ 
+ 	memoryshot(VM_EXECVE, DBG_FUNC_NONE);
++	/* fuxi 2026-11-24: refresh the message buffer the panel app reads. Process context is current here, which the kernel-thread
++	 * version of this did not have; the function throttles itself to every eighth exec. */
++	native_usb_debug_export();
+ 
+ 	muap.fname = uap->fname;
+ 	muap.argp = uap->argp;

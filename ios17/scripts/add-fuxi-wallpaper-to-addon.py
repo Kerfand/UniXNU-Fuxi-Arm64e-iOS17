@@ -1,1 +1,0 @@
-../../device/scripts/add-fuxi-wallpaper-to-addon.py

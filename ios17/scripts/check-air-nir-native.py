@@ -1,1 +1,0 @@
-../../device/scripts/check-air-nir-native.py

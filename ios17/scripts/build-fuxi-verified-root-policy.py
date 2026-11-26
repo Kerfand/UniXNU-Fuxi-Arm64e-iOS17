@@ -1,1 +1,0 @@
-../../device/scripts/build-fuxi-verified-root-policy.py

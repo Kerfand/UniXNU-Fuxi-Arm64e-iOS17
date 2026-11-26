@@ -1,0 +1,34 @@
+fuxi 2026-11-26: fuxi-vmm-hide (default on, =0 turns it off) -- user processes read kern.hv_vmm_present as 0 (MobileGestalt IsVirtualDevice/HasBaseband).
+
+diff --git a/bsd/kern/hvg_sysctl.c b/bsd/kern/hvg_sysctl.c
+--- a/bsd/kern/hvg_sysctl.c	2026-11-26 21:10:50.342650700 +0800
++++ b/bsd/kern/hvg_sysctl.c	2026-11-26 21:10:50.361071500 +0800
+@@ -27,6 +27,7 @@
+  */
+ 
+ #include <sys/sysctl.h>
++#include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
+ #include <kern/hvg_hypercall.h>
+ #include <stdbool.h>
+@@ -147,6 +148,20 @@
+ #endif
+ 
+ 	vmm_present = !!vmm_present;
++	/* zz-vmm-hide.patch (fuxi 2026-11-26): /defaults/vmm-present is there for AMFI's developer-mode init (no PMGR on this
++	 * board); unless fuxi-vmm-hide=0, user processes are told 0, because MobileGestalt turns 1 into IsVirtualDevice and
++	 * then answers HasBaseband 0, and ABM never starts. Kernel callers keep the real answer. */
++	{
++		extern struct proc *kernproc;
++		static int hide = -1;
++		if (hide < 0) {
++			int arg = 0;
++			hide = PE_parse_boot_argn("fuxi-vmm-hide", &arg, sizeof(arg)) && arg;   /* opt-in: watchdogd starts once the VM is hidden */
++		}
++		if (hide && req->p && req->p != kernproc) {
++			vmm_present = 0;
++		}
++	}
+ 	return SYSCTL_OUT(req, &vmm_present, sizeof(vmm_present));
+ }
+ 

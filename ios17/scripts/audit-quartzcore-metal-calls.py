@@ -1,1 +1,0 @@
-../../device/scripts/audit-quartzcore-metal-calls.py

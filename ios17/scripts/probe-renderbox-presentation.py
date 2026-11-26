@@ -1,1 +1,0 @@
-../../device/scripts/probe-renderbox-presentation.py

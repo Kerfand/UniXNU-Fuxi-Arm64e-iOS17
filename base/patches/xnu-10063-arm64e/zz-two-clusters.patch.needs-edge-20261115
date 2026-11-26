@@ -1,0 +1,15 @@
+diff --git a/pexpert/pexpert/arm64/board_config.h b/pexpert/pexpert/arm64/board_config.h
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -200,4 +200,11 @@
+  * accidentally write to HID bits after they've been made read-only.
+  */
+ 
++
++/* zz-two-clusters.patch (fuxi 2026-11-15): the E (A510) and P clusters the ADT's cluster-type describes, as UniXNU's xnu-12377
++ * bcm2837-machine-config.patch sets for SM8550. With 1, the second cluster failed assert(cluster_id < MAX_CPU_CLUSTERS) at boot. */
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++#undef MAX_CPU_CLUSTERS
++#define MAX_CPU_CLUSTERS               2
++#endif
+ #endif /* ! _PEXPERT_ARM_BOARD_CONFIG_H */

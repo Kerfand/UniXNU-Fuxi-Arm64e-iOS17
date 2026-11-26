@@ -1,1 +1,0 @@
-../../device/scripts/build-adreno-compiler-host.py

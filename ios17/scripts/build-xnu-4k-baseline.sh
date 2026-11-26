@@ -1,1 +1,0 @@
-../../device/scripts/build-xnu-4k-baseline.sh

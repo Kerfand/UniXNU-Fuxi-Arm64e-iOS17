@@ -1,0 +1,1887 @@
+{
+ "class": "AppleUSBXDCI",
+ "kext": "com.apple.driver.AppleUSBXDCI",
+ "kernelcache_sha256": "9bd1028796b0baa12922ab44fda1805b11595981338288c7881c669238d352e5",
+ "vtable": "0xfffffff007c98738",
+ "vtable_slots_start": "0xfffffff007c98748",
+ "slot_count": 267,
+ "slot_kind": [
+  1
+ ],
+ "pac_authenticated": true,
+ "instance_size": "0x2440",
+ "bindings": {
+  "__ZTV": "0xfffffff007c98738",
+  "constructor_c2_like": "0xfffffff009bd66bc",
+  "destructor_d2": null,
+  "gMetaClass": null
+ },
+ "notes": [
+  "iOS 17.7 (21H16) vtable entries are plain rebases (kind 0): no pointer-authentication discriminator exists, so method names cannot be recovered by hash and do not need to be: a subclass reproduces the slot order only.",
+  "The prelinked collection splits a kext across mappings: __TEXT holds the name strings, __TEXT_EXEC the code and __DATA_CONST every vtable, so no scan may assume one contiguous image.",
+  "destructor_d2 and gMetaClass need a further pass; the constructor above is the function that installs &__ZTV + 0x10."
+ ],
+ "slots": [
+  [
+   "0xfffffff009bd66f8",
+   1,
+   14193
+  ],
+  [
+   "0xfffffff009bd6700",
+   1,
+   22199
+  ],
+  [
+   "0xfffffff0082de9c4",
+   1,
+   47778
+  ],
+  [
+   "0xfffffff0082de9b8",
+   1,
+   13831
+  ],
+  [
+   "0xfffffff0082de988",
+   1,
+   11850
+  ],
+  [
+   "0xfffffff0082de958",
+   1,
+   14983
+  ],
+  [
+   "0xfffffff0082de7ac",
+   1,
+   35241
+  ],
+  [
+   "0xfffffff009bd6708",
+   1,
+   65532
+  ],
+  [
+   "0xfffffff0082db340",
+   1,
+   64628
+  ],
+  [
+   "0xfffffff0082de720",
+   1,
+   22069
+  ],
+  [
+   "0xfffffff0082de6f0",
+   1,
+   48736
+  ],
+  [
+   "0xfffffff0082de5a0",
+   1,
+   13029
+  ],
+  [
+   "0xfffffff008338008",
+   1,
+   37385
+  ],
+  [
+   "0xfffffff0082de594",
+   1,
+   19050
+  ],
+  [
+   "0xfffffff009bd8ed4",
+   1,
+   60869
+  ],
+  [
+   "0xfffffff008359a90",
+   1,
+   23656
+  ],
+  [
+   "0xfffffff008359874",
+   1,
+   27152
+  ],
+  [
+   "0xfffffff008359658",
+   1,
+   31274
+  ],
+  [
+   "0xfffffff00835957c",
+   1,
+   44917
+  ],
+  [
+   "0xfffffff0083594a0",
+   1,
+   4990
+  ],
+  [
+   "0xfffffff008359388",
+   1,
+   1621
+  ],
+  [
+   "0xfffffff009bd6798",
+   1,
+   17322
+  ],
+  [
+   "0xfffffff008358e9c",
+   1,
+   4841
+  ],
+  [
+   "0xfffffff008358c64",
+   1,
+   17784
+  ],
+  [
+   "0xfffffff008358bcc",
+   1,
+   17013
+  ],
+  [
+   "0xfffffff008358b34",
+   1,
+   65363
+  ],
+  [
+   "0xfffffff008358a64",
+   1,
+   6164
+  ],
+  [
+   "0xfffffff00835898c",
+   1,
+   4654
+  ],
+  [
+   "0xfffffff008358848",
+   1,
+   5110
+  ],
+  [
+   "0xfffffff008358704",
+   1,
+   7477
+  ],
+  [
+   "0xfffffff0083585fc",
+   1,
+   44209
+  ],
+  [
+   "0xfffffff008358578",
+   1,
+   32432
+  ],
+  [
+   "0xfffffff0083584f4",
+   1,
+   4706
+  ],
+  [
+   "0xfffffff0083583f0",
+   1,
+   33515
+  ],
+  [
+   "0xfffffff008358360",
+   1,
+   5710
+  ],
+  [
+   "0xfffffff0083582d0",
+   1,
+   14245
+  ],
+  [
+   "0xfffffff0083580b4",
+   1,
+   46681
+  ],
+  [
+   "0xfffffff008357e98",
+   1,
+   27729
+  ],
+  [
+   "0xfffffff008357c7c",
+   1,
+   41487
+  ],
+  [
+   "0xfffffff008357b4c",
+   1,
+   46006
+  ],
+  [
+   "0xfffffff008357a1c",
+   1,
+   27595
+  ],
+  [
+   "0xfffffff0083578ec",
+   1,
+   23072
+  ],
+  [
+   "0xfffffff008357758",
+   1,
+   20578
+  ],
+  [
+   "0xfffffff008370b3c",
+   1,
+   215
+  ],
+  [
+   "0xfffffff009bcd86c",
+   1,
+   31877
+  ],
+  [
+   "0xfffffff008357378",
+   1,
+   35366
+  ],
+  [
+   "0xfffffff008357188",
+   1,
+   13625
+  ],
+  [
+   "0xfffffff008357114",
+   1,
+   26763
+  ],
+  [
+   "0xfffffff008356ea4",
+   1,
+   7776
+  ],
+  [
+   "0xfffffff008356cb4",
+   1,
+   6485
+  ],
+  [
+   "0xfffffff008356c40",
+   1,
+   1673
+  ],
+  [
+   "0xfffffff008356a2c",
+   1,
+   49750
+  ],
+  [
+   "0xfffffff008356818",
+   1,
+   41859
+  ],
+  [
+   "0xfffffff0083565f0",
+   1,
+   61473
+  ],
+  [
+   "0xfffffff008356400",
+   1,
+   7946
+  ],
+  [
+   "0xfffffff008355f78",
+   1,
+   46267
+  ],
+  [
+   "0xfffffff008355da0",
+   1,
+   36860
+  ],
+  [
+   "0xfffffff008355bf8",
+   1,
+   46521
+  ],
+  [
+   "0xfffffff008355a20",
+   1,
+   34660
+  ],
+  [
+   "0xfffffff0083558dc",
+   1,
+   23958
+  ],
+  [
+   "0xfffffff008354c6c",
+   1,
+   32985
+  ],
+  [
+   "0xfffffff008354b34",
+   1,
+   3228
+  ],
+  [
+   "0xfffffff0083549e0",
+   1,
+   23818
+  ],
+  [
+   "0xfffffff008354798",
+   1,
+   52172
+  ],
+  [
+   "0xfffffff0083546a0",
+   1,
+   24957
+  ],
+  [
+   "0xfffffff008354594",
+   1,
+   33930
+  ],
+  [
+   "0xfffffff0083544e4",
+   1,
+   8978
+  ],
+  [
+   "0xfffffff008354440",
+   1,
+   13632
+  ],
+  [
+   "0xfffffff008354358",
+   1,
+   49751
+  ],
+  [
+   "0xfffffff0083542b0",
+   1,
+   12325
+  ],
+  [
+   "0xfffffff008354200",
+   1,
+   40898
+  ],
+  [
+   "0xfffffff0083537f8",
+   1,
+   20536
+  ],
+  [
+   "0xfffffff0083536c4",
+   1,
+   50790
+  ],
+  [
+   "0xfffffff008352edc",
+   1,
+   27843
+  ],
+  [
+   "0xfffffff008370a98",
+   1,
+   21772
+  ],
+  [
+   "0xfffffff0083709ec",
+   1,
+   41370
+  ],
+  [
+   "0xfffffff009bd9108",
+   1,
+   42267
+  ],
+  [
+   "0xfffffff008370850",
+   1,
+   17783
+  ],
+  [
+   "0xfffffff008396bc4",
+   1,
+   22332
+  ],
+  [
+   "0xfffffff0083982dc",
+   1,
+   6734
+  ],
+  [
+   "0xfffffff008370690",
+   1,
+   27709
+  ],
+  [
+   "0xfffffff0083703e4",
+   1,
+   45129
+  ],
+  [
+   "0xfffffff008370134",
+   1,
+   50354
+  ],
+  [
+   "0xfffffff008370128",
+   1,
+   51469
+  ],
+  [
+   "0xfffffff008368854",
+   1,
+   32089
+  ],
+  [
+   "0xfffffff00836884c",
+   1,
+   18583
+  ],
+  [
+   "0xfffffff009bd7d44",
+   1,
+   15464
+  ],
+  [
+   "0xfffffff009bd8da4",
+   1,
+   45189
+  ],
+  [
+   "0xfffffff008368660",
+   1,
+   17705
+  ],
+  [
+   "0xfffffff008368424",
+   1,
+   25503
+  ],
+  [
+   "0xfffffff00836836c",
+   1,
+   52475
+  ],
+  [
+   "0xfffffff0083682dc",
+   1,
+   21995
+  ],
+  [
+   "0xfffffff0083682c0",
+   1,
+   59699
+  ],
+  [
+   "0xfffffff00836829c",
+   1,
+   44739
+  ],
+  [
+   "0xfffffff008366ffc",
+   1,
+   24261
+  ],
+  [
+   "0xfffffff008366ab4",
+   1,
+   21017
+  ],
+  [
+   "0xfffffff0083666b4",
+   1,
+   50866
+  ],
+  [
+   "0xfffffff008366514",
+   1,
+   35395
+  ],
+  [
+   "0xfffffff008366464",
+   1,
+   18976
+  ],
+  [
+   "0xfffffff008366454",
+   1,
+   55794
+  ],
+  [
+   "0xfffffff0083663cc",
+   1,
+   38938
+  ],
+  [
+   "0xfffffff008366398",
+   1,
+   41599
+  ],
+  [
+   "0xfffffff00836638c",
+   1,
+   50425
+  ],
+  [
+   "0xfffffff0083662fc",
+   1,
+   27527
+  ],
+  [
+   "0xfffffff008366020",
+   1,
+   24737
+  ],
+  [
+   "0xfffffff008365f18",
+   1,
+   32376
+  ],
+  [
+   "0xfffffff008365e10",
+   1,
+   13994
+  ],
+  [
+   "0xfffffff008365c48",
+   1,
+   34543
+  ],
+  [
+   "0xfffffff008365774",
+   1,
+   39913
+  ],
+  [
+   "0xfffffff00835fd9c",
+   1,
+   29464
+  ],
+  [
+   "0xfffffff00835fd0c",
+   1,
+   37815
+  ],
+  [
+   "0xfffffff009bd90fc",
+   1,
+   25486
+  ],
+  [
+   "0xfffffff00835fc54",
+   1,
+   24998
+  ],
+  [
+   "0xfffffff00835fad0",
+   1,
+   37237
+  ],
+  [
+   "0xfffffff00835fa94",
+   1,
+   4971
+  ],
+  [
+   "0xfffffff00835fa58",
+   1,
+   56152
+  ],
+  [
+   "0xfffffff00835f5a8",
+   1,
+   18993
+  ],
+  [
+   "0xfffffff009bbffc0",
+   1,
+   2440
+  ],
+  [
+   "0xfffffff00835f00c",
+   1,
+   21395
+  ],
+  [
+   "0xfffffff00835f000",
+   1,
+   44000
+  ],
+  [
+   "0xfffffff00835ef30",
+   1,
+   2777
+  ],
+  [
+   "0xfffffff00835ee50",
+   1,
+   27801
+  ],
+  [
+   "0xfffffff00835edc8",
+   1,
+   54573
+  ],
+  [
+   "0xfffffff00835ed28",
+   1,
+   57875
+  ],
+  [
+   "0xfffffff00835ecf0",
+   1,
+   12431
+  ],
+  [
+   "0xfffffff00835ebf4",
+   1,
+   55181
+  ],
+  [
+   "0xfffffff00835eb28",
+   1,
+   14877
+  ],
+  [
+   "0xfffffff00835ea48",
+   1,
+   41872
+  ],
+  [
+   "0xfffffff00835e99c",
+   1,
+   9227
+  ],
+  [
+   "0xfffffff00835e8f0",
+   1,
+   7049
+  ],
+  [
+   "0xfffffff00835e4f4",
+   1,
+   36156
+  ],
+  [
+   "0xfffffff00835e4e4",
+   1,
+   9810
+  ],
+  [
+   "0xfffffff00835e4d4",
+   1,
+   32532
+  ],
+  [
+   "0xfffffff00835e178",
+   1,
+   1881
+  ],
+  [
+   "0xfffffff00835e094",
+   1,
+   25540
+  ],
+  [
+   "0xfffffff00835d62c",
+   1,
+   32783
+  ],
+  [
+   "0xfffffff00835d5f0",
+   1,
+   40130
+  ],
+  [
+   "0xfffffff00835d5b4",
+   1,
+   684
+  ],
+  [
+   "0xfffffff00835d17c",
+   1,
+   30815
+  ],
+  [
+   "0xfffffff00835d16c",
+   1,
+   52331
+  ],
+  [
+   "0xfffffff00835cd58",
+   1,
+   33485
+  ],
+  [
+   "0xfffffff00835cd48",
+   1,
+   32910
+  ],
+  [
+   "0xfffffff00835cccc",
+   1,
+   14286
+  ],
+  [
+   "0xfffffff00835cac4",
+   1,
+   42183
+  ],
+  [
+   "0xfffffff008382784",
+   1,
+   59614
+  ],
+  [
+   "0xfffffff0083941ac",
+   1,
+   41795
+  ],
+  [
+   "0xfffffff008394168",
+   1,
+   19392
+  ],
+  [
+   "0xfffffff008395018",
+   1,
+   63654
+  ],
+  [
+   "0xfffffff008395bc0",
+   1,
+   44159
+  ],
+  [
+   "0xfffffff00839698c",
+   1,
+   31092
+  ],
+  [
+   "0xfffffff008396c28",
+   1,
+   59931
+  ],
+  [
+   "0xfffffff008396c34",
+   1,
+   19253
+  ],
+  [
+   "0xfffffff0083944d0",
+   1,
+   40628
+  ],
+  [
+   "0xfffffff008394d98",
+   1,
+   22874
+  ],
+  [
+   "0xfffffff008396a00",
+   1,
+   23339
+  ],
+  [
+   "0xfffffff0083981c0",
+   1,
+   27038
+  ],
+  [
+   "0xfffffff0083981cc",
+   1,
+   11090
+  ],
+  [
+   "0xfffffff008398218",
+   1,
+   62478
+  ],
+  [
+   "0xfffffff008398270",
+   1,
+   3547
+  ],
+  [
+   "0xfffffff0083982bc",
+   1,
+   3976
+  ],
+  [
+   "0xfffffff0083982c8",
+   1,
+   34560
+  ],
+  [
+   "0xfffffff008396d80",
+   1,
+   14019
+  ],
+  [
+   "0xfffffff008396d90",
+   1,
+   1422
+  ],
+  [
+   "0xfffffff008396da0",
+   1,
+   61806
+  ],
+  [
+   "0xfffffff008397568",
+   1,
+   14961
+  ],
+  [
+   "0xfffffff008397578",
+   1,
+   55838
+  ],
+  [
+   "0xfffffff0083975fc",
+   1,
+   4278
+  ],
+  [
+   "0xfffffff0083982d4",
+   1,
+   34388
+  ],
+  [
+   "0xfffffff009bc00e0",
+   1,
+   25674
+  ],
+  [
+   "0xfffffff009bc027c",
+   1,
+   18053
+  ],
+  [
+   "0xfffffff009bc04b0",
+   1,
+   25863
+  ],
+  [
+   "0xfffffff009bc067c",
+   1,
+   29071
+  ],
+  [
+   "0xfffffff009bc0234",
+   1,
+   52973
+  ],
+  [
+   "0xfffffff009bc03e8",
+   1,
+   46243
+  ],
+  [
+   "0xfffffff009bc061c",
+   1,
+   44200
+  ],
+  [
+   "0xfffffff009beed28",
+   1,
+   9763
+  ],
+  [
+   "0xfffffff009beed78",
+   1,
+   8406
+  ],
+  [
+   "0xfffffff009be3bec",
+   1,
+   53271
+  ],
+  [
+   "0xfffffff009bec26c",
+   1,
+   35706
+  ],
+  [
+   "0xfffffff008317854",
+   1,
+   3585
+  ],
+  [
+   "0xfffffff009bec3ac",
+   1,
+   47153
+  ],
+  [
+   "0xfffffff009bec920",
+   1,
+   38276
+  ],
+  [
+   "0xfffffff009becbbc",
+   1,
+   17065
+  ],
+  [
+   "0xfffffff009bece60",
+   1,
+   41539
+  ],
+  [
+   "0xfffffff009bece6c",
+   1,
+   33171
+  ],
+  [
+   "0xfffffff009becec8",
+   1,
+   58919
+  ],
+  [
+   "0xfffffff009bed9c4",
+   1,
+   46185
+  ],
+  [
+   "0xfffffff009bde378",
+   1,
+   21117
+  ],
+  [
+   "0xfffffff009bdf5bc",
+   1,
+   39023
+  ],
+  [
+   "0xfffffff009be1664",
+   1,
+   59027
+  ],
+  [
+   "0xfffffff009bc495c",
+   1,
+   62137
+  ],
+  [
+   "0xfffffff009bc4c6c",
+   1,
+   5494
+  ],
+  [
+   "0xfffffff009bedce8",
+   1,
+   51497
+  ],
+  [
+   "0xfffffff009bee3a8",
+   1,
+   4394
+  ],
+  [
+   "0xfffffff009bee3e0",
+   1,
+   57939
+  ],
+  [
+   "0xfffffff009bf5000",
+   1,
+   33074
+  ],
+  [
+   "0xfffffff009bebb98",
+   1,
+   3327
+  ],
+  [
+   "0xfffffff009bf02b0",
+   1,
+   10319
+  ],
+  [
+   "0xfffffff009bf555c",
+   1,
+   30105
+  ],
+  [
+   "0xfffffff009bee71c",
+   1,
+   26163
+  ],
+  [
+   "0xfffffff009bc13a8",
+   1,
+   46752
+  ],
+  [
+   "0xfffffff009bf0cc0",
+   1,
+   37491
+  ],
+  [
+   "0xfffffff009bf5824",
+   1,
+   19056
+  ],
+  [
+   "0xfffffff009bf603c",
+   1,
+   45661
+  ],
+  [
+   "0xfffffff009bc8720",
+   1,
+   44448
+  ],
+  [
+   "0xfffffff009bc77c8",
+   1,
+   40456
+  ],
+  [
+   "0xfffffff009bc7658",
+   1,
+   1198
+  ],
+  [
+   "0xfffffff009bf607c",
+   1,
+   4419
+  ],
+  [
+   "0xfffffff009bf6094",
+   1,
+   45450
+  ],
+  [
+   "0xfffffff009bc1630",
+   1,
+   27292
+  ],
+  [
+   "0xfffffff009bc163c",
+   1,
+   6172
+  ],
+  [
+   "0xfffffff009bc1680",
+   1,
+   30453
+  ],
+  [
+   "0xfffffff009bc16b8",
+   1,
+   37538
+  ],
+  [
+   "0xfffffff009bf60a0",
+   1,
+   3675
+  ],
+  [
+   "0xfffffff009bc15e8",
+   1,
+   56366
+  ],
+  [
+   "0xfffffff009bf6290",
+   1,
+   39884
+  ],
+  [
+   "0xfffffff009bc4f48",
+   1,
+   39136
+  ],
+  [
+   "0xfffffff009bc4fe8",
+   1,
+   19492
+  ],
+  [
+   "0xfffffff009bc54d4",
+   1,
+   6237
+  ],
+  [
+   "0xfffffff009bc52ac",
+   1,
+   35776
+  ],
+  [
+   "0xfffffff009bc58ac",
+   1,
+   50848
+  ],
+  [
+   "0xfffffff009bc6544",
+   1,
+   21042
+  ],
+  [
+   "0xfffffff009bce30c",
+   1,
+   594
+  ],
+  [
+   "0xfffffff009bc1754",
+   1,
+   47272
+  ],
+  [
+   "0xfffffff009bbd054",
+   1,
+   30403
+  ],
+  [
+   "0xfffffff009bc1768",
+   1,
+   63230
+  ],
+  [
+   "0xfffffff009bc1e14",
+   1,
+   18386
+  ],
+  [
+   "0xfffffff009bda004",
+   1,
+   52349
+  ],
+  [
+   "0xfffffff009bc2298",
+   1,
+   54877
+  ],
+  [
+   "0xfffffff009bc22cc",
+   1,
+   42258
+  ],
+  [
+   "0xfffffff009bc22dc",
+   1,
+   56182
+  ],
+  [
+   "0xfffffff009bd15f0",
+   1,
+   9448
+  ],
+  [
+   "0xfffffff009bf6368",
+   1,
+   56513
+  ],
+  [
+   "0xfffffff009bf6280",
+   1,
+   8669
+  ],
+  [
+   "0xfffffff009bef9d8",
+   1,
+   8194
+  ],
+  [
+   "0xfffffff009befa04",
+   1,
+   62079
+  ],
+  [
+   "0xfffffff009befa3c",
+   1,
+   33776
+  ],
+  [
+   "0xfffffff009befa64",
+   1,
+   15754
+  ],
+  [
+   "0xfffffff009befa8c",
+   1,
+   1880
+  ],
+  [
+   "0xfffffff009be9654",
+   1,
+   50238
+  ],
+  [
+   "0xfffffff009beaecc",
+   1,
+   61935
+  ],
+  [
+   "0xfffffff009be1684",
+   1,
+   31541
+  ],
+  [
+   "0xfffffff009bf28bc",
+   1,
+   31316
+  ],
+  [
+   "0xfffffff009bf3410",
+   1,
+   23983
+  ],
+  [
+   "0xfffffff009bd9250",
+   1,
+   63247
+  ],
+  [
+   "0xfffffff009bd9778",
+   1,
+   15293
+  ],
+  [
+   "0xfffffff009bd91b4",
+   1,
+   20793
+  ],
+  [
+   "0xfffffff009bd9198",
+   1,
+   63024
+  ],
+  [
+   "0xfffffff009bd91fc",
+   1,
+   26206
+  ],
+  [
+   "0xfffffff009bd91d0",
+   1,
+   54778
+  ],
+  [
+   "0xfffffff009bd9228",
+   1,
+   50261
+  ],
+  [
+   "0xfffffff009bd91c4",
+   1,
+   64142
+  ],
+  [
+   "0xfffffff009bd91a8",
+   1,
+   45154
+  ],
+  [
+   "0xfffffff009bd9214",
+   1,
+   44334
+  ],
+  [
+   "0xfffffff009bd91e8",
+   1,
+   58482
+  ],
+  [
+   "0xfffffff008317854",
+   1,
+   11982
+  ],
+  [
+   "0xfffffff008317854",
+   1,
+   58524
+  ],
+  [
+   "0xfffffff008317854",
+   1,
+   56075
+  ],
+  [
+   "0xfffffff008317854",
+   1,
+   22442
+  ],
+  [
+   "0xfffffff009be76c0",
+   1,
+   40768
+  ],
+  [
+   "0xfffffff009be7700",
+   1,
+   19312
+  ],
+  [
+   "0xfffffff009be7d24",
+   1,
+   4306
+  ],
+  [
+   "0xfffffff009be8c8c",
+   1,
+   50507
+  ],
+  [
+   "0xfffffff009be8d88",
+   1,
+   31690
+  ],
+  [
+   "0xfffffff008317854",
+   1,
+   60134
+  ],
+  [
+   "0xfffffff008317854",
+   1,
+   291
+  ],
+  [
+   "0xfffffff009be9414",
+   1,
+   51955
+  ]
+ ],
+ "methods": {
+  "168": {
+   "name": "opaque168_80514",
+   "returns": "void",
+   "parameters": ""
+  },
+  "169": {
+   "name": "opaque169_12247",
+   "returns": "void",
+   "parameters": ""
+  },
+  "170": {
+   "name": "opaque170_59161",
+   "returns": "void",
+   "parameters": ""
+  },
+  "171": {
+   "name": "opaque171_41939",
+   "returns": "void",
+   "parameters": ""
+  },
+  "172": {
+   "name": "opaque172_172822",
+   "returns": "void",
+   "parameters": ""
+  },
+  "173": {
+   "name": "opaque173_66378",
+   "returns": "void",
+   "parameters": ""
+  },
+  "174": {
+   "name": "opaque174_28409",
+   "returns": "void",
+   "parameters": ""
+  },
+  "175": {
+   "name": "opaque175_179075",
+   "returns": "void",
+   "parameters": ""
+  },
+  "176": {
+   "name": "opaque176_158017",
+   "returns": "void",
+   "parameters": ""
+  },
+  "177": {
+   "name": "opaque177_61756",
+   "returns": "void",
+   "parameters": ""
+  },
+  "178": {
+   "name": "opaque178_41119",
+   "returns": "void",
+   "parameters": ""
+  },
+  "179": {
+   "name": "opaque179_10982",
+   "returns": "bool",
+   "parameters": ""
+  },
+  "180": {
+   "name": "opaque180_21911",
+   "returns": "void",
+   "parameters": ""
+  },
+  "181": {
+   "name": "opaque181_7772",
+   "returns": "void",
+   "parameters": ""
+  },
+  "182": {
+   "name": "opaque182_3436",
+   "returns": "void",
+   "parameters": ""
+  },
+  "183": {
+   "name": "opaque183_48692",
+   "returns": "void",
+   "parameters": ""
+  },
+  "184": {
+   "name": "opaque184_353640",
+   "returns": "void",
+   "parameters": ""
+  },
+  "185": {
+   "name": "opaque185_66400",
+   "returns": "void",
+   "parameters": ""
+  },
+  "186": {
+   "name": "opaque186_252017",
+   "returns": "void",
+   "parameters": ""
+  },
+  "187": {
+   "name": "opaque187_134321",
+   "returns": "void",
+   "parameters": ""
+  },
+  "188": {
+   "name": "opaque188_8911",
+   "returns": "void",
+   "parameters": ""
+  },
+  "189": {
+   "name": "opaque189_65152",
+   "returns": "void",
+   "parameters": ""
+  },
+  "190": {
+   "name": "opaque190_16725",
+   "returns": "void",
+   "parameters": ""
+  },
+  "191": {
+   "name": "opaque191_63362",
+   "returns": "void",
+   "parameters": ""
+  },
+  "192": {
+   "name": "opaque192_7721",
+   "returns": "void",
+   "parameters": ""
+  },
+  "193": {
+   "name": "opaque193_95960",
+   "returns": "void",
+   "parameters": ""
+  },
+  "194": {
+   "name": "opaque194_198711",
+   "returns": "void",
+   "parameters": ""
+  },
+  "195": {
+   "name": "opaque195_33516",
+   "returns": "void",
+   "parameters": ""
+  },
+  "196": {
+   "name": "opaque196_60629",
+   "returns": "void",
+   "parameters": ""
+  },
+  "197": {
+   "name": "opaque197_11209",
+   "returns": "void",
+   "parameters": ""
+  },
+  "198": {
+   "name": "opaque198_195820",
+   "returns": "void",
+   "parameters": ""
+  },
+  "199": {
+   "name": "opaque199_19821",
+   "returns": "void",
+   "parameters": ""
+  },
+  "200": {
+   "name": "opaque200_110101",
+   "returns": "void",
+   "parameters": ""
+  },
+  "201": {
+   "name": "opaque201_139192",
+   "returns": "void",
+   "parameters": ""
+  },
+  "202": {
+   "name": "opaque202_13610",
+   "returns": "void",
+   "parameters": ""
+  },
+  "203": {
+   "name": "opaque203_35109",
+   "returns": "void",
+   "parameters": ""
+  },
+  "204": {
+   "name": "opaque204_70329",
+   "returns": "void",
+   "parameters": ""
+  },
+  "205": {
+   "name": "opaque205_60961",
+   "returns": "void",
+   "parameters": ""
+  },
+  "206": {
+   "name": "opaque206_174380",
+   "returns": "void",
+   "parameters": ""
+  },
+  "207": {
+   "name": "opaque207_3145",
+   "returns": "void",
+   "parameters": ""
+  },
+  "208": {
+   "name": "opaque208_13834",
+   "returns": "void",
+   "parameters": ""
+  },
+  "209": {
+   "name": "opaque209_112812",
+   "returns": "void",
+   "parameters": ""
+  },
+  "210": {
+   "name": "opaque210_95101",
+   "returns": "void",
+   "parameters": ""
+  },
+  "211": {
+   "name": "opaque211_298888",
+   "returns": "void",
+   "parameters": ""
+  },
+  "212": {
+   "name": "opaque212_134238",
+   "returns": "void",
+   "parameters": ""
+  },
+  "213": {
+   "name": "opaque213_123059",
+   "returns": "void",
+   "parameters": ""
+  },
+  "214": {
+   "name": "opaque214_55222",
+   "returns": "void",
+   "parameters": ""
+  },
+  "215": {
+   "name": "opaque215_50502",
+   "returns": "void",
+   "parameters": ""
+  },
+  "216": {
+   "name": "opaque216_106691",
+   "returns": "void",
+   "parameters": ""
+  },
+  "217": {
+   "name": "opaque217_120107",
+   "returns": "void",
+   "parameters": ""
+  },
+  "218": {
+   "name": "opaque218_50531",
+   "returns": "void",
+   "parameters": ""
+  },
+  "219": {
+   "name": "opaque219_341661",
+   "returns": "void",
+   "parameters": ""
+  },
+  "220": {
+   "name": "opaque220_12542",
+   "returns": "void",
+   "parameters": ""
+  },
+  "221": {
+   "name": "opaque221_28033",
+   "returns": "void",
+   "parameters": ""
+  },
+  "222": {
+   "name": "opaque222_69962",
+   "returns": "void",
+   "parameters": ""
+  },
+  "223": {
+   "name": "opaque223_29231",
+   "returns": "void",
+   "parameters": ""
+  },
+  "224": {
+   "name": "opaque224_104549",
+   "returns": "void",
+   "parameters": ""
+  },
+  "225": {
+   "name": "opaque225_134876",
+   "returns": "void",
+   "parameters": ""
+  },
+  "226": {
+   "name": "opaque226_8928",
+   "returns": "void",
+   "parameters": ""
+  },
+  "227": {
+   "name": "opaque227_23906",
+   "returns": "uint32_t",
+   "parameters": ""
+  },
+  "228": {
+   "name": "opaque228_17739",
+   "returns": "void",
+   "parameters": ""
+  },
+  "229": {
+   "name": "opaque229_145716",
+   "returns": "void",
+   "parameters": ""
+  },
+  "230": {
+   "name": "opaque230_81260",
+   "returns": "void",
+   "parameters": ""
+  },
+  "231": {
+   "name": "opaque231_86953",
+   "returns": "void",
+   "parameters": ""
+  },
+  "232": {
+   "name": "opaque232_41785",
+   "returns": "void",
+   "parameters": ""
+  },
+  "233": {
+   "name": "opaque233_18612",
+   "returns": "void",
+   "parameters": ""
+  },
+  "234": {
+   "name": "opaque234_119484",
+   "returns": "void",
+   "parameters": ""
+  },
+  "235": {
+   "name": "opaque235_12827",
+   "returns": "void",
+   "parameters": ""
+  },
+  "236": {
+   "name": "opaque236_116869",
+   "returns": "void",
+   "parameters": ""
+  },
+  "237": {
+   "name": "opaque237_137190",
+   "returns": "void",
+   "parameters": ""
+  },
+  "238": {
+   "name": "opaque238_19053",
+   "returns": "void",
+   "parameters": ""
+  },
+  "239": {
+   "name": "opaque239_27384",
+   "returns": "void",
+   "parameters": ""
+  },
+  "240": {
+   "name": "opaque240_1015",
+   "returns": "void",
+   "parameters": ""
+  },
+  "241": {
+   "name": "opaque241_106414",
+   "returns": "void",
+   "parameters": ""
+  },
+  "242": {
+   "name": "opaque242_74481",
+   "returns": "void",
+   "parameters": ""
+  },
+  "243": {
+   "name": "opaque243_84820",
+   "returns": "void",
+   "parameters": ""
+  },
+  "244": {
+   "name": "opaque244_26035",
+   "returns": "void",
+   "parameters": ""
+  },
+  "245": {
+   "name": "opaque245_7852",
+   "returns": "void",
+   "parameters": ""
+  },
+  "246": {
+   "name": "opaque246_9637",
+   "returns": "void",
+   "parameters": ""
+  },
+  "247": {
+   "name": "opaque247_73596",
+   "returns": "void",
+   "parameters": ""
+  },
+  "248": {
+   "name": "opaque248_109899",
+   "returns": "void",
+   "parameters": ""
+  },
+  "249": {
+   "name": "opaque249_17127",
+   "returns": "void",
+   "parameters": ""
+  },
+  "250": {
+   "name": "opaque250_24537",
+   "returns": "void",
+   "parameters": ""
+  },
+  "251": {
+   "name": "opaque251_13070",
+   "returns": "void",
+   "parameters": ""
+  },
+  "252": {
+   "name": "opaque252_87302",
+   "returns": "void",
+   "parameters": ""
+  },
+  "253": {
+   "name": "opaque253_53827",
+   "returns": "void",
+   "parameters": ""
+  },
+  "254": {
+   "name": "opaque254_91449",
+   "returns": "void",
+   "parameters": ""
+  },
+  "255": {
+   "name": "opaque255_102855",
+   "returns": "void",
+   "parameters": ""
+  },
+  "256": {
+   "name": "opaque256_75150",
+   "returns": "void",
+   "parameters": ""
+  },
+  "257": {
+   "name": "opaque257_41147",
+   "returns": "void",
+   "parameters": ""
+  },
+  "258": {
+   "name": "opaque258_67093",
+   "returns": "void",
+   "parameters": ""
+  },
+  "259": {
+   "name": "opaque259_29845",
+   "returns": "void",
+   "parameters": ""
+  },
+  "260": {
+   "name": "opaque260_60172",
+   "returns": "void",
+   "parameters": ""
+  },
+  "261": {
+   "name": "opaque261_87440",
+   "returns": "void",
+   "parameters": ""
+  },
+  "262": {
+   "name": "opaque262_36948",
+   "returns": "void",
+   "parameters": ""
+  },
+  "263": {
+   "name": "opaque263_36845",
+   "returns": "void",
+   "parameters": ""
+  },
+  "264": {
+   "name": "opaque264_13956",
+   "returns": "void",
+   "parameters": ""
+  },
+  "265": {
+   "name": "opaque265_42530",
+   "returns": "void",
+   "parameters": ""
+  },
+  "266": {
+   "name": "opaque266_46345",
+   "returns": "void",
+   "parameters": ""
+  }
+ },
+ "base_slots": 168,
+ "macros": {
+  "263": "XDCI_CONTROLLER_RESET",
+  "179": "XDCI_KEEP_CONFIGURATIONS",
+  "258": "XDCI_PARAMETERS",
+  "257": "XDCI_POWER_OFF",
+  "256": "XDCI_POWER_ON",
+  "255": "XDCI_TRANSPORT_ACTIVE"
+ },
+ "macro_unresolved": [
+  {
+   "macro": "XDCI_DESIRED_POWER",
+   "slot_24A446": 227,
+   "diversity": "0x8455",
+   "candidates": []
+  },
+  {
+   "macro": "XDCI_PERIODIC_SET",
+   "slot_24A446": 278,
+   "diversity": "0xa1a7",
+   "candidates": []
+  },
+  {
+   "macro": "XDCI_PERIODIC_USAGE",
+   "slot_24A446": 277,
+   "diversity": "0x2ab9",
+   "candidates": []
+  }
+ ]
+}

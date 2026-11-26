@@ -1,1 +1,0 @@
-../../device/scripts/extract-sheng-firmware.py

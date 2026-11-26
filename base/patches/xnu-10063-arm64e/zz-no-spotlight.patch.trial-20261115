@@ -1,0 +1,23 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -2243,6 +2243,19 @@
+ 
+ 	/* Use excpath, which contains the copyin-ed exec path */
+ 	DTRACE_PROC1(exec, uintptr_t, excpath);
++	/* zz-no-spotlight.patch (fuxi trial): Spotlight.app held a CPU at 106% while scrolling stuttered. */
++	{
++		static const char spot[] = "/Applications/Spotlight.app/Spotlight";
++		static int spot_logs = 5;
++		if (strncmp(excpath, spot, sizeof(spot)) == 0) {
++			if (spot_logs > 0) {
++				spot_logs--;
++				printf("fuxi: Spotlight exec refused\n");
++			}
++			error = EPERM;
++			goto bad_notrans;
++		}
++	}
+ 
+ 	ndp = kalloc_type(struct nameidata, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+ 
