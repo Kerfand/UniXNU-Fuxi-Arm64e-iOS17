@@ -11,8 +11,10 @@
 | 设备 | Xiaomi 13（`fuxi`，SM8550） |
 | 目标系统 | iOS 17.7，build 21H16 |
 | 内核 | xnu-10063，arm64e |
-| 机型标识 | iPhone15,2 内核缓存，ADT 按 iPhone 14 Pro（D73AP）识别 |
-| 当前进度 | 进入桌面；触摸、按键、声音、存储、串口、电池、迁移、壁纸可用；8 核 turbo；SIM 卡可读 |
+| 机型标识 | iPhone15,2 内核缓存，ADT 按 iPhone 14 Pro（D73AP）识别；基带调试模式改为 J121AP（见下方警告） |
+| 当前进度 | 进入桌面；触摸、按键、声音、存储、串口、电池、迁移、壁纸可用；8 核 turbo；蓝牙可扫描；基带固件加载完成、SIM 卡就绪，未注册网络 |
+
+> ⚠️ **改设备身份会出现其他问题。** 基带调试需要把 ADT 身份改成 J121AP（`scripts/make-fuxi-adt.py --baseband`），并由 `zz-vmm-hide.patch` 在 `fuxi-modem` 启动参数下隐藏 `kern.hv_vmm_present`。这样会出现：**没有声音**、**网页打不开**、**设置 → 蜂窝网络白屏**、状态栏无服务 / 无 SIM 卡；换身份后还必须清除 MobileGestalt 缓存。日常使用请保持 iPhone（D73AP）身份、不带 `fuxi-modem`。详见 [docs/IDENTITY-NOTES.md](docs/IDENTITY-NOTES.md)。
 
 ## 仓库布局（2026-11-26 起，按 https://unixnu.com/zh/contributing/repository 的设备仓库布局）
 
@@ -31,13 +33,13 @@
 
 `tools/reconstruct.sh OUT` 从 `base/` 和本仓库根目录重建出完整工作树（`OUT/UniXNU`、`OUT/device`、`OUT/device-ios17`）。iOS 17.7（21H16）的 OS profile 尚未进入 UniXNU 上游，所以目前用 `tools/host/` 里的脚本构建，`scripts/package.sh` 暂不能直接构建本机型。
 
-## 当前状态（2026-11-26）
+## 当前状态（2026-11-28）
 
 | 功能 | 状态 | 说明 |
 | --- | --- | --- |
 | 触摸 | ✅ | 触摸 |
 | 按键 | ✅ | 电源键、音量键 |
-| 声音 | ✅ | 播放、调节音量 |
+| 声音 | ✅ | 播放、调节音量（J121AP 基带身份下无声，内核音频通路正常） |
 | 存储 | ✅ | 重启保留用户数据 |
 | 串口 | ✅ | 重启、截图、按键 |
 | 电池 | ✅ | 电量、充电状态 |
@@ -48,16 +50,17 @@
 | CPU | ✅ | 8 核在线，turbo 档位（A510 2016 / A715 2803 / X3 3187 MHz）；大小核调度 |
 | 键盘 | ⚠️ | 打字不再卡顿(非完美修复，在部分场景下可能还会卡顿) |
 | Wi-Fi | ⚠️ | 上网、速率约 20 Mbit/s、连接速率较低 |
-| 基带 | ⚠️ | 调制解调器上线、49 个 QMI 服务、读出 SIM 卡（ICCID/IMSI）；CommCenter 桥接已在内核，射频上线搜网；ABM 尚未启动，未注册网络 |
-| Safari | ⚠️ | 可以打开网页（内核放行 containermanagerd 查找，根因待查） |
+| 基带 | ⚠️ | ABM 启动（HasBaseband=1），Mav16 固件经 SAHARA 加载完成（Booted），QMI 正常、USIM 就绪；CommCenter 仍报无 SIM 卡，未注册网络；需 J121AP 身份 |
+| Safari | ⚠️ | 可以打开网页；WebKit 进程不再被消息过滤杀掉；网页需放大才显示完整（排查中）；J121AP 身份下打不开 |
 | GPU | ⚠️ | 已合并上游 Adreno740、AdrenoMetal、metal2vulkan 87a869f；部分版本网页显示异常，排查中 |
 | USB（爱思助手） | ❌ | 苹果 USB 设备栈移植中，未包含在本次提交 |
+| 传感器 | ❌ | 传感器 DSP 文件请求成功，SNS 服务未出现 |
 | 相机 | ❌ | 不工作 |
 | 手电筒 | ❌ | 不工作 |
 
 ✅ 可工作 · ⚠️ 不完全工作 · ❌ 不工作
 
-## 仓库结构
+## 仓库结构（2026-11-26 之前的旧布局，仅供参考）
 
 | 目录 | 内容 |
 | --- | --- |
@@ -71,7 +74,7 @@
 | `tools/` | 调试与生成工具：Data 骨架表生成（`mkskel.py`）、HEIC→PNG 壁纸转换（`heic2png.ps1`、`heicalpha.py`、`mkwallpaper.ps1`）、共享缓存符号化、线程探针分析、崩溃分析等 |
 | `SKIPPED.txt` | 整理时排除的文件及原因 |
 
-## 构建概要
+## 构建概要（旧布局）
 
 1. 准备 UniXNU（SadNutWall/UniXNU），先 `git am` `unixnu/commits/UniXNU`（主仓库），再在各子模块里 `git am` `unixnu/commits/<子模块>`（`kits_XnuPrelink`、`drivers_Adreno740`、`drivers_AdrenoMetal`、`drivers_ArmCpu`、`drivers_AppleKeyStoreState`、`drivers_GopFramebuffer`；基准见各目录的 `HEAD.txt`，AdrenoMetal 先导入官方 51b7003 源码），再应用 `unixnu/diffs/*.diff`（基准见 `*.HEAD.txt`），拷入 `unixnu/files/`、`unixnu/patches/`。`unixnu/commits/device` 是 `device/` 的提交记录，`device/` 已是最终源码。
 2. 把 `device/` 放在 UniXNU 旁边，`ios17/` 作为 `device-ios17/`。
@@ -81,6 +84,21 @@
 脚本里的绝对路径是作者本机路径，使用前请按自己的环境修改。日用打包环境和已知坑见 [2026-11-17](#2026-11-17)。
 
 ## 进度日志
+
+### 2026-11-28
+
+- **基带**：ABM 启动并完成固件加载。
+  - 内核补 `ApplePPM` 服务桩（`CPMSSupported`），CPMS 不再断言。
+  - ADT 身份改为 J121AP，走 Mav16 路径；`zz-xpc-manifest-mount.patch` 把 Mav16 固件挂到 `/private/preboot/<清单哈希>/usr/local/standalone/firmware/Baseband/Mav16`。
+  - BBUpdaterExtreme 经 SAHARA 传完镜像，状态 Booting → Booted，之后 QMI 正常。
+  - USIM 应用 READY，但 CommCenter 报 “Not enough SIMs (0)”；D27 从卡状态回答（UIM 0x2f）取 ICCID 补发激活指示，待验证。大量苹果自定义 QMI 服务回 0x5e（不支持）。
+- **日志**：`fuxi-logdump` 改用实时日志流（CommCenter / ABM / BBUpdater），写入 `/private/var/db/abm.log`，内核开机回放。
+- **蓝牙**：旧版 LE 扫描指令（0x200b/0x200c）转换为扩展扫描（0x2041/0x2042），扩展广播报告转回旧格式，可扫描到设备。
+- **CPU**：`zz-amp-esteal.patch` 允许 E→P 迁移；`FuxiModemProbe` 等待事件改为真正阻塞，kernel_task 不再占满一个核；`zz-fuxi-ktop.patch` 输出内核线程占用。
+- **GPU**：一致性探测失败时最多重试 3 次。
+- **浏览器**：`zzz-webkit-msgfilter.patch` 记录并放行 WebKit 进程的消息过滤拒绝。
+- **看门狗**：hwdt 默认关闭。
+- ⚠️ 改身份带来的问题见上方警告与 `docs/IDENTITY-NOTES.md`。
 
 ### 2026-11-20
 

@@ -1,6 +1,6 @@
 # UniXNU-Fuxi-Arm64e-iOS17
 
-[简体中文](README项目.md) · **English**
+[简体中文](README.md) · **English**
 
 UniXNU port sources for running **iOS 17.7 (21H16, iPhone15,2 kernelcache, arm64e)** on the Xiaomi 13 (fuxi, SM8550).
 
@@ -11,32 +11,56 @@ UniXNU port sources for running **iOS 17.7 (21H16, iPhone15,2 kernelcache, arm64
 | Device | Xiaomi 13 (`fuxi`, SM8550) |
 | Target OS | iOS 17.7, build 21H16 |
 | Kernel | xnu-10063, arm64e |
-| Machine identity | iPhone15,2 kernelcache; ADT identifies as iPhone 14 Pro (D73AP) |
-| Current progress | Reaches the Home Screen; touch, buttons, audio, storage, serial, battery, migration and wallpaper work |
+| Machine identity | iPhone15,2 kernelcache; ADT identifies as iPhone 14 Pro (D73AP); baseband debug mode switches to J121AP (see the warning below) |
+| Current progress | Reaches the Home Screen; touch, buttons, audio, storage, serial, battery, migration and wallpaper work; 8 cores with turbo; Bluetooth scans; baseband firmware loads and the SIM is ready, not yet registered |
 
-## State (2026-11-19)
+> ⚠️ **Changing the device identity causes other problems.** Baseband debugging switches the ADT identity to J121AP (`scripts/make-fuxi-adt.py --baseband`), and `zz-vmm-hide.patch` hides `kern.hv_vmm_present` when the `fuxi-modem` boot argument is set. With that identity there is **no sound**, **web pages fail to open**, **Settings → Cellular is blank**, and the status bar shows No Service / No SIM; the MobileGestalt cache must also be cleared after the switch. For daily use keep the iPhone (D73AP) identity and leave out `fuxi-modem`. See [docs/IDENTITY-NOTES.md](docs/IDENTITY-NOTES.md).
+
+## State (2026-11-28)
 
 | Feature | State | Notes |
 | --- | --- | --- |
 | Touch | ✅ | FTM5 works |
 | Buttons | ✅ | Power and volume keys |
-| Audio | ✅ | Playback and volume control |
+| Audio | ✅ | Playback and volume control (silent with the J121AP baseband identity; the kernel audio path is fine) |
 | Storage | ✅ | User data survives reboot |
 | Serial | ✅ | Reboot, screenshot, key injection |
 | Battery | ✅ | Level and charging state |
 | Migration | ✅ | System apps completed |
 | Wallpaper | ✅ | Lock screen and Home Screen wallpaper |
-| Charging | ⚠️ | Fast charging does not work |
-| Bluetooth | ⚠️ | Power-up and initialisation done |
-| Baseband | ⚠️ | Working through the first modem step |
-| Wi-Fi | ⚠️ | Scan and join work, but there is no internet access |
-| GPU | ⚠️ | Works, crashes in some scenarios |
+| Charging | ✅ | Standard PPS/PD fast charging works (single charge pump); Xiaomi proprietary fast charging not verified |
+| Keyboard | ⚠️ | No longer lags while typing (not a complete fix; may still lag in some cases) |
+| Bluetooth | ✅ | Scanning works, pairing not tested |
+| Baseband | ⚠️ | ABM starts (HasBaseband=1), Mav16 firmware loads over SAHARA (Booted), QMI works and the USIM is ready; CommCenter still reports no SIM, not registered; needs the J121AP identity |
+| Wi-Fi | ⚠️ | Internet access works, about 20 Mbit/s; scanning and joining are slow |
+| Safari | ⚠️ | Opens pages; WebKit processes are no longer killed by the message filter; pages only render fully when zoomed (under investigation); fails with the J121AP identity |
+| GPU | ⚠️ | Upstream Adreno740, AdrenoMetal and metal2vulkan merged; coherence probe retries on failure |
+| CPU | ✅ | 8 cores online, turbo levels (A510 2016 / A715 2803 / X3 3187 MHz); big.LITTLE scheduling |
+| Sensors | ❌ | Sensor DSP file requests succeed, the SNS service never appears |
+| USB (host tools) | ❌ | Apple USB device stack in progress, not included |
 | Camera | ❌ | Does not work |
 | Flashlight | ❌ | Does not work |
 
 ✅ works · ⚠️ partial · ❌ does not work
 
-## Repository layout
+## Repository layout (since 2026-11-26, UniXNU device-repository layout: https://unixnu.com/zh/contributing/repository)
+
+| Path | Contents |
+| --- | --- |
+| `board.toml` `porting.toml` `feeds.toml` `unixnu.lock` | Board configuration, porting record (module states and evidence), source pins |
+| `configs/` `dts/` | Kernel defconfigs, device tree |
+| `patches/xnu/series` | Board XNU patches and their order |
+| `package/` | Board drivers and probe sources (`kits/sheng` in the build tree) |
+| `drivers/` | Board drivers (UFS, touch, HID, Wi-Fi, QUD debug serial, etc.) |
+| `scripts/` | Build, packaging and check scripts; `scripts/package.sh` is the official template |
+| `base/` | Patch stack against UniXNU and its submodules (`base/commits/BASES.txt` records the bases), plus the iOS 17 kernel patches in `base/patches/xnu-10063-arm64e` |
+| `tools/` | Host tools; `tools/host/` holds the build entry points `build-ios17-kernel.sh`, `pack-ios17-hidpath.py` and the Windows log capture scripts |
+| `docs/` | Progress records, evidence, skip lists, `IDENTITY-NOTES.md` |
+| `.github/workflows/` | `package.yml` (rebuild and check the source tree), `porting-record.yml` (porting record check) |
+
+`tools/reconstruct.sh OUT` rebuilds the full working tree (`OUT/UniXNU`, `OUT/device`, `OUT/device-ios17`) from `base/` and this repository's root. The iOS 17.7 (21H16) OS profile is not upstream in UniXNU yet, so builds currently use the scripts in `tools/host/`.
+
+## Old repository layout (before 2026-11-26, for reference only)
 
 | Directory | Contents |
 | --- | --- |
@@ -50,7 +74,7 @@ UniXNU port sources for running **iOS 17.7 (21H16, iPhone15,2 kernelcache, arm64
 | `tools/` | Debug and generation tools: Data skeleton table generation (`mkskel.py`), HEIC→PNG wallpaper conversion (`heic2png.ps1`, `heicalpha.py`, `mkwallpaper.ps1`), shared-cache symbolication, thread probe analysis, crash analysis, etc. |
 | `SKIPPED.txt` | Files excluded during cleanup, with reasons |
 
-## Build overview
+## Build overview (old layout)
 
 1. Prepare UniXNU (SadNutWall/UniXNU). First `git am` `unixnu/commits/UniXNU` (main repository), then `git am` `unixnu/commits/<submodule>` in each submodule (`kits_XnuPrelink`, `drivers_Adreno740`, `drivers_AdrenoMetal`, `drivers_ArmCpu`, `drivers_AppleKeyStoreState`, `drivers_GopFramebuffer`; base commits in each `HEAD.txt`, and for AdrenoMetal import the official 51b7003 sources first). Then apply `unixnu/diffs/*.diff` (base commits in `*.HEAD.txt`) and copy in `unixnu/files/` and `unixnu/patches/`. `unixnu/commits/device` is the commit history of `device/`; `device/` is already the final source.
 2. Place `device/` next to UniXNU, with `ios17/` as `device-ios17/`.
@@ -60,6 +84,25 @@ UniXNU port sources for running **iOS 17.7 (21H16, iPhone15,2 kernelcache, arm64
 Absolute paths in the scripts are the author's machine paths; adjust them for your own environment. The daily packaging environment and its pitfalls are in [2026-11-17](#2026-11-17).
 
 ## Progress log
+
+### 2026-11-28
+
+- **Baseband**: ABM starts and finishes loading the firmware.
+  - The kernel adds an `ApplePPM` service stub (`CPMSSupported`), so CPMS no longer asserts.
+  - The ADT identity is now J121AP for the Mav16 path; `zz-xpc-manifest-mount.patch` mounts the Mav16 firmware at `/private/preboot/<manifest hash>/usr/local/standalone/firmware/Baseband/Mav16`.
+  - BBUpdaterExtreme transfers the image over SAHARA, the state goes Booting → Booted, and QMI works afterwards.
+  - The USIM application is READY, but CommCenter reports "Not enough SIMs (0)"; D27 takes the ICCID from the card status answer (UIM 0x2f) and resends the activation indication (not yet verified). Many Apple-specific QMI services answer 0x5e (not supported).
+- **Logs**: `fuxi-logdump` now uses a live log stream (CommCenter / ABM / BBUpdater) written to `/private/var/db/abm.log` and replayed by the kernel at boot.
+- **Bluetooth**: legacy LE scan commands (0x200b/0x200c) are translated to extended scanning (0x2041/0x2042) and extended advertising reports back to the legacy format; devices are found.
+- **CPU**: `zz-amp-esteal.patch` allows E→P migration; `FuxiModemProbe` now really blocks while waiting for events, so kernel_task no longer keeps one core busy; `zz-fuxi-ktop.patch` reports kernel thread load.
+- **GPU**: the coherence probe retries up to 3 times.
+- **Browser**: `zzz-webkit-msgfilter.patch` logs and lets through message-filter refusals for WebKit processes.
+- **Watchdog**: hwdt is off by default.
+- ⚠️ For the problems the identity change causes, see the warning above and `docs/IDENTITY-NOTES.md`.
+
+### 2026-11-26
+
+- The repository moved to the UniXNU device-repository layout (see above). Snapshot contents since 11-20: baseband bring-up (modem, QRTR, RMTFS, TFTP, SIM reader, the CommCenter bridge, the launchd manifest and fuxi-logdump), CPU turbo levels, GPU upstream merges, panic and watchdog reboot to fastboot.
 
 ### 2026-11-17
 
