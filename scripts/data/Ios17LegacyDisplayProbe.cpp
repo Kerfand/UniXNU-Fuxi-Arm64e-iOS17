@@ -262,6 +262,7 @@ extern "C" void native_touch_probe(void);
 extern "C" void fuxi_buttons_probe(void);
 extern "C" void sheng_bluetooth_probe(void);   // FuxiBluetooth.cpp (QcaBluetooth, fuxi 2026-11-15)
 extern "C" void fuxi_wifi_probe(void);        // fuxi-wifi=1: read-only look at the WCN7850 path
+extern "C" void sheng_battery_probe(void);    // sheng-adsp=2: the battery power source (BatteryProbe.cpp), power.md section 4
 extern "C" void sheng_audio_probe(void);      // sheng-audio=N: speakers, microphone, audio service (AudioProbe.cpp)
 
 // --- QcomDwc3 native Apple USB device stack (usb=1) ---
@@ -271,6 +272,10 @@ extern "C" bool qcom_dwc3_bring_up(void);
 extern "C" void qcom_dwc3_publish(void);
 extern "C" void qcom_dwc3_static_init(void) __asm__("__GLOBAL__sub_I_QcomDwc3.cpp");
 extern "C" volatile uint32_t native_usb_stats[54];
+// fuxi 2026-11-26 (U63d): usb-inherit=1 -- QUD keeps the controller until here; then it stops and its SMMU stream is ours.
+extern "C" bool qcom_dwc3_smmu_takeover(void);
+extern "C" bool qcom_dwc3_inherited(void);
+extern "C" int qcom_usb_debug_stop(void) __attribute__((weak_import));
 static void fuxi_usb_worker(void *, wait_result_t) {
     IOSleep(3000);
     printf("[FuxiUSB] bring_up start\n");
@@ -287,6 +292,17 @@ static void fuxi_usb_worker(void *, wait_result_t) {
                 if (OSMetaClass::postModLoad(handle)) {
                     native_usb_stats[0] = (uint32_t)-11;
                 } else {
+                    if (qcom_dwc3_inherited()) {
+                        printf("[FuxiUSB] handing the controller from QUD to AppleUSBXDCI (the serial console ends here)\n");
+                        IOSleep(2000);
+                        const int stopped = qcom_usb_debug_stop ? qcom_usb_debug_stop() : -1;
+                        native_usb_stats[44] = (uint32_t)stopped;
+                        if (!qcom_dwc3_smmu_takeover()) {
+                            printf("[FuxiUSB] SMMU takeover failed (QUD stop %d)\n", stopped);
+                            thread_terminate(current_thread());
+                            return;
+                        }
+                    }
                     qcom_dwc3_publish();
                     printf("[FuxiUSB] published QcomDwc3Xdci!\n");
                 }
@@ -304,7 +320,8 @@ static void fuxi_usb_probe(void) {
     if (kernel_thread_start(fuxi_usb_worker, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 }
 
-extern "C" void fuxi_modem_probe(void);       // fuxi-modem=1/2: the modem DSP (ModemProbe.cpp), baseband phase 1
+extern "C" void fuxi_sensor_probe(void);
+extern "C" void native_fuxi_modem_probe(void);   // fuxi 2026-11-26: ljhhkx529 FuxiModemProbe       // fuxi-modem=1/2: the modem DSP (ModemProbe.cpp), baseband phase 1 (re-added 2026-11-24)
 extern "C" void sheng_adsp_probe(void);       // sheng-adsp=1/2: the audio DSP (AdspProbe.cpp), power.md section 3
 extern "C" void fuxi_cpufreq_start(void);     // sheng-cpufreq=N: CPU/L3 frequency votes (CpuFreqProbe.cpp, FuxiCpuFreqLog.cpp)
 extern "C" void fuxi_wifi_link_probe(void);   // fuxi-wifi=2/3/5: power, PCIe0 link; 5 runs Ath12kWifi (FuxiWifiNw21)
@@ -320,8 +337,10 @@ void native_legacy_display_late_probe(void)
 	native_touch_probe();
 	fuxi_cpufreq_start();
 	sheng_adsp_probe();
-	fuxi_modem_probe();
+	fuxi_sensor_probe();
+	native_fuxi_modem_probe();
 	sheng_audio_probe();
+	sheng_battery_probe();
 	fuxi_buttons_probe();
 	sheng_bluetooth_probe();
 	fuxi_wifi_probe();
