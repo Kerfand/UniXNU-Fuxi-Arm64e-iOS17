@@ -1,0 +1,18 @@
+diff --git a/pexpert/pexpert/arm64/board_config.h b/pexpert/pexpert/arm64/board_config.h
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -200,4 +200,14 @@
+  * accidentally write to HID bits after they've been made read-only.
+  */
+ 
++
++/* zz-amp-edge.patch (fuxi 2026-11-15): SM8550's E (A510) and P clusters, as UniXNU's xnu-12377 configuration for sheng. __ARM_AMP__ makes
++ * osfmk/arm/smp.h define __AMP__, which enables the Edge scheduler (CONFIG_SCHED_EDGE); Clutch alone cannot run two clusters. */
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++#undef MAX_CPU_CLUSTERS
++#define MAX_CPU_CLUSTERS               2
++#ifndef __ARM_AMP__
++#define __ARM_AMP__                    1
++#endif
++#endif
+ #endif /* ! _PEXPERT_ARM_BOARD_CONFIG_H */

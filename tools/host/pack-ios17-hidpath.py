@@ -259,7 +259,8 @@ if os.environ.get('MODEM'):
 # EXTRA_ARGS (fuxi 2026-11-25): boot arguments appended for a diagnostic run (e.g. row=1 plug-in telemetry).
 if os.environ.get('EXTRA_ARGS'):
     args = args + ' ' + os.environ['EXTRA_ARGS']
-    for droppable in ('log-gpu=1', 'unixnu-unmapped=1', 'ml-timeout-lock-panic-scale=40'):   # diagnostics only
+    # fuxi 2026-11-27: sheng-staged-apps=1 (the one-boot sideload staging) goes last, when nothing else frees the room
+    for droppable in ('log-gpu=1', 'unixnu-unmapped=1', 'ml-timeout-lock-panic-scale=40', 'sheng-staged-apps=1'):   # diagnostics only
         if len(args.encode()) > 1000:
             args = ' '.join(a for a in args.split() if a != droppable)
     print('EXTRA_ARGS: boot-args %d bytes' % len(args.encode()))
@@ -300,6 +301,16 @@ if os.environ.get('USBONLY') == '1':
     args = args + ' usb-only-bringup=1'
 if os.environ.get('USBSKIP') == '1':
     args = args + ' usb-skip-bringup=1'
+# USBDIAG=1 (fuxi 2026-11-26, U62): usb=1 usb-only-bringup=1 with the QUD console kept, to see which bringUp stage panics.
+if os.environ.get('USBDIAG') == '1':
+    args = args + (' usb=1 usb-inherit=1' if os.environ.get('USBINHERIT') == '1' else ' usb=1 usb-only-bringup=1')
+    if 'unixnu-unmapped=1' not in args.split(): args += ' unixnu-unmapped=1'
+    # unixnu-unmapped=1 stays (U63e: IOUSBDeviceFamily calls an unpaired original kernel function; with it the call
+    # returns 0 and is logged instead of panicking).
+    for _drop in ('log-gpu=1', 'unixnu-iokit-probe=1', 'ml-timeout-lock-panic-scale=40', 'fuxi-wifi=5', 'sheng-audio=1'):
+        if len(args.encode()) <= 1000:
+            break
+        args = ' '.join(a for a in args.split() if a != _drop)
 if os.environ.get('USB') == '1':
     args = ' '.join(a for a in args.split() if not a.startswith(('qcom-usb-debug=', 'qcom-usb-diag=', 'qcom-usb-ctl='))) + ' usb=1'
 print('boot-args bytes', len(args.encode()))

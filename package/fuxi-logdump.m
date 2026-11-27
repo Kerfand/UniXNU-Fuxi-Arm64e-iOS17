@@ -343,6 +343,8 @@ static void dumpTelephonyPlists(FILE *file)
 
 static void storeDump(FILE *file)
 {
+        if (file) fprintf(file, "# store skipped (not persisted on this port; the live stream replaces it)\n");
+        return;
         Class storeClass = NSClassFromString(@"OSLogStore");
         if (!storeClass) {
             /* OSLogStore lives in the OSLog framework, not in Foundation; without loading it the class is nil. */
@@ -359,6 +361,20 @@ static void storeDump(FILE *file)
         @try {
             store = ((id (*)(Class, SEL, NSInteger, NSError **))objc_msgSend)(
                 storeClass, @selector(storeWithScope:error:), 0, &error);
+            /* fuxi 2026-11-27: the system scope returned nil without an error on this port (D7-D10). iOS opens the
+               device's own store with +localStoreAndReturnError: (entitlement com.apple.logging.local-store); the
+               on-disk store under /private/var/db/diagnostics is the last try. Each path says what it got. */
+            if (!store && [storeClass respondsToSelector:@selector(localStoreAndReturnError:)]) {
+                error = nil;
+                store = ((id (*)(Class, SEL, NSError **))objc_msgSend)(storeClass, @selector(localStoreAndReturnError:), &error);
+                printf("FUXILOG: local store %s %s\n", store ? "ready" : "nil", (error ? error.description : @"").UTF8String);
+            }
+            if (!store) {
+                error = nil;
+                NSURL *url = [NSURL fileURLWithPath:@"/private/var/db/diagnostics"];
+                store = ((id (*)(Class, SEL, NSURL *, NSError **))objc_msgSend)(storeClass, @selector(storeWithURL:error:), url, &error);
+                printf("FUXILOG: diagnostics store %s %s\n", store ? "ready" : "nil", (error ? error.description : @"").UTF8String);
+            }
         } @catch (NSException *exception) {
             if (file) fprintf(file, "# store exception %s\n", exception.reason.UTF8String ?: "?");
             printf("FUXILOG: store exception %s\n", exception.reason.UTF8String ?: "?");
@@ -465,8 +481,179 @@ static void dumpCoreTelephony(FILE *file)
     fflush(file);
 }
 
+
+/* fuxi 2026-11-27: the unified log is not persisted on this port (D11: /private/var/db/diagnostics is incomplete), so the
+ * history cannot be read; the live stream can (what `log stream` uses: LoggingSupport's os_activity_stream). Messages of
+ * CommCenter / ABM / BBUpdater that name the boot path go to /private/var/db/abm.log, which the kernel prints back
+ * (FUXI_ABMJOB, its first 12 KB), so the file is capped below that. Layout as in the public ActivityStreamAPI.h. */
+typedef struct fx_stream_entry {
+    uint32_t type;
+    int32_t pid;
+    uint64_t proc_id;
+    uint64_t unknown16;      /* D14: the 21H16 entry carries one more word here (0); the image UUID pointer follows */
+    const uint8_t *proc_imageuuid;
+    const char *proc_imagepath;
+    uint64_t activity_id;
+    uint64_t parent_id;
+    uint8_t log_message[];   /* struct os_log_message_s */
+} fx_stream_entry;
+typedef bool (^fx_stream_block)(fx_stream_entry *entry, int error);
+static FILE *gAbmLog;
+static size_t gAbmBytes;
+static volatile unsigned gAbmSeen, gAbmKept;   // counted for a debugger, not printed
+static void fuxiLiveStream(void)
+{
+    void *ls = dlopen("/System/Library/PrivateFrameworks/LoggingSupport.framework/LoggingSupport", RTLD_NOW);
+    void *(*for_pid)(pid_t, uint32_t, fx_stream_block) = ls ? (void *(*)(pid_t, uint32_t, fx_stream_block))dlsym(ls, "os_activity_stream_for_pid") : NULL;
+    void (*resume)(void *) = ls ? (void (*)(void *))dlsym(ls, "os_activity_stream_resume") : NULL;
+    char *(*formatted)(void *) = ls ? (char *(*)(void *))dlsym(ls, "os_log_copy_formatted_message") : NULL;
+    gAbmLog = fopen("/private/var/db/abm.log", "w");
+    if (gAbmLog) { fprintf(gAbmLog, "# live stream: LoggingSupport %p for_pid %p resume %p formatted %p\n", ls, (void *)for_pid, (void *)resume, (void *)formatted); fflush(gAbmLog); }
+    printf("FUXILOG: live stream LoggingSupport %d for_pid %d resume %d formatted %d\n", ls != NULL, for_pid != NULL, resume != NULL, formatted != NULL);
+    if (!for_pid || !resume || !formatted || !gAbmLog) return;
+    static const char *const procs[] = {"CommCenter", "abm", "BBUpdater", "bbctl"};
+    /* D15: the broad words filled the 11 KB with CommCenter's state chatter before 150 s; only the boot path now */
+    /* D16: "reset"/"power" matched CommCenter's network-policy chatter; only ABM's boot vocabulary now */
+    /* D22: the baseband booted (Booting -> Booted); what follows is why the QMI clients made at ~196 s got no answers
+       (qmux reopened six times): reset, timeout, SIM and registration vocabulary as well as the boot path */
+    static const char *const words[] = {"ABM", "boot state", "Booting", "Booted", "bootModem", "BBUpdater", "SAHARA", "irmware dead",
+                                        "eset detect", "Reset", "reset baseband", "Soft reset", "Hard reset", "imeout",
+                                        "ASSERT", "not respond", "nresponsive", "crash", "Crash", "SIM", "sim state",
+                                        "UIM", "egistration", "egistered", "Serving", "serving", "kCTSIM", "Ready", "dead",
+                                        "QMI", "qmux", "Qmux", "transport", "Transport", "channel", "operating mode"};
+    static const char *const noise[] = {"Sending NOTIFY", "state_transition", "RegMasks", "cache read failed", "buddy",
+                                        "LocationManager", "emergency", "CCXpcServer", "NWAgent", "initPolicy", "setPolicy",
+                                        "registered for event", "kRadioModuleGetProperty", "Bootstrap",
+                                        "Bootstraping", "Reuse existing QMI client"};
+    void *stream = for_pid(-1, 0x100 | 0x20, ^bool(fx_stream_entry *entry, int error) {
+        if (error || !entry) return true;
+        /* calibration (fuxi 2026-11-27, D13 kept nothing): the first 40 events raw, whatever their type or process */
+        static unsigned raw;
+        if (raw < 0 && gAbmBytes < 11000) {
+            ++raw;
+            const uint64_t *w = (const uint64_t *)(const void *)entry;
+            const char *pp = entry->proc_imagepath;
+            const bool sane = (uintptr_t)pp > 0x100000000ULL && (uintptr_t)pp < 0x400000000ULL;
+            char *msg = (sane && (entry->type == 0x400 || entry->type == 0x480)) ? formatted(entry->log_message) : NULL;
+            const int n = fprintf(gAbmLog, "# raw type 0x%x pid %d w %llx %llx %llx %llx path %.60s msg %.80s\n", entry->type, entry->pid,
+                                  (unsigned long long)w[1], (unsigned long long)w[2], (unsigned long long)w[3], (unsigned long long)w[4],
+                                  sane ? pp : "(not a pointer)", msg ? msg : "-");
+            if (n > 0) gAbmBytes += (size_t)n;
+            if (msg) free(msg);
+            fflush(gAbmLog);
+        }
+        if (entry->type != 0x400 && entry->type != 0x480) return true;
+        const char *path = entry->proc_imagepath;
+        if ((uintptr_t)path < 0x100000000ULL || (uintptr_t)path >= 0x400000000ULL) return true;
+        if (!path) return true;
+        bool ours = false;
+        for (unsigned i = 0; i < sizeof procs / sizeof procs[0] && !ours; ++i) ours = strstr(path, procs[i]) != NULL;
+        if (!ours) return true;
+        ++gAbmSeen;
+        char *text = formatted(entry->log_message);
+        if (!text) return true;
+        bool keep = false;
+        for (unsigned i = 0; i < sizeof words / sizeof words[0] && !keep; ++i) keep = strstr(text, words[i]) != NULL;
+        for (unsigned i = 0; i < sizeof noise / sizeof noise[0] && keep; ++i) keep = strstr(text, noise[i]) == NULL;
+        static FILE *over;
+        static size_t overBytes;
+        if (keep && gAbmBytes >= 11000 && !over) over = fopen("/private/var/tmp/abm-helper.log", "w");
+        if (keep && gAbmBytes >= 11000 && over && overBytes < 11000) {
+            const char *nm = strrchr(path, '/');
+            const int k = fprintf(over, "%s: %.180s\n", nm ? nm + 1 : path, text);
+            if (k > 0) overBytes += (size_t)k;
+            fflush(over);
+        }
+        if (keep && gAbmBytes < 11000) {
+            const char *name = strrchr(path, '/');
+            const int n = fprintf(gAbmLog, "%s: %.180s\n", name ? name + 1 : path, text);
+            if (n > 0) gAbmBytes += (size_t)n;
+            ++gAbmKept;
+            fflush(gAbmLog);
+        }
+        free(text);
+        return true;
+    });
+    if (gAbmLog) { fprintf(gAbmLog, "# stream %p\n", stream); fflush(gAbmLog); }
+    if (stream) resume(stream);
+}
+
+
+/* fuxi 2026-11-28 (D19): with root compatible J121AP the iPhone ABM takes the Mav16 path and stops at "modem boot up
+ * failure [Baseband Firmware Path Not Found]": BootControllerLegacy::prepare stats capabilities::radio::
+ * personalizedFirmwarePath(), /private/preboot/<boot-manifest-hash>/usr/local/standalone/firmware/Baseband/Mav16 (the
+ * strings of libTelephonyCapabilities). The hash comes from /chosen/boot-manifest-hash; the Mav16 bundle the addon unpacks
+ * under owner-apps/firmware is copied there (each step's result printed). */
+static void fuxiPersonalizedFirmware(void)
+{
+    char hash[200] = "";
+    io_registry_entry_t chosen = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/chosen");
+    if (chosen) {
+        CFTypeRef v = IORegistryEntryCreateCFProperty(chosen, CFSTR("boot-manifest-hash"), kCFAllocatorDefault, 0);
+        if (v && CFGetTypeID(v) == CFDataGetTypeID()) {
+            const UInt8 *b = CFDataGetBytePtr((CFDataRef)v);
+            const CFIndex n = CFDataGetLength((CFDataRef)v);
+            for (CFIndex i = 0; i < n && i < 96; ++i) snprintf(hash + 2 * i, 3, "%02X", b[i]);
+        }
+        if (v) CFRelease(v);
+        IOObjectRelease(chosen);
+    }
+    printf("FUXILOG: boot-manifest-hash %s\n", hash[0] ? hash : "(none)");
+    if (!hash[0]) return;
+    char dir[512];
+    snprintf(dir, sizeof dir, "/private/preboot/%s/usr/local/standalone/firmware/Baseband/Mav16", hash);
+    struct stat st;
+    if (stat(dir, &st) == 0) { printf("FUXILOG: personalized firmware path present\n"); return; }
+    makeDirs(dir);
+    const int made = stat(dir, &st);
+    printf("FUXILOG: personalized firmware dir %s (errno %d)\n", made == 0 ? "made" : "NOT made", made == 0 ? 0 : errno);
+    if (made != 0) return;
+    static const char src[] = "/private/var/ngpu/owner-apps/firmware/Baseband/Mav16";
+    NSArray<NSString *> *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@(src) error:nil];
+    unsigned copied = 0;
+    for (NSString *name in files) {
+        char from[600], to[600];
+        snprintf(from, sizeof from, "%s/%s", src, name.UTF8String);
+        snprintf(to, sizeof to, "%s/%s", dir, name.UTF8String);
+        struct stat fs;
+        if (stat(from, &fs) != 0 || !S_ISREG(fs.st_mode)) continue;   /* vinyl/ is a directory: ABM boots from the .mbn files */
+        FILE *in = fopen(from, "rb"), *out = fopen(to, "wb");
+        if (in && out) {
+            char block[65536]; size_t got;
+            while ((got = fread(block, 1, sizeof block, in)) > 0) fwrite(block, 1, got, out);
+            ++copied;
+        }
+        if (in) fclose(in);
+        if (out) fclose(out);
+    }
+    printf("FUXILOG: personalized firmware: %u files copied from %s\n", copied, src);
+}
+
 int main(void)
 {
+    /* fuxi 2026-11-27: stdout is a file launchd keeps on the Data volume and the kernel prints back, so with the data
+       kept the stale lines of an earlier boot read like this boot's; start it empty and mark the boot. */
+    if (ftruncate(1, 0) == 0) (void)lseek(1, 0, SEEK_SET);
+    printf("FUXILOG BOOT: nohelper build, stdout truncated\n");
+    fuxiLiveStream();
+    fuxiPersonalizedFirmware();
+    fflush(stdout);
+    {   /* fuxi 2026-11-27: kern.hv_vmm_present as this process sees it (MobileGestalt's IsVirtualDevice source) */
+        int vmm = -1; size_t len = sizeof vmm;
+        const int rc = sysctlbyname("kern.hv_vmm_present", &vmm, &len, NULL, 0);
+        printf("FUXILOG: kern.hv_vmm_present rc %d value %d\n", rc, vmm);
+        /* fuxi 2026-11-27 (D8): the kernel answers 0 here, yet MobileGestalt still answered IsVirtualDevice 1: a stale
+           MobileGestalt cache from the boots before the VM was hidden (the Data volume is kept). With the kernel hiding
+           the VM, the cache is removed once so the next boot rebuilds it; the answer is then 0 and HasBaseband follows. */
+        static const char cache[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/"
+                                    "Library/Caches/com.apple.MobileGestalt.plist";
+        if (rc == 0 && vmm == 0 && access("/private/var/db/fuxi-mgcache-reset-j121", F_OK) != 0) {
+            (void)close(open("/private/var/db/fuxi-mgcache-reset-j121", O_WRONLY | O_CREAT, 0644));
+            const int gone = unlink(cache);
+            printf("FUXILOG: stale MobileGestalt cache removed %d (errno %d); the next boot rebuilds it\n", gone, gone ? errno : 0);
+        }
+    }
+    fflush(stdout);
     setvbuf(stdout, NULL, _IONBF, 0);
     @autoreleasepool {
         /* The console may not be the line this port captures, so the same text also goes to a file the kernel
@@ -512,31 +699,8 @@ int main(void)
             }
             if (file) fflush(file);
         }
-        /* launchd will not spawn abm-helper here (its log file is never even created), so run it the way launchd
-           would: as _wireless, with its output captured, and its exit status recorded. That separates "the image
-           cannot execute it" from "it runs and decides there is nothing to serve". */
-        {
-            const pid_t child = fork();
-            if (child == 0) {
-                (void)setgid(25);
-                (void)setuid(25);
-                const int fd = open("/private/var/db/abm-helper.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (fd >= 0) { (void)dup2(fd, 1); (void)dup2(fd, 2); }
-                execl("/System/Library/PrivateFrameworks/ABMHelper.framework/Support/abm-helper", "abm-helper", (char *)NULL);
-                _exit(127);
-            }
-            int status = 0;
-            bool reaped = false;
-            for (int i = 0; child > 0 && i < 60; ++i) {
-                if (waitpid(child, &status, WNOHANG) == child) { reaped = true; break; }
-                usleep(500000);
-            }
-            if (child > 0 && !reaped) { (void)kill(child, SIGKILL); (void)waitpid(child, &status, 0); }
-            if (file) fprintf(file, "# abm-helper %s: exit %d signal %d\n", reaped ? "exited" : "killed after 30 s",
-                              WIFEXITED(status) ? WEXITSTATUS(status) : -1, WIFSIGNALED(status) ? WTERMSIG(status) : 0);
-            printf("FUXILOG: abm-helper %s exit %d\n", reaped ? "exited" : "killed", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
-            if (file) fflush(file);
-        }
+        /* fuxi 2026-11-27: no manual abm-helper run (the phone reset at the logo with it once the baseband was
+           visible, D2/D3; without logdump D4 booted) */
         /* _wireless's home: launchd may refuse to spawn the ABM helper for a user whose home is missing, and on
            this port /private/var is the Data volume, not the sealed root that carries the stock directory. */
         {
@@ -546,13 +710,7 @@ int main(void)
             printf("FUXILOG: /private/var/wireless mkdir %d chown %d\n", made, owned);
             if (file) fflush(file);
         }
-        static mach_port_t held[2];
-        static const char *const demand[] = {"com.apple.abm.helper.wireless", "com.apple.abm.helper.root"};
-        for (unsigned i = 0; i < 2; ++i) {
-            const kern_return_t found = bootstrap_look_up(bootstrap_port, demand[i], &held[i]);
-            if (file) fprintf(file, "# demand %s %s\n", demand[i], found == KERN_SUCCESS ? "started" : "absent");
-            printf("FUXILOG: %s %s\n", demand[i], found == KERN_SUCCESS ? "started" : "absent");
-        }
+        /* fuxi 2026-11-27: no demand lookups of the ABM helper jobs either */
         if (file) fflush(file);
         /* CommCenter starts around 20 s and ABM has made its decision well before a minute; a minute and a
            half leaves the retries behind without spending the console too early. */

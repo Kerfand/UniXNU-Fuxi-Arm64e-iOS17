@@ -23,7 +23,7 @@ diff --git a/bsd/kern/hvg_sysctl.c b/bsd/kern/hvg_sysctl.c
 +		static int hide = -1;
 +		if (hide < 0) {
 +			int arg = 0;
-+			hide = PE_parse_boot_argn("fuxi-vmm-hide", &arg, sizeof(arg)) && arg;   /* opt-in: watchdogd starts once the VM is hidden */
++			hide = PE_parse_boot_argn("fuxi-vmm-hide", &arg, sizeof(arg)) ? arg : PE_parse_boot_argn("fuxi-modem", &arg, sizeof(arg));   /* on with the modem (D1: CommCenter reached ABM); watchdogd must then be disabled */
 +		}
 +		if (hide && req->p && req->p != kernproc) {
 +			vmm_present = 0;

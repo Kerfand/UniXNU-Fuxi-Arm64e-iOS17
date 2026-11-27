@@ -1244,7 +1244,15 @@ void publishAndWrapperTest(bool rounds) {
     native_adreno_dram_read32 = dramRead32;
     native_adreno_cached_read32 = cachedRead32;
     native_adreno_line_audit = lineAudit;
-    coherenceProbe(vm);
+    // fuxi 2026-11-27: A1 (Edge scheduler, E/P clusters) came up with io_coherent 0 where S18-S19 had 1, which took the
+    // HOST_CACHED memory types away and Vulkan device creation with them. The probe can fail on a transient (lines written
+    // back early, a migration mid-setup), so it runs up to three times, and every row is printed.
+    for (unsigned run = 0; run < 3; ++run) {
+        memset(native_gpu_coherence, 0, sizeof native_gpu_coherence);
+        coherenceProbe(vm);
+        printf("fuxi gpu coherence run %u: %s\n", run, native_gpu_coherence_row);
+        if (!&native_adreno_io_coherent || native_adreno_io_coherent || native_gpu_coherence_row[2] == 's') break;
+    }
     const IOReturn timer = gTimer.attach(&gTimerIo, NativeAdrenoTimeCp);
     {unsigned wc = 1; PE_parse_boot_argn("sheng-gpu-wc", &wc, sizeof wc); native_adreno_wc_enabled = wc ? 1 : 0;}
     // fuxi 2026-11-25: sheng-gpu-owned-coherent=1 lets the GPU's own BOs take the IO-coherent path (and the driver advertise

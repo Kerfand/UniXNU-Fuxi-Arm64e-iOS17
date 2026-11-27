@@ -636,7 +636,9 @@ static void fuxi_hwdt_start(void) {
   static int started;
   // fuxi 2026-11-26: armed by default. 5 s bit a normal running system after ~2.5 min (a burst of serial logging and
   // Wi-Fi scanning kept the ping thread off a CPU that long), so the default is the 20 s the CI image ran with.
-  unsigned secs = 20;
+  // fuxi 2026-11-27: off by default (user request). The ping thread starving under load looks like a hang to Gunyah, and a
+  // bite sends a running phone to fastboot; the serial logs kept ending 1-2 min into a boot. fuxi-hwdt=<s> arms it again.
+  unsigned secs = 0;
   if (started) return;
   started = 1;
   (void)PE_parse_boot_argn("fuxi-hwdt", &secs, sizeof(secs));

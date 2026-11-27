@@ -132,6 +132,7 @@ static HciScan gHci;
 // fuxi 2026-11-21: the last 8 commands (opcode) and events (code, then for 0x0e/0x0f the opcode answered and the status),
 // for the boot log: bluetoothd stalls on a command whose answer it does not accept (U46).
 static uint32_t gVscFixed;
+static uint32_t gExtScanTx, gExtScanRx; static uint16_t gExtPendingScanParams, gExtPendingScanEnable;   // fuxi 2026-11-27
 static uint16_t gHciCmdRing[8]; static uint32_t gHciEvtRing[8]; static uint32_t gHciCmdAt, gHciEvtAt;
 // One H4 direction: type byte, header, payload (the first 16 payload bytes kept).
 struct H4Parser {uint8_t type, header[4], headerNeed, headerHave; uint32_t remaining, kept; uint8_t payload[16];};
@@ -214,6 +215,7 @@ static void hciLog() {
            gHci.commands, gHci.scanOn, gHci.scanOff, gHci.inquiries, gHci.events, gHci.complete, gHci.status, gHci.hwErrors, gHci.acl,
            gHci.advReports, gHci.extReports, gHci.inquiryResults, gHci.distinct, a[5], a[4], a[3], a[2], a[1], a[0], gHci.lastRssi,
            gHci.lastKind);
+    printf("[bluetooth hci] ext-scan tx %u rx %u\n", gExtScanTx, gExtScanRx);
     printf("[bluetooth hci] vsc-status-fixed %u last cmds", gVscFixed);
     for (uint32_t i = 0; i < 8; ++i) printf(" %04x", gHciCmdRing[(gHciCmdAt + i) & 7]);
     printf(" | last evts (code:opcode/status)");
@@ -268,8 +270,44 @@ static void rxEmit(const uint8_t *b, uint32_t n) {
     hciFeed(false, gHciRx, b, n);
     qbt_transport_receive(b, n);
 }
+static uint8_t legacyType(uint16_t ext) {
+    if (ext & 0x10) {   // legacy PDU
+        switch (ext & 0x1f) {case 0x13: return 0x00; case 0x15: return 0x01; case 0x12: return 0x02; case 0x10: return 0x03;
+                             case 0x1b: case 0x1a: return 0x04; default: return 0x03;}
+    }
+    return (ext & 0x08) ? 0x04 : (ext & 0x01) ? 0x00 : (ext & 0x02) ? 0x02 : 0x03;
+}
 static void rxPacketDone() {
-    const uint8_t *p = gPkt;
+    uint8_t *p = gPkt;
+    // fuxi 2026-11-27: the extended scan commands sent for the legacy ones are answered as the legacy ones
+    if (p[0] == 4 && p[1] == 0x0e && gPktLen >= 7) {
+        const uint16_t op = (uint16_t)(p[4] | p[5] << 8);
+        if (op == 0x2041 && gExtPendingScanParams) {gExtPendingScanParams--; p[4] = 0x0b; gExtScanRx++;}
+        else if (op == 0x2042 && gExtPendingScanEnable) {gExtPendingScanEnable--; p[4] = 0x0c; gExtScanRx++;}
+    }
+    // LE Extended Advertising Report (0x3e/0x0d), first report -> LE Advertising Report (0x3e/0x02)
+    if (p[0] == 4 && p[1] == 0x3e && gPktLen >= 4 && p[3] == 0x0d && p[4] >= 1 && gPktLen >= 5 + 24) {
+        const uint8_t *r = p + 5;
+        uint8_t dlen = r[23];
+        if (5u + 24 + dlen <= gPktLen) {
+            if (dlen > 31) dlen = 31;
+            uint8_t legacy[3 + 2 + 1 + 1 + 6 + 1 + 31 + 1];
+            uint32_t k = 0;
+            legacy[k++] = 4; legacy[k++] = 0x3e; legacy[k++] = 0;   // length below
+            legacy[k++] = 0x02; legacy[k++] = 1;
+            legacy[k++] = legacyType((uint16_t)(r[0] | r[1] << 8));
+            legacy[k++] = r[2];
+            memcpy(legacy + k, r + 3, 6); k += 6;
+            legacy[k++] = dlen;
+            memcpy(legacy + k, r + 24, dlen); k += dlen;
+            legacy[k++] = r[13];   // RSSI
+            legacy[2] = (uint8_t)(k - 3);
+            gExtScanRx++;
+            rxEmit(legacy, k);
+            gPktLen = 0;
+            return;
+        }
+    }
     // H4 event: 04, code, length, then Command Complete parameters: count, opcode low, opcode high, status, ...
     if (p[0] == 4 && p[1] == 0x0e && p[2] >= 4 && (p[5] >> 2) == 0x3f && p[6] == 0x01 && p[2] + 16 <= 255) {
         uint8_t fixed[3 + 255 + 16];
@@ -306,6 +344,36 @@ size_t nativeRx(void *,const uint8_t *bytes,size_t n) {
     }
     rxFlush();
     return n;
+}
+// fuxi 2026-11-27 (B1): bluetoothd scans with the legacy LE commands, and this controller (WCN7851, BTFW.HAMILTON 2.0) answers
+// them with 0x0c Command Disallowed: B1 sent 0x200b 37 000 times in five minutes (bluetoothd at 57% CPU) and never scanned.
+// The legacy scan commands are sent as their extended forms (Core 5.x 7.8.64/7.8.65) and the Command Complete goes back to
+// the daemon with the legacy opcode; LE Set Event Mask gets the extended advertising report bit, and those reports reach the
+// daemon as legacy advertising reports (rxPacketDone). Only whole command packets at the start of a chunk are looked at.
+static size_t txTranslate(const uint8_t *in, size_t n, uint8_t *out, size_t cap) {
+    size_t i = 0, o = 0;
+    while (i < n) {
+        if (in[i] != 1 || i + 4 > n || i + 4 + in[i + 3] > n) break;   // not a whole command packet: the rest passes as it is
+        const uint16_t op = (uint16_t)(in[i + 1] | in[i + 2] << 8);
+        const uint8_t len = in[i + 3];
+        const uint8_t *q = in + i + 4;
+        if (op == 0x200b && len == 7 && o + 4 + 8 <= cap) {
+            // type, interval, window, own address type, filter -> own address type, filter, PHYs (1M), type, interval, window
+            const uint8_t c[12] = {1, 0x41, 0x20, 8, q[5], q[6], 0x01, q[0], q[1], q[2], q[3], q[4]};
+            memcpy(out + o, c, sizeof c); o += sizeof c; gExtPendingScanParams++; gExtScanTx++;
+        } else if (op == 0x200c && len == 2 && o + 4 + 6 <= cap) {
+            // enable, filter duplicates -> enable, filter duplicates, duration 0, period 0
+            const uint8_t c[10] = {1, 0x42, 0x20, 6, q[0], q[1], 0, 0, 0, 0};
+            memcpy(out + o, c, sizeof c); o += sizeof c; gExtPendingScanEnable++; gExtScanTx++;
+        } else if (o + 4 + len <= cap) {
+            memcpy(out + o, in + i, 4 + len);
+            if (op == 0x2001 && len == 8) out[o + 4 + 1] |= 0x10;   // LE event mask bit 12: LE Extended Advertising Report
+            o += 4 + len;
+        } else break;
+        i += 4 + len;
+    }
+    if (i < n && o + (n - i) <= cap) {memcpy(out + o, in + i, n - i); o += n - i;}
+    return o;
 }
 size_t writeUart(void *,const uint8_t *p,size_t n){return qbt_geni_write(&bt.geni,p,n);}
 bool drained(void *){return bt.gated || qbt_geni_drained(&bt.geni);}
@@ -611,7 +679,7 @@ void worker(void *,wait_result_t) {
             if(active!=bt.service){qbt_set_service(bt.core,active);bt.service=active;closeAt=active?0:nowNs(nullptr)+500000000ULL;}
             uint8_t tx[2048];size_t room=qbt_transmit_capacity(bt.core);
             if(room>sizeof(tx))room=sizeof(tx);
-            if(room){uint32_t n=qbt_transport_tx_take(tx,(uint32_t)room);if(n)hciFeed(true,gHciTx,tx,n);if(n && qbt_transmit(bt.core,tx,n))e=-EIO;}
+            if(room>64){uint32_t n=qbt_transport_tx_take(tx,(uint32_t)(room-64));if(n)hciFeed(true,gHciTx,tx,n);uint8_t ext[2048+64];size_t m=n?txTranslate(tx,n,ext,sizeof ext):0;if(m && qbt_transmit(bt.core,ext,m))e=-EIO;}
             qbt_step(bt.core);
             struct qbt_info info;qbt_get_info(bt.core,&info);
             if(info.state==3 || bt.geni.state==QBT_GENI_FAILED || (closeAt && nowNs(nullptr)>=closeAt)) {

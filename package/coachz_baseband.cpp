@@ -1546,6 +1546,16 @@ IOReturn AppleBasebandPCIUserClient::externalMethod(uint32_t selector, IOExterna
   case 0: {   // open
     IOLockLock(bb_lock);
     bb_channel *ch = &bb_ch[fChannel];
+    /* fuxi 2026-11-28 (D24): ABM frees and recreates its PCI transport (stage 2 -> stage 4) without closing the old
+       client; the new open of qmux1 then got kIOReturnExclusiveAccess and CommCenter's QMIControl stalled on every
+       GET_CLIENT_ID ("qmux: message stalled ... msgid=0x22"), so UIM was never reached ("there is no SIM"). The newest
+       open takes the channel over; the previous owner's waiting reads are aborted outside the lock. */
+    void *previous = (ch->owner && ch->owner != this) ? ch->owner : nullptr;
+    if (previous) {
+      static uint32_t told;
+      if (told++ < 16) printf("COACHZ baseband: %s taken over by a new open (the previous client never closed)\n", cbh_published[fChannel]);
+      ch->owner = nullptr;
+    }
     const bool free_channel = !ch->owner || ch->owner == this;
     if (free_channel) {
       ch->owner = this;
@@ -1556,6 +1566,7 @@ IOReturn AppleBasebandPCIUserClient::externalMethod(uint32_t selector, IOExterna
       }
     }
     IOLockUnlock(bb_lock);
+    if (previous) bb_abort_reads(fChannel, previous, kIOReturnAborted);
     return free_channel ? kIOReturnSuccess : kIOReturnExclusiveAccess;
   }
   case 1:     // close
@@ -1853,6 +1864,48 @@ public:
 };
 OSDefineMetaClassAndStructors(AppleIPAppender, IOService)
 
+/* fuxi 2026-11-27 (D9): the iPhone ABM asserts in CPMSModule::initialize ("ABM ASSERT ... fCPMSAgent") when
+ * +[CPMSAgent sharedCPMSAgent] is nil. CPMS.framework looks the service up by class name (IOServiceMatching "ApplePPM"),
+ * reads its CPMSSupported bitfield (bit per PPM client id), opens a user client and registers for interest notifications;
+ * without the service the agent is never made. This board has no power/performance manager, so a stand-in answers every
+ * call with success and zeros (no budget limits). Each selector's shape is printed once. */
+class ApplePPMUserClient : public IOUserClient {
+  OSDeclareDefaultStructors(ApplePPMUserClient)
+public:
+  IOReturn clientClose() override
+  {
+    terminate();
+    return kIOReturnSuccess;
+  }
+  IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args, IOExternalMethodDispatch *, OSObject *, void *) override
+  {
+    if (!args) return kIOReturnBadArgument;
+    static uint32_t seen;
+    if (selector < 32 && !(__atomic_fetch_or(&seen, 1u << selector, __ATOMIC_RELAXED) & (1u << selector)))
+      printf("COACHZ ppm: selector %u scalar-in %u scalar-out %u struct-in %llu struct-out %llu, answered with zeros\n",
+        selector, args->scalarInputCount, args->scalarOutputCount,
+        static_cast<unsigned long long>(args->structureInputSize), static_cast<unsigned long long>(args->structureOutputSize));
+    for (uint32_t i = 0; i < args->scalarOutputCount; i++) args->scalarOutput[i] = 0;
+    if (args->structureOutput && args->structureOutputSize) bzero(args->structureOutput, args->structureOutputSize);
+    if (args->structureOutputDescriptor) args->structureOutputDescriptorSize = 0;
+    return kIOReturnSuccess;
+  }
+};
+OSDefineMetaClassAndStructors(ApplePPMUserClient, IOUserClient)
+
+class ApplePPM : public IOService {
+  OSDeclareDefaultStructors(ApplePPM)
+public:
+  IOReturn newUserClient(task_t t, void *s, UInt32 type, OSDictionary *p, IOUserClient **out) override
+  {
+    static uint32_t seen;
+    bb_note_open("ApplePPM", type, &seen);
+    return bb_open<ApplePPMUserClient>(this, t, s, type, p, out);
+  }
+  IOReturn newUserClient(task_t t, void *s, UInt32 type, IOUserClient **out) override { return newUserClient(t, s, type, nullptr, out); }
+};
+OSDefineMetaClassAndStructors(ApplePPM, IOService)
+
 // libPCITransport's pci::event::PDPListener matches the base class, ApplePDPHelper the leaf and AppleBasebandPCIPDPManager.
 class AppleBasebandPCIPDPManagerBase : public IOService {
   OSDeclareDefaultStructors(AppleBasebandPCIPDPManagerBase)
@@ -1934,6 +1987,14 @@ extern "C" void coachz_baseband_configure(int (*send)(uint32_t, uint32_t, uint32
   for (uint32_t c = 0; c < CBH_PUBLISHED; c++) made += provider && bb_publish<AppleBasebandPCIInterface>(provider, c);
   made += provider && bb_publish<AppleBasebandPCIMAVPDPManager>(provider);
   made += provider && bb_publish<AppleIPAppender>(provider);
+  if (ApplePPM *ppm = provider ? OSTypeAlloc(ApplePPM) : nullptr) {   // fuxi 2026-11-27: CPMS stand-in (see ApplePPM)
+    if (ppm->init()) {
+      ppm->setProperty("CPMSSupported", 0xffffffffULL, 32);
+      if (ppm->attach(provider) && ppm->start(provider)) { ppm->registerService(); printf("COACHZ ppm: ApplePPM published, CPMSSupported 0xffffffff\n"); }
+      else ppm->detach(provider);
+    }
+    ppm->release();
+  }
   bb_published = 1;
   /* The third state: the kernel side is in the registry, so a client can find it by name and open it. */
   printf("FUXI_STAGE 3/4 ioregistry: AppleBaseband, AppleBasebandPCIControl and %u channel ports are registered\n",
@@ -2085,6 +2146,28 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
       printf("COACHZ nas-answer: msg 0x%x cid %u len %u (%u)\n", m, (unsigned)r.cid, size, nas_answers);
     }
   }
+  /* fuxi 2026-11-28 (D27): the slot status the bridge itself asks for never carried the ICCID in the D26 layout, but
+     CommCenter's own card status answers (UIM 0x2f) do: TLV 0x17 { u8 2, u8 10, EF_ICCID bytes, ATR }. Slot one's
+     ICCID is taken from the first one that passes the host by, and the activation indication goes out again. */
+  if (r.kind == CBQ_TO_HOST && r.channel != CBQ_INTERNAL && r.service == CBP_SVC_UIM && !bb_iccid_known && size >= 7u) {
+    const uint8_t *sdu = static_cast<const uint8_t *>(body);
+    if ((uint32_t)(sdu[3] | sdu[4] << 8) == 0x2fu) {
+      uint32_t l17 = 0;
+      const uint8_t *v17 = cbd_find(sdu, size, 0x17, &l17);
+      uint8_t value[CBD_ICCID_BYTES];
+      if (v17 && l17 >= 2u + CBD_ICCID_BYTES && v17[1] == CBD_ICCID_BYTES &&
+          cbd_iccid_from_ef(v17 + 2, CBD_ICCID_BYTES, value)) {
+        memcpy(bb_iccid, value, CBD_ICCID_BYTES);
+        bb_iccid_known = 1;
+        printf("COACHZ baseband: slot one ICCID taken from the card status 0x2f, activation indication %s\n",
+               bb_act_known ? "sent again with it" : "waits for registration");
+        bb_activation_indicate();
+      } else {
+        static uint32_t miss;
+        if (miss++ < 4u) printf("COACHZ baseband: card status 0x2f without a usable ICCID (tlv 0x17 %u bytes)\n", l17);
+      }
+    }
+  }
   if (r.kind == CBQ_TO_HOST && r.channel == CBQ_INTERNAL) {
     bb_trace("int-rx", 0, r.service, r.cid, static_cast<const uint8_t *>(body), size);
     if (bb_ssctl_slot >= 0 && dst_port == CBQ_PORT_BASE + (uint32_t)bb_ssctl_slot &&
@@ -2105,6 +2188,24 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
       bb_uim.tlv_count = 0;
       const int read = cbp_read_answer(&bb_uim, sdu, size);
       if (read) { bb_uim.answered = 1; bb_uim_log(sdu, size); }
+      /* fuxi 2026-11-28 (D25): CommCenter took the card for absent ("Not enough SIMs (0)", "there is no SIM") although
+         the USIM application is READY: its activation indication carries slot one's SIM only with the ICCID (TLV 0x42),
+         and the bridge learnt the ICCID only from CommCenter's own EF reads, which CommCenter never makes without a
+         SIM. The slot status answer (0x47) already names it: TLV 0x17 { u8 slots, then per slot u8 length, ICCID }, the
+         EF_ICCID bytes, so slot one's ICCID is taken from there and the indication goes out again. */
+      if (read && !bb_iccid_known) {
+        uint32_t l17 = 0;
+        const uint8_t *v17 = cbd_find(sdu, size, 0x17, &l17);
+        uint8_t value[CBD_ICCID_BYTES];
+        if (v17 && l17 >= 2u + CBD_ICCID_BYTES && v17[0] >= 1u && v17[1] == CBD_ICCID_BYTES &&
+            cbd_iccid_from_ef(v17 + 2, CBD_ICCID_BYTES, value)) {
+          memcpy(bb_iccid, value, CBD_ICCID_BYTES);
+          bb_iccid_known = 1;
+          printf("COACHZ baseband: slot one ICCID taken from the slot status, activation indication %s\n",
+                 bb_act_known ? "sent again with it" : "waits for registration");
+          bb_activation_indicate();
+        }
+      }
     } else if (bb_dms_slot >= 0 && dst_port == CBQ_PORT_BASE + (uint32_t)bb_dms_slot && bb_lpm_answer(dst_port, static_cast<const uint8_t *>(body), size)) {
       /* The low-power handshake above owns this client while it runs. */
     } else if (bb_dms_slot >= 0 && dst_port == CBQ_PORT_BASE + (uint32_t)bb_dms_slot &&

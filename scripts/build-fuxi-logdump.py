@@ -30,6 +30,7 @@ entitlements.write_bytes(plistlib.dumps({
     "com.apple.private.logging.admin": True,
     "com.apple.private.logging.diagnostic": True,
     "com.apple.private.logging.stream": True,
+    "com.apple.logging.local-store": True,
 }))
 binary = out / "fuxi-logdump"
 subprocess.run(["xcrun", "clang", "-target", target, "-isysroot", ios, "-O2", "-g0", "-Wall", "-Wextra", "-Werror",

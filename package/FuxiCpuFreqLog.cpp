@@ -191,6 +191,34 @@ void cpuRow() {
     IOLog("%s\n", row);
 }
 
+// fuxi 2026-11-27 (big.LITTLE allocation): how busy each CPU was over the last window, from PROCESSOR_CPU_LOAD_INFO ticks,
+// with the E cluster (cpu0-2, A510) and P cluster (cpu3-7) averages, so the logs show where the Edge scheduler puts the work.
+extern "C" processor_t cpu_to_processor(int);
+extern "C" void fuxi_kernel_thread_top(char *row, size_t size);   // zz-fuxi-ktop.patch   // Private.exports; processor_info comes from <mach/mach_types> (Unsupported)
+void clusterRow() {
+    static uint32_t last[8][4];
+    uint32_t busy[8] = {}, all[8] = {};
+    for (int c = 0; c < 8; ++c) {
+        processor_t pr = cpu_to_processor(c);
+        uint32_t ticks[4] = {}; mach_msg_type_number_t count = 4; host_t h = nullptr;
+        if (!pr || processor_info(pr, PROCESSOR_CPU_LOAD_INFO, &h, reinterpret_cast<processor_info_t>(ticks), &count) != KERN_SUCCESS) continue;
+        uint32_t d[4];
+        for (int k = 0; k < 4; ++k) {d[k] = ticks[k] - last[c][k]; last[c][k] = ticks[k];}
+        busy[c] = d[0] + d[1] + d[3]; all[c] = busy[c] + d[2];   // user + system + nice, idle
+    }
+    char row[200]; size_t n = snprintf(row, sizeof row, "fuxi cpu busy:");
+    uint64_t eb = 0, ea = 0, pb = 0, pa = 0;
+    for (int c = 0; c < 8; ++c) {
+        if (n < sizeof row) n += snprintf(row + n, sizeof row - n, " %d:%u", c, all[c] ? unsigned(busy[c] * 100ull / all[c]) : 0u);
+        (c < 3 ? eb : pb) += busy[c]; (c < 3 ? ea : pa) += all[c];
+    }
+    if (n < sizeof row) snprintf(row + n, sizeof row - n, " E %llu%% P %llu%%", ea ? eb * 100 / ea : 0ull, pa ? pb * 100 / pa : 0ull);
+    IOLog("%s\n", row);
+    char top[240]; top[0] = 0;
+    fuxi_kernel_thread_top(top, sizeof top);
+    if (top[0]) IOLog("%s\n", top);
+}
+
 // fuxi probe (2026-11-13, black screen after the power button): what the panel is shown. The DPU's VIG 0 / VIG 1 source address
 // (+0x14) and stride (+0x24) in the MDP block (0xae01000, as NativeLegacyDisplay flips them), and 16 x 16 samples of the memory VIG 0
 // scans (identity-mapped, as the boot memory 0xb8000000 is): how many are not black and a checksum, so a frozen or black picture shows
@@ -242,7 +270,7 @@ void logThread(void *, wait_result_t) {
             strlcpy(last, native_cpufreq_row, sizeof last);
             IOLog("fuxi cpufreq: %s\n", last);
         }
-        if (round >= 45 || round % 5 == 4) {gpuRow(lastGpu, sizeof lastGpu); frameRow(); cpuRow(); fbRow();}
+        if (round >= 45 || round % 5 == 4) {gpuRow(lastGpu, sizeof lastGpu); frameRow(); cpuRow(); clusterRow(); fbRow();}
         IOSleep(round < 45 ? 2000 : 10000);
     }
 }

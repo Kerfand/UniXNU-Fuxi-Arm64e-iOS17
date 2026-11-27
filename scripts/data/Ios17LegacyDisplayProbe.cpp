@@ -262,7 +262,6 @@ extern "C" void native_touch_probe(void);
 extern "C" void fuxi_buttons_probe(void);
 extern "C" void sheng_bluetooth_probe(void);   // FuxiBluetooth.cpp (QcaBluetooth, fuxi 2026-11-15)
 extern "C" void fuxi_wifi_probe(void);        // fuxi-wifi=1: read-only look at the WCN7850 path
-extern "C" void sheng_battery_probe(void);    // sheng-adsp=2: the battery power source (BatteryProbe.cpp), power.md section 4
 extern "C" void sheng_audio_probe(void);      // sheng-audio=N: speakers, microphone, audio service (AudioProbe.cpp)
 
 // --- QcomDwc3 native Apple USB device stack (usb=1) ---
@@ -305,8 +304,7 @@ static void fuxi_usb_probe(void) {
     if (kernel_thread_start(fuxi_usb_worker, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 }
 
-extern "C" void fuxi_sensor_probe(void);
-extern "C" void native_fuxi_modem_probe(void);   // fuxi 2026-11-26: ljhhkx529 FuxiModemProbe       // fuxi-modem=1/2: the modem DSP (ModemProbe.cpp), baseband phase 1 (re-added 2026-11-24)
+extern "C" void fuxi_modem_probe(void);       // fuxi-modem=1/2: the modem DSP (ModemProbe.cpp), baseband phase 1
 extern "C" void sheng_adsp_probe(void);       // sheng-adsp=1/2: the audio DSP (AdspProbe.cpp), power.md section 3
 extern "C" void fuxi_cpufreq_start(void);     // sheng-cpufreq=N: CPU/L3 frequency votes (CpuFreqProbe.cpp, FuxiCpuFreqLog.cpp)
 extern "C" void fuxi_wifi_link_probe(void);   // fuxi-wifi=2/3/5: power, PCIe0 link; 5 runs Ath12kWifi (FuxiWifiNw21)
@@ -322,10 +320,8 @@ void native_legacy_display_late_probe(void)
 	native_touch_probe();
 	fuxi_cpufreq_start();
 	sheng_adsp_probe();
-	fuxi_sensor_probe();
-	native_fuxi_modem_probe();
+	fuxi_modem_probe();
 	sheng_audio_probe();
-	sheng_battery_probe();
 	fuxi_buttons_probe();
 	sheng_bluetooth_probe();
 	fuxi_wifi_probe();

@@ -44,8 +44,7 @@ if [ -z "${UNIXNU_PATCH_LIST:-}" ]; then
 # zz-sideload-apps-mount.patch (fuxi 2026-11-21) adds lines right after the zaudio patch's /usr/sbin mount: it unwinds first.
 # zzd-sideload-addon-chunks.patch (fuxi 2026-11-21, sideloading step 1) edits inside the addon install loop that
 # zzyb-native-cryptex-os-view.patch closes and zzy-native-gpu-addon-mount.patch adds: it unwinds before both.
-# zz-xpc-manifest-mount.patch (fuxi 2026-11-26) adds lines right after the sideload mount: it unwinds first of all.
-for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/zz-xpc-manifest-mount.patch" "$ROOT/patches/xnu-10063-arm64e/zzd-sideload-addon-chunks.patch" "$ROOT/patches/xnu-10063-arm64e/zz-sideload-apps-mount.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-zaudio-hal-mount.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-wallpaper-iphone.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-job-policy.patch" "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
+for LATE_PATCH in "$ROOT/patches/xnu-10063-arm64e/zzd-sideload-addon-chunks.patch" "$ROOT/patches/xnu-10063-arm64e/zz-sideload-apps-mount.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-zaudio-hal-mount.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-wallpaper-iphone.patch" "$ROOT/patches/xnu-10063-arm64e/ios17-job-policy.patch" "$ROOT/patches/xnu/zzzc-boot-log.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
     "$ROOT/patches/xnu/zzyb-native-cryptex-os-view.patch" \
     "$ROOT/patches/xnu/zzy-staged-system-apps.patch" "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch" \
     "$ROOT/patches/xnu/zzyc-owner-skip-launch-constraints.patch"; do

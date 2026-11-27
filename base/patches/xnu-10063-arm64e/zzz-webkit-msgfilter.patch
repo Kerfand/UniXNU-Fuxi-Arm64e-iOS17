@@ -1,0 +1,48 @@
+fuxi 2026-11-27: log every Mach message filter refusal; let WebKit processes through instead of killing them.
+
+diff --git a/osfmk/ipc/ipc_policy.c b/osfmk/ipc/ipc_policy.c
+--- a/osfmk/ipc/ipc_policy.c	2026-11-27 18:09:38.303752093 +0800
++++ b/osfmk/ipc/ipc_policy.c	2026-11-27 18:09:38.317027193 +0800
+@@ -530,6 +530,7 @@
+ 	mach_msg_id_t msg_id = hdr->msgh_id;
+ 	ipc_service_port_label_t label = NULL;
+ 	void *sblabel = NULL;
++	const char *fuxi_service = NULL;   /* zzz-webkit-msgfilter.patch */
+ 
+ 	if (!ip_enforce_msg_filtering(remote_port)) {
+ 		return MACH_MSG_SUCCESS;
+@@ -541,6 +542,9 @@
+ 	} else if (remote_port->ip_service_port) {
+ 		label   = remote_port->ip_splabel;
+ 		sblabel = label->ispl_sblabel;
++#if CONFIG_SERVICE_PORT_INFO
++		fuxi_service = label->ispl_service_name;
++#endif
+ 
+ 		/*
+ 		 * Mask the top byte for messages sent to launchd's bootstrap port.
+@@ -570,6 +574,24 @@
+ 	return MACH_MSG_SUCCESS;
+ 
+ filtered_msg:
++	/*
++	 * zzz-webkit-msgfilter.patch (fuxi 2026-11-27): Safari's pages stayed one solid colour because every WebContent process was
++	 * killed at start with EXC_GUARD MSG_FILTERED (B1: eight kills in a row, reason ns 23 code 0x2000008...): its sandbox's
++	 * message filter refused a message, which on Apple hardware goes to a service this board answers differently. Every
++	 * refusal is logged (process, message id, service); a WebKit process's message is let through instead of killing it.
++	 */
++	{
++		static uint32_t fuxi_filtered;
++		const char *fuxi_name = proc_name_address(current_proc());
++		const bool fuxi_webkit = fuxi_name && !strncmp(fuxi_name, "com.apple.WebKi", 15);
++		if (os_atomic_inc_orig(&fuxi_filtered, relaxed) < 200) {
++			printf("fuxi msgfilter: %s[%d] id %#x (%#x) to %s%s\n", fuxi_name ? fuxi_name : "?", proc_pid(current_proc()),
++			    hdr->msgh_id, msg_id, fuxi_service ? fuxi_service : "(no service name)", fuxi_webkit ? ", let through" : "");
++		}
++		if (fuxi_webkit) {
++			return MACH_MSG_SUCCESS;
++		}
++	}
+ 	if ((opts & MACH64_POLICY_FILTER_NON_FATAL) == 0) {
+ 		mach_port_name_t dest_name = CAST_MACH_PORT_TO_NAME(hdr->msgh_remote_port);
+ 

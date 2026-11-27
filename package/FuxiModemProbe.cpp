@@ -1098,24 +1098,19 @@ uint32_t waitEvents(uint32_t ms)
 {
     uint32_t bits = __atomic_exchange_n(&gOwner.pending, 0, __ATOMIC_ACQ_REL);
     if (bits) return bits;
-    if (!assert_wait_timeout(reinterpret_cast<event_t>(&gOwner.pending), THREAD_UNINT, ms, kMillisecondScale)) {
-        /* The wait timed out with nothing to report. The wait is taken off the thread here, so the
-         * caller sees the timeout instead of blocking forever: a step that waits for the always-on
-         * processor or for the modem's doorbells has to be able to give up and report. */
-        clear_wait(current_thread(), THREAD_TIMED_OUT);
-        return 0;
+    /* fuxi 2026-11-27: the old body asserted the wait and cleared it without ever blocking, so the thread spun:
+     * fuxi-modem held one E core at 100% for the whole boot (zz-fuxi-ktop). The wait is asserted first, the bits are
+     * looked at again (a doorbell between the first look and the assert still wakes the event, and one before it is
+     * seen here), and only then does the thread block, until the doorbell or the timeout. */
+    if (assert_wait_timeout(reinterpret_cast<event_t>(&gOwner.pending), THREAD_UNINT, ms, kMillisecondScale) == THREAD_WAITING) {
+        bits = __atomic_exchange_n(&gOwner.pending, 0, __ATOMIC_ACQ_REL);
+        if (bits) {
+            clear_wait(current_thread(), THREAD_AWAKENED);
+            return bits;
+        }
+        (void)thread_block(THREAD_CONTINUE_NULL);
     }
-    bits = __atomic_exchange_n(&gOwner.pending, 0, __ATOMIC_ACQ_REL);
-    if (bits) {
-        clear_wait(current_thread(), THREAD_AWAKENED);
-        return bits;
-    }
-    /* The wait was woken but the bits were already taken, so there is nothing to report. Blocking here
-     * without a timeout would strand the thread: the doorbell that woke it has already been accounted for,
-     * and no one else would wake it again. The caller treats a timeout as "nothing happened", so the
-     * thread returns and the caller polls again. */
-    clear_wait(current_thread(), THREAD_AWAKENED);
-    return 0;
+    return __atomic_exchange_n(&gOwner.pending, 0, __ATOMIC_ACQ_REL);
 }
 
 void serviceEvents(uint32_t bits);

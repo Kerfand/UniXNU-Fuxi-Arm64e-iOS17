@@ -1,0 +1,45 @@
+fuxi 2026-11-27: without CLPC, thread-group buckets prefer the P cluster (background stays on E).
+
+diff --git a/osfmk/kern/sched_clutch.c b/osfmk/kern/sched_clutch.c
+--- a/osfmk/kern/sched_clutch.c	2026-11-27 06:17:08.771186174 +0800
++++ b/osfmk/kern/sched_clutch.c	2026-11-27 06:17:08.791772772 +0800
+@@ -1117,6 +1117,27 @@
+  *
+  * Initializer for clutch bucket groups.
+  */
++#if CONFIG_SCHED_EDGE
++/*
++ * zz-amp-pcluster.patch (fuxi 2026-11-27): the cluster a new thread group bucket prefers. On Apple SoCs CLPC moves
++ * foreground groups to the P cluster right away; this board has no CLPC, so every group kept pset0 (the boot cluster:
++ * cpu0-2, the A510 E cores) and the P cores only got spill-over. Background buckets keep the E cluster.
++ */
++static uint32_t
++fuxi_edge_default_cluster(sched_bucket_t bucket)
++{
++	if (bucket != TH_BUCKET_SHARE_BG) {
++		for (uint32_t i = 0; i < ml_get_cluster_count(); i++) {
++			processor_set_t pset = pset_array[i];
++			if (pset && pset->pset_type == CLUSTER_TYPE_P) {
++				return pset->pset_cluster_id;
++			}
++		}
++	}
++	return pset0.pset_cluster_id;
++}
++#endif /* CONFIG_SCHED_EDGE */
++
+ static void
+ sched_clutch_bucket_group_init(
+ 	sched_clutch_bucket_group_t clutch_bucket_group,
+@@ -1135,7 +1156,11 @@
+ 
+ 	os_atomic_store(&clutch_bucket_group->scbg_timeshare_tick, 0, relaxed);
+ 	os_atomic_store(&clutch_bucket_group->scbg_pri_shift, INT8_MAX, relaxed);
++#if CONFIG_SCHED_EDGE
++	os_atomic_store(&clutch_bucket_group->scbg_preferred_cluster, fuxi_edge_default_cluster(bucket), relaxed);
++#else
+ 	os_atomic_store(&clutch_bucket_group->scbg_preferred_cluster, pset0.pset_cluster_id, relaxed);
++#endif
+ 	/*
+ 	 * All thread groups should be initialized to be interactive; this allows the newly launched
+ 	 * thread groups to fairly compete with already running thread groups.

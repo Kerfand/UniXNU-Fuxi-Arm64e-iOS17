@@ -193,7 +193,9 @@ def main():
         # --baseband (fuxi 2026-11-26): the real D73 hardware name first. MobileGestalt's HWModelStr is the first entry, and
         # libTelephonyUtil keys HasBaseband / the radio module on it (S19a: xiaomi,sheng gave HasBaseband 0, so ABM never ran;
         # ljhhkx529 c47b72b does the same with J121AP). The board's own strings stay after it.
-        ('compatible', (b'D73AP\0iPhone15,2\0AppleARM\0' if args.baseband else b'') + b'xiaomi,sheng\0qcom,sm8550\0'),
+        # fuxi 2026-11-28 (D17): D73 made CommCenter pick personality kMav20 and ABM declared the Mav16 firmware dead after
+        # the power cycle. D53g (iPhone 12) is a Mav16 product, the chip this bridge and firmware are for.
+        ('compatible', (b'J121AP\0iPhone15,2\0AppleARM\0' if args.baseband else b'') + b'xiaomi,sheng\0qcom,sm8550\0'),
         ('#address-cells', struct.pack('<I', 2)),
         ('#size-cells', struct.pack('<I', 2)),
     ], [
@@ -254,7 +256,7 @@ def main():
                              ('home-button-type', struct.pack('<I', 2))])] if identity else [] ),
         node('product', [('product-name', identity['name'].encode() + b'\0' if identity else b'Xiaomi Pad 6S Pro 12.4\0'),
                          # MobileGestalt HWModelStr (fuxi 2026-11-26): the D73 name with --baseband
-                         ('model', b'D73AP\0' if args.baseband else b'xiaomi,sheng\0'),
+                         ('model', b'J121AP\0' if args.baseband else b'xiaomi,sheng\0'),
                          *( [('product-description', identity['name'].encode() + b'\0'),
                              ('artwork-device-idiom', identity['idiom'].encode() + b'\0'),
                              ('artwork-device-subtype', struct.pack('<I', identity['subtype'])),

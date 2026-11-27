@@ -1,0 +1,69 @@
+fuxi 2026-11-27: the heaviest kernel_task threads per window, for the kernel_task busy loop.
+
+diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
+--- a/osfmk/kern/thread.c	2026-11-27 17:20:49.051725970 +0800
++++ b/osfmk/kern/thread.c	2026-11-27 17:20:49.061940466 +0800
+@@ -4374,3 +4374,63 @@
+ 	thread->t_dtrace_flags |= TH_DTRACE_EXECSUCCESS;
+ }
+ #endif /* CONFIG_DTRACE */
++
++/*
++ * zz-fuxi-ktop.patch (fuxi 2026-11-27): kernel_task kept about one CPU busy (cpu1 at 65-80% while idle). The heaviest kernel
++ * threads of the last window: tid, name, last CPU, percent of one CPU, and the unslid continuation (0 = not blocked with one).
++ */
++extern void fuxi_kernel_thread_top(char *row, size_t size);
++void
++fuxi_kernel_thread_top(char *row, size_t size)
++{
++	enum { kSlots = 384 };
++	static struct { uint64_t tid, last, delta; char name[16]; int cpu; uint64_t cont; } *slots;
++	static uint64_t last_t;
++	if (!slots) {
++		slots = kalloc_data(sizeof(*slots) * kSlots, Z_WAITOK | Z_ZERO);
++		if (!slots) {
++			return;
++		}
++	}
++	const uint64_t now_t = mach_absolute_time();
++	for (int i = 0; i < kSlots; i++) {
++		slots[i].delta = 0;
++	}
++	thread_t th;
++	task_lock(kernel_task);
++	queue_iterate(&kernel_task->threads, th, thread_t, task_threads) {
++		const uint64_t tid = thread_tid(th), now = recount_thread_time_mach(th);
++		int at = -1, free_at = -1;
++		for (int i = 0; i < kSlots; i++) {
++			if (slots[i].tid == tid) { at = i; break; }
++			if (free_at < 0 && !slots[i].tid) { free_at = i; }
++		}
++		if (at < 0) {
++			if (free_at < 0) { continue; }
++			at = free_at; slots[at].tid = tid; slots[at].last = now;
++		}
++		slots[at].delta = now >= slots[at].last ? now - slots[at].last : 0;
++		slots[at].last = now;
++		slots[at].cpu = th->last_processor ? th->last_processor->cpu_id : -1;
++		slots[at].cont = VM_KERNEL_UNSLIDE((vm_offset_t)th->continuation);
++		slots[at].name[0] = 0;
++		{ char nm[MAXTHREADNAMESIZE] = ""; thread_get_thread_name(th, nm); strlcpy(slots[at].name, nm, sizeof slots[at].name); }
++	}
++	task_unlock(kernel_task);
++	const uint64_t window = last_t ? now_t - last_t : 0;
++	last_t = now_t;
++	size_t n = snprintf(row, size, "fuxi ktop:");
++	if (!window) { return; }
++	for (int k = 0; k < 5; k++) {
++		int best = -1;
++		for (int i = 0; i < kSlots; i++) {
++			if (slots[i].delta && (best < 0 || slots[i].delta > slots[best].delta)) { best = i; }
++		}
++		if (best < 0) { break; }
++		if (n < size) {
++			n += snprintf(row + n, size - n, " %llx/%s/c%d/%llu%%/%llx", slots[best].tid, slots[best].name, slots[best].cpu,
++			    slots[best].delta * 100 / window, slots[best].cont);
++		}
++		slots[best].delta = 0;
++	}
++}

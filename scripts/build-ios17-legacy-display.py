@@ -727,8 +727,7 @@ def demote_const(obj):
     out = OUT / (obj.stem + '.data.o')
     out.write_bytes(bytes(data))
     return out
-# fuxi 2026-11-26: ath12k_qmi too (3 KB), room for the baseband bridge's kalloc_type views
-wifi_module_objs = [demote_const(o) if o.name in ('ath12k_wmi.o', 'ath12k_qmi.o') else o for o in wifi_module_objs]
+wifi_module_objs = [demote_const(o) if o.name == 'ath12k_wmi.o' else o for o in wifi_module_objs]
 wifi_objs += wifi_module_objs
 print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_objs) - len(wifi_module_objs)} board objects')
 
@@ -736,29 +735,10 @@ print(f'wifi: legacy runtime, {len(wifi_module_objs)} module objects, {len(wifi_
 # UniXNU-sheng's ADSP stack as fuxi has it (kits/sheng/AdspProbe.cpp: fuxi's 0x6080000 carveout, firmware from modem_a only, the
 # "fuxi adsp:" log rows; FuxiAdspFirmware.cpp: the FAT half of AdspFirmware.c). The protocol libraries are plain C, compiled like
 # QcomRpmh.c (osfmk startup.c's command); the probe and the firmware reader take the probe's C++ command.
-
-# fuxi 2026-11-26: the modem port's relocated constant tables (__DATA,__const, 0x230 bytes) put the kernel's __DATA_CONST 0x70 bytes
-# past a page, and the fileset's __LASTDATA_CONST then met the retained kext data. Those objects keep their tables in __DATA,__data
-# (writable, which they do not need to be), where __DATA has the room.
-FUXI_MODEM_OBJECTS = {'FuxiModemProbe', 'FuxiModemRmtfs', 'FuxiModemTftp', 'ModemGlink', 'modem_qrtr', 'fuxi_modem', 'fuxi_ipa',
-                      'FuxiModemFirmware', 'FuxiRpmhCorner', 'FuxiModemStubs', 'coachz_baseband'}
-def fuxi_modem_const_to_data(stem, obj):
-    if stem in FUXI_MODEM_OBJECTS:
-        # Apple ld64 renames Mach-O sections natively (llvm-objcopy reads the comma in "__DATA,__const" as a flag list).
-        tmp = Path(str(obj) + '.r.o')
-        run(['/home/xiaomi/unixnu-linux/CommandLineTools/usr/bin/ld', '-r', '-arch', 'arm64e',
-             '-rename_section', '__DATA', '__const', '__DATA', '__data', str(obj), '-o', str(tmp)])
-        tmp.replace(obj)
 adsp_objs = []
 for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmware.cpp',
             # fuxi 2026-11-18: the modem DSP (fuxi-modem=1/2), baseband phase 1
-            ROOT / 'kits/sheng/QcomDwc3.cpp',
-            # The entry that reaches it: a static-archive member nothing references is dropped by the linker.
-            ROOT / 'kits/sheng/UsbProbe.cpp',
-            ROOT / 'kits/sheng/FuxiSensorProbe.cpp',
-            # fuxi 2026-11-26: ljhhkx529's modem bring-up (PAS, RMTFS, TFTP) in place of ModemProbe.cpp
-            ROOT / 'kits/sheng/FuxiModemProbe.cpp', ROOT / 'kits/sheng/FuxiModemRmtfs.cpp', ROOT / 'kits/sheng/FuxiModemTftp.cpp',
-            ROOT / 'kits/sheng/coachz_baseband.cpp',   # fuxi 2026-11-26: baseband stage 3, the CommCenter bridge
+            ROOT / 'kits/sheng/ModemProbe.cpp',
             # the speaker/microphone path and the audio service (sheng-audio): AudioProbe.cpp on fuxi's CS35L41
             ROOT / 'kits/sheng/AudioProbe.cpp', ROOT / 'kits/sheng/ShengAudioService.cpp',
             # the battery (power.md section 4): PMIC GLINK battery manager on the ADSP, an IOPMPowerSource for powerd
@@ -766,20 +746,10 @@ for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmwa
     obj = OUT / (src.stem + '.ios17.o')
     subprocess.run([str(src) if a == str(probe_src) else str(obj) if a == str(probe_obj) else a for a in cmd] + touch_includes,
                    cwd=record['directory'], check=True)
-    fuxi_modem_const_to_data(src.stem, obj)
     if src.stem == 'ShengBattery':
         # its metaclass registers late (BatteryProbe.cpp calls __GLOBAL__sub_I_ShengBattery.cpp between pre/postModLoad)
         late_obj = OUT / 'ShengBattery.late.o'
         run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_ShengBattery.cpp', obj, late_obj])
-        obj = late_obj
-    if src.stem == 'coachz_baseband':
-        # its metaclasses register late (FuxiModemProbe.cpp calls __GLOBAL__sub_I_coachz_baseband.cpp between pre/postModLoad)
-        late_obj = OUT / 'coachz_baseband.late.o'
-        run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_coachz_baseband.cpp', obj, late_obj])
-        obj = late_obj
-    if src.stem == 'QcomDwc3':
-        late_obj = OUT / 'QcomDwc3.late.o'
-        run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', '--globalize-symbol=__GLOBAL__sub_I_QcomDwc3.cpp', obj, late_obj])
         obj = late_obj
     if src.stem == 'ShengAudioService':
         # its metaclass registers late (AudioProbe.cpp publishService calls __GLOBAL__sub_I_ShengAudioService.cpp)
@@ -788,16 +758,13 @@ for src in (ROOT / 'kits/sheng/AdspProbe.cpp', ROOT / 'kits/sheng/FuxiAdspFirmwa
         obj = late_obj
     adsp_objs.append(obj)
 for src in ('QcomGlink.c', 'QcomMdt.c', 'QcomQmp.c', 'QcomSmem.c', 'QcomSmp2p.c', 'QcomQrtr.c', 'ShengQrtr.c', 'FatVolume.c',
-            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c', 'ShengBattmgr.c', 'ShengChargeAuth.c',
-            'ModemGlink.c', 'modem_qrtr.c', 'fuxi_modem.c', 'fuxi_ipa.c', 'FuxiModemFirmware.c', 'FuxiRpmhCorner.c', 'FuxiModemStubs.c'):
+            'ShengGpr.c', 'ShengAudioReach.c', 'FuxiCs35l41.c', 'FuxiAudioRt.c', 'ShengBattmgr.c', 'ShengChargeAuth.c', 'FuxiUcsiStubs.c'):
     src = ROOT / 'kits/sheng' / src
     obj = OUT / (src.stem + '.ios17.o')
-    # fuxi 2026-11-26: the modem adapter and the firmware reader use BSD's vnode/proc internals: kern_exec.o's command, not startup.o's.
-    srec = policy_record if src.name in ('fuxi_modem.c', 'fuxi_ipa.c', 'FuxiModemFirmware.c') else startup_record
-    sargs, scmd, k = srec['arguments'], [], 0
+    sargs, scmd, k = startup_record['arguments'], [], 0
     while k < len(sargs):
         a = sargs[k]
-        if a == srec['file']:
+        if a == startup_record['file']:
             scmd.append(str(src))
         elif a == '-o':
             scmd += ['-o', str(obj)]; k += 1
@@ -808,16 +775,9 @@ for src in ('QcomGlink.c', 'QcomMdt.c', 'QcomQmp.c', 'QcomSmem.c', 'QcomSmp2p.c'
         elif not a.startswith('-W'):
             scmd.append(a)
         k += 1
-    extra = [] if srec is policy_record else ['-I', str(ROOT / '.cache/xnu-work/osfmk')]
-    subprocess.run(scmd + ['-mgeneral-regs-only'] + extra + ['-I', str(ROOT / 'kits/sheng')],
-                   cwd=srec['directory'], check=True)
-    fuxi_modem_const_to_data(src.stem, obj)
+    subprocess.run(scmd + ['-mgeneral-regs-only', '-I', str(ROOT / '.cache/xnu-work/osfmk'), '-I', str(ROOT / 'kits/sheng')],
+                   cwd=startup_record['directory'], check=True)
     adsp_objs.append(obj)
-xdci_abi_s = Path('/home/xiaomi/sadnut-fuxi-local-20261103/device/package/AppleUSBXDCI_abi.s')
-if xdci_abi_s.exists():
-    xdci_abi_o = OUT / 'AppleUSBXDCI_abi.o'
-    run(['clang', '-target', 'arm64e-apple-ios17.7', '-c', str(xdci_abi_s), '-o', str(xdci_abi_o)])
-    adsp_objs.append(xdci_abi_o)
 print(f'adsp: {len(adsp_objs)} objects')
 
 # ---- archive ----

@@ -154,6 +154,13 @@ BridgeFile *gFiles;      // heap: the kernel __DATA has no room to spare (U50)
 struct BridgeDir {bool used; char path[160]; uint32_t cursor;};
 BridgeDir *gDirs;
 char *gRecent; uint32_t gRecentAt;   // 32 x 96: the last request summaries
+// fuxi 2026-11-27: the first requests (the config reads) come before the USB log attaches, so failures and opens for reading
+// are kept here (64 x 96) and printed when the PD goes quiet.
+char *gEarly; uint32_t gEarlyAt;
+bool inRegistry(const char *s) {   // the kernel has no strstr
+    for (; s && *s; ++s) if (!strncmp(s, "/registry/", 10)) return true;
+    return false;
+}
 uint8_t *gIndex; uint32_t gIndexLen;
 const char *const kRoot = "/private/var/ngpu/sensors";
 
@@ -451,12 +458,40 @@ void diagStart() {
     memset(gDiag, 0, sizeof(DiagStats));
     sheng_qrtr_diag_publish(diagCntlReceive, diagDataReceive);
 }
+// fuxi 2026-11-27: the masks went out when the root PD's diag client spoke (before sensorspd existed). The sensor PD's own
+// diag client registers later, so the feature answer and the masks go out again at the points the sensor PD is known alive.
+void diagResend(const char *why) {
+    if (!gDiagPeer) {IOLog("fuxi diag: no control peer yet (%s)\n", why); return;}
+    uint8_t p[8 + 8 + 2] = {};
+    uint32_t c = 8, l = sizeof p - 8, ml = 4, ours = (1u << 0) | (1u << 1) | (1u << 6);
+    memcpy(p, &c, 4); memcpy(p + 4, &l, 4); memcpy(p + 8, &ml, 4); memcpy(p + 12, &ours, 4);
+    diagCntlSend(p, sizeof p);
+    diagSendMasks();
+    // The DSP publishes its own DIAG servers (4097) and streams only to a client it has heard from; the poke in
+    // sheng_qrtr_dump_remote() used to run at the 30 s summary, after the USB log had already dropped.
+    sheng_qrtr_dump_remote();
+    IOLog("fuxi diag: features %#x and masks sent again to %u:%u (%s); cntl %u frames %u so far\n", ours, gDiagNode, gDiagPort, why,
+          gDiag ? gDiag->cntl : 0u, gDiag ? gDiag->frames : 0u);
+}
 void diagSummary() {
     if (!gDiag) return;
     sheng_qrtr_dump_remote();
     DiagStats &d = *gDiag;
     IOLog("fuxi diag: summary cntl %u frames %u f3 %u qsr %u logs %u events %u other %u printed %u\n", d.cntl, d.frames, d.f3, d.qsr,
           d.logs, d.events, d.other, d.printed);
+    // fuxi 2026-11-27: the sensor PD finishes its registry and goes quiet without publishing SNS (0x190), and 40 control frames
+    // brought no F3 message: either the feature mask never came, or it came before the masks could be heard. While nothing
+    // arrives, the peer, the feature answer and the masks are sent again at every summary (all features the DSP may use).
+    if (gDiagPeer && !d.frames && !d.f3) {
+        uint8_t p[8 + 8 + 2] = {};
+        uint32_t c = 8, l = sizeof p - 8, ml = 4, ours = (1u << 0) | (1u << 1) | (1u << 6);
+        memcpy(p, &c, 4); memcpy(p + 4, &l, 4); memcpy(p + 8, &ml, 4); memcpy(p + 12, &ours, 4);
+        diagCntlSend(p, sizeof p);
+        diagSendMasks();
+        IOLog("fuxi diag: no frames yet from %u:%u, features %#x and masks sent again\n", gDiagNode, gDiagPort, ours);
+    } else if (!gDiagPeer) {
+        IOLog("fuxi diag: no control peer yet\n");
+    }
     char line[300]; uint32_t k = 0;
     for (uint32_t i = 0; i < d.ssidSeen && k + 16 < sizeof line; ++i) k += snprintf(line + k, sizeof line - k, " %u:%u", d.ssid[i], d.ssidCount[i]);
     line[k] = 0;
@@ -588,6 +623,7 @@ void sensorWorker(void *, wait_result_t) {
     msg.size = 4096ULL;
     int rc = sheng_adsp_send(gFastrpcCh, reinterpret_cast<const uint8_t *>(&msg), sizeof(msg));
     IOLog("fuxi sensor fastrpc: sent ATTACH_SENSORS_PD ctx=0x12 rc=%d\n", rc);
+    diagResend("after ATTACH_SENSORS_PD");
     IOSleep(300);
 
     // 2. Register adsp_default_listener on handle=3 (adsp_listener_init2: method 3, in 0, out 0)
@@ -692,6 +728,7 @@ void sensorWorker(void *, wait_result_t) {
     gFiles = static_cast<BridgeFile *>(IOMalloc(sizeof(BridgeFile) * kBridgeFiles));
     gDirs = static_cast<BridgeDir *>(IOMalloc(sizeof(BridgeDir) * 8));
     gRecent = static_cast<char *>(IOMalloc(32 * 96));
+    gEarly = static_cast<char *>(IOMallocZero(64 * 96));
     gOv = static_cast<Overlay *>(IOMalloc(sizeof(Overlay) * kOverlays));
     if (!gFiles || !gDirs || !gRecent || !gOv) return;
     memset(gOv, 0, sizeof(Overlay) * kOverlays);
@@ -702,6 +739,7 @@ void sensorWorker(void *, wait_result_t) {
     uint8_t *req = va + 0x2000;
     uint8_t *pbuf = va + 0x4000;
     for (int iter = 0; ; ++iter) {
+        if (iter == 20 || iter == 200 || iter == 2000) diagResend(iter == 20 ? "request 20" : iter == 200 ? "request 200" : "request 2000");
         bool gotNext = false;
         for (int w = 0; w < 1500; ++w) {     // up to 30 s: sensors_pd also waits on its own timers
             if (gFastrpcRxCount > lastRx) {gotNext = true; lastRx = gFastrpcRxCount; break;}
@@ -711,6 +749,9 @@ void sensorWorker(void *, wait_result_t) {
             QcomQrtr *qq = sheng_qrtr_get();
             IOLog("fuxi sensor rev: quiet 30 s after %d requests, sns190=%d; the last ones:\n", iter, qq ? qcom_qrtr_find_remote(qq, kSnsClientSvc) : -2);
             for (uint32_t k = 0; k < 32; ++k) {const char *r = gRecent + ((gRecentAt + k) % 32) * 96; if (r[0]) IOLog("fuxi sensor   %s\n", r);}
+            static bool early;
+            if (gEarly && !early) {early = true; IOLog("fuxi sensor early: %u kept (failures and reads)\n", gEarlyAt);
+                for (uint32_t k = 0; k < gEarlyAt && k < 64; ++k) IOLog("fuxi sensor early %s\n", gEarly + k * 96);}
             memset(gRecent, 0, 32 * 96);
             diagSummary();
             static int looked;
@@ -952,6 +993,9 @@ void sensorWorker(void *, wait_result_t) {
             const bool writeSide = mid == 5 || mid == 24 || mid == 29 || mid == 30 || mid == 32 || mid == 33 || strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+');
             char *slot = gRecent + (gRecentAt++ % 32) * 96;
             snprintf(slot, 96, "#%d %s(%s,%s) h%u -> %u", iter, mid < 37u ? kNames[mid] : "?", path, mode, prim[0], prevRes);
+            // C4: the 64 slots filled with registry reads (all fine); now only failures and the reads outside the registry
+            const bool readOpen = (mid == 0 || mid == 19 || mid == 22 || mid == 26) && !writeSide && !inRegistry(path);
+            if (gEarly && gEarlyAt < 64 && (prevRes || readOpen)) memcpy(gEarly + (gEarlyAt++) * 96, slot, 96);
             if ((logged++ < 400 && mid != 4 && mid != 20) || prevRes || writeSide)
                 IOLog("fuxi sensor apps_std[%d]: %s(%s,%s) len=%u -> %u\n", iter, mid < 37u ? kNames[mid] : "?", path, mode, mid == 5 ? inLen[1] : 0u, prevRes);
         } else {

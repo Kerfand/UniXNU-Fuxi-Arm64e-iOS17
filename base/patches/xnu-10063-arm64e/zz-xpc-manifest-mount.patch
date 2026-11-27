@@ -1,10 +1,11 @@
 fuxi 2026-11-26: /private/var/ngpu/xpc over /System/Library/xpc (appended launchd manifest) and
-/private/var/ngpu/owner-apps/firmware over /usr/standalone/firmware (Mav16 baseband firmware).
+/private/var/ngpu/owner-apps/firmware over /usr/standalone/firmware (Mav16 baseband firmware), and (2026-11-28)
+/private/var/ngpu/p over /private/preboot (the personalized Mav16 firmware path the iPhone ABM stats).
 
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c	2026-11-26 20:39:03.894666937 +0800
 +++ b/bsd/kern/kern_exec.c	2026-11-26 20:39:03.905827437 +0800
-@@ -7781,6 +7781,23 @@
+@@ -7781,6 +7781,40 @@
  	native_gpu_addon_mount(p, scratch, 0xe00, apps_source, sizeof(apps_source), apps_point, sizeof(apps_point),
  	    "/Applications/Preferences.app", "/Applications/.fuxi-sideload", &apps_stage, &apps_status);
  	printf("fuxi sideload apps mount: stage %d status %d\n", apps_stage, apps_status);
@@ -25,6 +26,23 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +	native_gpu_addon_mount(p, scratch, 0xe00, fw_source, sizeof(fw_source), fw_point, sizeof(fw_point),
 +	    "/usr/standalone/firmware", "/usr/standalone/firmware/Baseband/Mav16/Info.plist", &fw_stage, &fw_status);
 +	printf("fuxi baseband firmware mount: stage %d status %d\n", fw_stage, fw_status);
++	/* zz-xpc-manifest-mount.patch, preboot part (fuxi 2026-11-28, D19/D20): the iPhone ABM stats
++	 * capabilities::radio::personalizedFirmwarePath(), <preboot>/<boot-manifest-hash>/usr/local/standalone/firmware/
++	 * Baseband/Mav16, and reported "Baseband Firmware Path Not Found"; this port's preboot has no such directory and is
++	 * read-only. The addon carries the Mav16 bundle under p/<hash>/... (its 159-character name limit); union over /private/preboot. */
++	static volatile int pb_stage = 0, pb_status = -1;
++	static const char pb_source[] = "/private/var/ngpu/p", pb_point[] = "/private/preboot";
++	native_gpu_addon_mount(p, scratch, 0xe00, pb_source, sizeof(pb_source), pb_point, sizeof(pb_point),
++	    "/private/preboot", "/private/preboot/1FBB9ACDD5C306ED7FA7867D859167CAAF78E7F7834A6845CFFC32D023AB5194D6AB82271C70B2822499F6A7B9C31276/usr/local/standalone/firmware/Baseband/Mav16/.fuxi-mount", &pb_stage, &pb_status);
++	printf("fuxi preboot firmware mount: stage %d status %d\n", pb_stage, pb_status);
++	/* D21 doubled the addon (84 MB, the boot image no longer loaded): p/ now carries only a placeholder that makes the
++	 * directory, and the Mav16 bundle already unpacked under owner-apps/firmware is mounted over it. */
++	static volatile int pf_stage = 0, pf_status = -1;
++	static const char pf_source[] = "/private/var/ngpu/owner-apps/firmware/Baseband/Mav16",
++	    pf_point[] = "/private/preboot/1FBB9ACDD5C306ED7FA7867D859167CAAF78E7F7834A6845CFFC32D023AB5194D6AB82271C70B2822499F6A7B9C31276/usr/local/standalone/firmware/Baseband/Mav16";
++	native_gpu_addon_mount(p, scratch, 0xe00, pf_source, sizeof(pf_source), pf_point, sizeof(pf_point),
++	    pf_point, "/private/preboot/1FBB9ACDD5C306ED7FA7867D859167CAAF78E7F7834A6845CFFC32D023AB5194D6AB82271C70B2822499F6A7B9C31276/usr/local/standalone/firmware/Baseband/Mav16/Info.plist", &pf_stage, &pf_status);
++	printf("fuxi preboot firmware bundle mount: stage %d status %d\n", pf_stage, pf_status);
  	/* fuxi probe (2026-11-13): what a readdir of the plug-in directory returns through the union (the audio server scans it with
  	 * opendir/readdir for "*.driver"). */
  	{

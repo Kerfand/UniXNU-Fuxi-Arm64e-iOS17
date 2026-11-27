@@ -1,0 +1,19 @@
+fuxi 2026-11-27: without CLPC, open the E->P edge (migration and steal) so an overloaded E cluster spills to idle P cores.
+
+diff --git a/osfmk/kern/sched_clutch.c b/osfmk/kern/sched_clutch.c
+--- a/osfmk/kern/sched_clutch.c	2026-11-27 17:02:14.015433900 +0800
++++ b/osfmk/kern/sched_clutch.c	2026-11-27 17:02:14.033466500 +0800
+@@ -4898,7 +4898,12 @@
+ 				/* E->P edge config */
+ 				bitmap_set(src_pset->foreign_psets, dst_cluster_id);
+ 				bitmap_clear(src_pset->native_psets, dst_cluster_id);
+-				sched_edge_config_set(src_cluster_id, dst_cluster_id, (sched_clutch_edge){.sce_migration_weight = 0, .sce_migration_allowed = 0, .sce_steal_allowed = 0});
++				sched_edge_config_set(src_cluster_id, dst_cluster_id, (sched_clutch_edge){.sce_migration_weight = 0, .sce_migration_allowed = 1, .sce_steal_allowed = 1});
++				/*
++				 * zz-amp-esteal.patch (fuxi 2026-11-27): upstream closes E->P and leaves the move up to CLPC, which this board
++				 * does not have. A3 showed the E cluster at 60-100% with the P cluster idle through the early boot, so threads
++				 * preferring E may migrate to, and be stolen by, the P cluster.
++				 */
+ 			}
+ 			bool clusters_local = (ml_get_die_id(src_cluster_id) == ml_get_die_id(dst_cluster_id));
+ 			if (clusters_local) {
